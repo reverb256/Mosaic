@@ -66,6 +66,7 @@ const { router: authRoutes, authLimiter, verifyToken } = require('./src/auth');
 const { setupSocketHandlers, sanitizeText } = require('./src/socketHandlers');
 const { startTunnel, stopTunnel, getTunnelStatus, registerProcessCleanup } = require('./src/tunnel');
 const { startDdns, getDdnsStatus, triggerDdnsNow } = require('./src/ddns');
+const mosiacRoutes = require('./src/routes-mosiac');
 const { initFcm } = require('./src/fcm');
 
 const app = express();
@@ -369,7 +370,7 @@ const fileUpload = multer({
 // 50+ concurrent users joining a stream event don't trip the limiter. (#5323)
 app.use('/api/auth', authRoutes);
 
-// Mosaic Identity routes
+// ── Mosiac Identity routes ───────────────────────────────
 app.use('/mosiac', require('./src/routes-mosiac'));
 
 // ── Push notification VAPID public key endpoint ──────────
