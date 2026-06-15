@@ -346,12 +346,8 @@ function initDatabase() {
   insertSetting.run('max_message_chars', '2000');         // max characters per message (200–100000)
   insertSetting.run('max_sound_kb', '1024');              // max soundboard file size in KB (256–10240)
   insertSetting.run('max_emoji_kb', '256');               // max emoji file size in KB (64–1024)
-<<<<<<< HEAD
   insertSetting.run('max_sticker_kb', '1024');            // max sticker file size in KB (256–10240) — #5392
-||||||| 984ca1d
-=======
   insertSetting.run('max_proxy_avatar_kb', '256');
->>>>>>> pr-207-forum
   insertSetting.run('setup_wizard_complete', 'false');   // first-time admin setup wizard
   insertSetting.run('update_banner_admin_only', 'false'); // hide update banner from non-admins
   insertSetting.run('session_duration_days', '0');       // login token lifetime in days; 0 = never expire (default for new installs, #5391). Existing installs that were seeded with '7' keep that value until the admin changes it.
@@ -658,16 +654,8 @@ function initDatabase() {
     const channelMod = insertRole.run('Channel Mod', 25, 'channel', '#2ecc71');
     const channelModPerms = [
       'kick_user', 'mute_user', 'delete_message', 'pin_message',
-<<<<<<< HEAD
-      'manage_sub_channels', 'rename_sub_channel', 'delete_lower_messages',
-      'upload_files', 'use_voice', 'view_history', 'view_channel_members', 'manage_music_queue',
-||||||| 984ca1d
-      'manage_sub_channels', 'rename_sub_channel', 'delete_lower_messages',
-      'upload_files', 'use_voice', 'view_history', 'manage_music_queue',
-=======
       'manage_sub_channels', 'rename_sub_channel', 'create_forum_posts', 'delete_lower_messages',
-      'upload_files', 'use_voice', 'view_history', 'manage_music_queue',
->>>>>>> pr-207-forum
+      'upload_files', 'use_voice', 'view_history', 'view_channel_members', 'manage_music_queue',
       'delete_own_messages', 'edit_own_messages'
     ];
     channelModPerms.forEach(p => insertPerm.run(channelMod.lastInsertRowid, p));
@@ -1049,7 +1037,6 @@ function initDatabase() {
     db.exec("ALTER TABLE channels ADD COLUMN voice_bitrate INTEGER DEFAULT 0");
   }
 
-<<<<<<< HEAD
   // ── Migration: per-channel AFK sub-channel ────────────
   try {
     db.prepare("SELECT afk_sub_code FROM channels LIMIT 0").get();
@@ -1076,8 +1063,7 @@ function initDatabase() {
     db.exec("ALTER TABLE users ADD COLUMN encrypted_servers TEXT DEFAULT NULL");
   }
 
-||||||| 984ca1d
-=======
+  // ── Migration: proxies table (forum/identity proxy posts) ──
   db.exec(`
     CREATE TABLE IF NOT EXISTS proxies (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1111,8 +1097,6 @@ function initDatabase() {
   } catch {
     db.exec("ALTER TABLE messages ADD COLUMN proxy_avatar TEXT DEFAULT NULL");
   }
-
->>>>>>> pr-207-forum
   // ── Migration: grant use_tts to all auto-assign roles (default ON) ──
   try {
     const autoAssignRoles = db.prepare('SELECT id FROM roles WHERE auto_assign = 1').all();
