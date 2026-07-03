@@ -1120,4 +1120,8 @@ function getDb() {
   return db;
 }
 
-module.exports = { initDatabase, getDb };
+function close() {
+  if (db) { db.close(); db = null; }
+}
+
+module.exports = { initDatabase, getDb, close };
