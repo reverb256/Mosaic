@@ -1,7 +1,7 @@
 ﻿{
-  "name": "haven",
+  "name": "mosiac",
   "version": "3.32.0",
-  "description": "Haven - self-hosted private chat for your server, your rules",
+  "description": "Mosiac - sovereign identity + communications platform (forked from Haven)",
   "license": "AGPL-3.0",
   "main": "server.js",
   "engines": {
@@ -12,6 +12,7 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "@simplewebauthn/server": "^9.0.0",
     "adm-zip": "^0.5.16",
     "archiver": "^7.0.1",
     "bcryptjs": "^2.4.3",
@@ -26,6 +27,9 @@
     "otpauth": "^9.5.0",
     "qrcode": "^1.5.4",
     "socket.io": "^4.8.1",
+    "tweetnacl": "^1.0.3",
+    "tweetnacl-util": "^0.15.1",
+    "uuid": "^14.0.0",
     "web-push": "^3.6.7",
     "yauzl": "^3.4.0"
   },
@@ -33,7 +37,8 @@
     "bn.js": ">=5.2.3",
     "axios": ">=1.8.2"
   },
-  "devDependencies": {
-    "innosetup-compiler": "^6.3.1"
+  "optionalDependencies": {
+    "bufferutil": "^6.0.5",
+    "utf-8-validate": "^6.0.5"
   }
 }
