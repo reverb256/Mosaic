@@ -146,7 +146,7 @@ describe('Database Module', () => {
   });
 
   describe('Identity CRUD', () => {
-    it.skip('should create and retrieve an identity', () => {
+    it('should create and retrieve an identity', () => {
       const kp = identity.generateKeyPair();
       const result = database.createIdentity({ pubkey: kp.pubkey, privkey: kp.privkey, label: 'test' });
 
@@ -159,7 +159,7 @@ describe('Database Module', () => {
       assert.equal(fetched.label, 'test');
     });
 
-    it.skip('should get identity by pubkey', () => {
+    it('should get identity by pubkey', () => {
       const kp = identity.generateKeyPair();
       database.createIdentity({ pubkey: kp.pubkey, privkey: kp.privkey });
       const fetched = database.getIdentityByPubkey(kp.pubkey);
@@ -167,19 +167,19 @@ describe('Database Module', () => {
       assert.equal(fetched.pubkey, kp.pubkey);
     });
 
-    it.skip('should list all identities', () => {
+    it('should list all identities', () => {
       const list = database.listIdentities();
       assert.ok(Array.isArray(list));
       assert.ok(list.length >= 2); // we created at least 2
     });
 
-    it.skip('should have the first created identity as current', () => {
+    it('should have the first created identity as current', () => {
       const current = database.getCurrentIdentity();
       assert.ok(current);
       assert.equal(current.is_current, 1);
     });
 
-    it.skip('should switch current identity', () => {
+    it('should switch current identity', () => {
       const list = database.listIdentities();
       const target = list[list.length - 1];
       database.setCurrentIdentity(target.id);
@@ -190,7 +190,7 @@ describe('Database Module', () => {
   });
 
   describe('Passkey CRUD', () => {
-    it.skip('should save and retrieve a passkey', () => {
+    it('should save and retrieve a passkey', () => {
       const ident = database.getCurrentIdentity();
       const cred = { credentialID: 'test-id', credentialPublicKey: 'test-pk', counter: 0 };
 
@@ -209,26 +209,26 @@ describe('Database Module', () => {
       assert.deepStrictEqual(fetched.transports, ['internal', 'usb']);
     });
 
-    it.skip('should list passkeys for an identity', () => {
+    it('should list passkeys for an identity', () => {
       const ident = database.getCurrentIdentity();
       const keys = database.listPasskeys(ident.id);
       assert.ok(keys.length >= 1);
     });
 
-    it.skip('should update passkey counter', () => {
+    it('should update passkey counter', () => {
       database.updatePasskeyCounter('test-passkey-1', 42);
       const fetched = database.getPasskey('test-passkey-1');
       assert.equal(fetched.counter, 42);
     });
 
-    it.skip('should delete a passkey', () => {
+    it('should delete a passkey', () => {
       database.deletePasskey('test-passkey-1');
       assert.strictEqual(database.getPasskey('test-passkey-1'), null);
     });
   });
 
   describe('Contact CRUD', () => {
-    it.skip('should add and retrieve contacts', () => {
+    it('should add and retrieve contacts', () => {
       const kp = identity.generateKeyPair();
       database.addContact({ pubkey: kp.pubkey, label: 'Alice', discoveredVia: 'qr' });
 
@@ -237,7 +237,7 @@ describe('Database Module', () => {
       assert.equal(contact.label, 'Alice');
     });
 
-    it.skip('should upsert contacts (update label)', () => {
+    it('should upsert contacts (update label)', () => {
       const kp = identity.generateKeyPair();
       database.addContact({ pubkey: kp.pubkey, label: 'Original' });
       database.addContact({ pubkey: kp.pubkey, label: 'Updated' });
@@ -246,12 +246,12 @@ describe('Database Module', () => {
       assert.equal(contact.label, 'Updated');
     });
 
-    it.skip('should list all contacts', () => {
+    it('should list all contacts', () => {
       const list = database.listContacts();
       assert.ok(Array.isArray(list));
     });
 
-    it.skip('should delete a contact', () => {
+    it('should delete a contact', () => {
       const kp = identity.generateKeyPair();
       database.addContact({ pubkey: kp.pubkey });
       database.deleteContact(kp.pubkey);
@@ -260,7 +260,7 @@ describe('Database Module', () => {
   });
 
   describe('Session CRUD', () => {
-    it.skip('should create and retrieve valid sessions', () => {
+    it('should create and retrieve valid sessions', () => {
       const ident = database.getCurrentIdentity();
       database.createSession({
         tokenHash: 'test-token-hash',
@@ -274,7 +274,7 @@ describe('Database Module', () => {
       assert.equal(session.identity_id, ident.id);
     });
 
-    it.skip('should delete sessions', () => {
+    it('should delete sessions', () => {
       database.deleteSession('test-token-hash');
       assert.strictEqual(database.getSession('test-token-hash'), null);
     });
@@ -340,7 +340,7 @@ describe('Server', () => {
     const tmpDir = path.join(os.tmpdir(), `mosiac-server-test-${Date.now()}`);
     testDbPath = path.join(tmpDir, 'mosiac.db');
     fs.mkdirSync(tmpDir, { recursive: true });
-    process.env.MOSIAC_DATA_DIR = tmpDir;
+    process.env.HAVEN_DATA_DIR = tmpDir;
     process.env.MOSIAC_RP_ID = 'localhost';
     process.env.MOSIAC_ORIGIN = `http://localhost:${PORT}`;
     process.env.PORT = String(PORT);

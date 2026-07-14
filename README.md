@@ -5,6 +5,7 @@
 [![GitHub](https://img.shields.io/badge/repo-reverb256/Mosiac-blue)](https://github.com/reverb256/Mosiac)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-green)](LICENSE)
 [![Status](https://img.shields.io/badge/status-Phase%201%20(Identity)-orange)](https://github.com/reverb256/Mosiac/issues/1)
+[![CI](https://github.com/reverb256/Mosiac/actions/workflows/ci.yml/badge.svg?branch=mosiac)](https://github.com/reverb256/Mosiac/actions/workflows/ci.yml)
 
 Mosiac is a fork of [Haven](https://github.com/ancsemi/Haven) (the self-hosted Discord alternative) that adds
 cryptographic identity (Ed25519 + Passkey), customizable MySpace-style profiles, activity feeds, pubkey-based

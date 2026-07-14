@@ -7,9 +7,9 @@
  * force-adds files, or pushes to a public repo.
  *
  * Locations:
- *   Windows : %APPDATA%\Haven\          (e.g. C:\Users\you\AppData\Roaming\Haven)
- *   Linux   : ~/.haven/
- *   macOS   : ~/.haven/
+ *   Windows : %APPDATA%\Mosiac\          (e.g. C:\Users\you\AppData\Roaming\Mosiac)
+ *   Linux   : ~/.mosiac/
+ *   macOS   : ~/.mosiac/
  *
  * Override : set HAVEN_DATA_DIR env var to any absolute path.
  */
@@ -28,20 +28,18 @@ function getDataDir() {
 
   let base;
   if (process.platform === 'win32') {
-    // %APPDATA% → C:\Users\<user>\AppData\Roaming
-    base = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Mosiac');
+    base = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
   } else {
-    // Linux / macOS → ~/.haven
-    base = path.join(os.homedir(), '.mosiac');
+    base = os.homedir();
   }
-
+  base = path.join(base, '.mosiac');
   fs.mkdirSync(base, { recursive: true });
   return base;
 }
 
 // Pre-computed paths for convenience
 const DATA_DIR     = getDataDir();
-const DB_PATH      = path.join(DATA_DIR, 'haven.db');
+const DB_PATH      = path.join(DATA_DIR, 'mosiac.db');
 const ENV_PATH     = path.join(DATA_DIR, '.env');
 const CERTS_DIR    = path.join(DATA_DIR, 'certs');
 const UPLOADS_DIR  = path.join(DATA_DIR, 'uploads');

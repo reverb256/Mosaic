@@ -1170,4 +1170,126 @@ function getIdentityDb() {
   return db;
 }
 
-module.exports = { initDatabase, getDb, close, getIdentityDb };
+// ── Identity CRUD ──────────────────────────────────────────
+
+function createIdentity({ pubkey, privkey, label }) {
+  const result = db.prepare(`
+    INSERT INTO identities (pubkey, privkey, label, is_current)
+    VALUES (?, ?, ?, (SELECT COUNT(*) = 0 FROM identities))
+  `).run(pubkey, privkey, label || null);
+  return getIdentity(result.lastInsertRowid);
+}
+
+function getIdentity(id) {
+  return db.prepare('SELECT * FROM identities WHERE id = ?').get(id);
+}
+
+function getIdentityByPubkey(pubkey) {
+  return db.prepare('SELECT * FROM identities WHERE pubkey = ?').get(pubkey);
+}
+
+function listIdentities() {
+  return db.prepare('SELECT * FROM identities ORDER BY created_at ASC').all();
+}
+
+function getCurrentIdentity() {
+  return db.prepare('SELECT * FROM identities WHERE is_current = 1').get();
+}
+
+function setCurrentIdentity(id) {
+  db.prepare('UPDATE identities SET is_current = 0 WHERE is_current = 1').run();
+  db.prepare('UPDATE identities SET is_current = 1 WHERE id = ?').run(id);
+}
+
+// ── Passkey CRUD ───────────────────────────────────────────
+
+function savePasskey({ id, identityId, credential, transports, nickname }) {
+  db.prepare(`
+    INSERT INTO passkeys (id, identity_id, credential, transports, nickname)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      credential = excluded.credential,
+      transports = excluded.transports,
+      nickname   = excluded.nickname
+  `).run(id, identityId, JSON.stringify(credential), JSON.stringify(transports || []), nickname || null);
+}
+
+function getPasskey(id) {
+  const row = db.prepare('SELECT * FROM passkeys WHERE id = ?').get(id);
+  if (!row) return null;
+  return {
+    ...row,
+    credential: JSON.parse(row.credential),
+    transports: row.transports ? JSON.parse(row.transports) : null,
+  };
+}
+
+function listPasskeys(identityId) {
+  return db.prepare('SELECT * FROM passkeys WHERE identity_id = ? ORDER BY created_at ASC').all(identityId)
+    .map(row => ({
+      ...row,
+      credential: JSON.parse(row.credential),
+      transports: row.transports ? JSON.parse(row.transports) : null,
+    }));
+}
+
+function updatePasskeyCounter(id, counter) {
+  db.prepare("UPDATE passkeys SET counter = ?, last_used_at = datetime('now') WHERE id = ?").run(counter, id);
+}
+
+function deletePasskey(id) {
+  db.prepare('DELETE FROM passkeys WHERE id = ?').run(id);
+}
+
+// ── Contact CRUD ───────────────────────────────────────────
+
+function addContact({ pubkey, label, discoveredVia }) {
+  db.prepare(`
+    INSERT INTO contacts (pubkey, label, discovered_via)
+    VALUES (?, ?, ?)
+    ON CONFLICT(pubkey) DO UPDATE SET
+      label = COALESCE(excluded.label, contacts.label),
+      last_seen_at = datetime('now')
+  `).run(pubkey, label || null, discoveredVia || 'qr');
+}
+
+function getContact(pubkey) {
+  const row = db.prepare('SELECT * FROM contacts WHERE pubkey = ?').get(pubkey);
+  return row || null;
+}
+
+function listContacts() {
+  return db.prepare('SELECT * FROM contacts ORDER BY first_seen_at ASC').all();
+}
+
+function deleteContact(pubkey) {
+  db.prepare('DELETE FROM contacts WHERE pubkey = ?').run(pubkey);
+}
+
+// ── Session CRUD ───────────────────────────────────────────
+
+function createSession({ tokenHash, identityId, pubkey, ttlSeconds }) {
+  db.prepare(`
+    INSERT INTO sessions (token_hash, identity_id, pubkey, expires_at)
+    VALUES (?, ?, ?, datetime('now', '+' || ? || ' seconds'))
+  `).run(tokenHash, identityId, pubkey, ttlSeconds);
+}
+
+function getSession(tokenHash) {
+  const row = db.prepare('SELECT * FROM sessions WHERE token_hash = ?').get(tokenHash);
+  return row || null;
+}
+
+function deleteSession(tokenHash) {
+  db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
+}
+
+module.exports = {
+  initDatabase, getDb, close, getIdentityDb,
+  createIdentity, getIdentity, getIdentityByPubkey,
+  listIdentities, getCurrentIdentity, setCurrentIdentity,
+  savePasskey, getPasskey, listPasskeys,
+  updatePasskeyCounter, deletePasskey,
+  addContact, getContact, listContacts, deleteContact,
+  createSession, getSession, deleteSession,
+};

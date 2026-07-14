@@ -1020,7 +1020,7 @@ app.get('/api/health', (req, res) => {
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Cross-Origin-Resource-Policy', 'cross-origin');
   res.set('Vary', 'Origin');
-  let name = process.env.SERVER_NAME || 'Haven';
+  let name = process.env.SERVER_NAME || 'Mosaic';
   let icon = null;
   let fingerprint = null;
   try {
@@ -4761,7 +4761,7 @@ server.timeout = 120000;           // 2 min socket inactivity timeout (resets on
 server.listen(PORT, HOST, () => {
   console.log(`
 â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•╗
-║       ðŸ   HAVEN is running               ║
+║       🏠  Mosaic is running              ║
 â• â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•╣
 ║  Name:    ${(process.env.SERVER_NAME || 'Haven').padEnd(29)}║
 ║  Local:   ${protocol}://localhost:${PORT}             ║

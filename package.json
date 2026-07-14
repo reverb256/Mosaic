@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "mosiac",
   "version": "3.32.0",
   "description": "Mosiac - sovereign identity + communications platform (forked from Haven)",
@@ -9,7 +9,9 @@
   },
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "test": "node --test test/*.test.js",
+    "test:watch": "node --watch --test test/*.test.js"
   },
   "dependencies": {
     "@simplewebauthn/server": "^9.0.0",
@@ -26,10 +28,6 @@
     "multer": "^2.0.2",
     "otpauth": "^9.5.0",
     "qrcode": "^1.5.4",
-    "@simplewebauthn/server": "^9.0.0",
-    "tweetnacl": "^1.0.3",
-    "tweetnacl-util": "^0.15.1",
-    "uuid": "^9.0.0",
     "socket.io": "^4.8.1",
     "tweetnacl": "^1.0.3",
     "tweetnacl-util": "^0.15.1",
