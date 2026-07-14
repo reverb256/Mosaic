@@ -3661,7 +3661,7 @@ app.post('/api/import/discord/guild-channels', express.json(), async (req, res) 
         name: c.name,
         topic: c.topic || '',
         category: (c.parent_id && categories[c.parent_id]) || null,
-        type: c.type === 5 ? 'announcement' : c.type === 15 ? 'forum' : c.type === 16 ? 'media' : 'text',
+        type: c.type === 5 ? 'announcement' : c.type === 16 ? 'media' : 'text',
         // Forum tags (available on type 15 and 16)
         tags: Array.isArray(c.available_tags) ? c.available_tags.map(t => ({ id: t.id, name: t.name })) : []
       }));
@@ -3675,7 +3675,7 @@ app.post('/api/import/discord/guild-channels', express.json(), async (req, res) 
       if (active.threads) threads.push(...active.threads);
     } catch {}
 
-    // Archived threads per text/forum/announcement channel (up to 100 per channel)
+    // Archived threads per text/announcement channel (up to 100 per channel)
     for (const ch of channelsList) {
       try {
         const archived = await discordApiFetch(`/channels/${ch.id}/threads/archived/public?limit=100`, discordToken);

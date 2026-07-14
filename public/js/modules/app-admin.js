@@ -2963,7 +2963,7 @@ async _importPickGuild(guild) {
     let lastCategory = null;
 
     // Type icons for visual distinction
-    const typeIcons = { text: '#', announcement: '📢', forum: '💬', media: '🖼️', thread: '🧵' };
+    const typeIcons = { text: '#', announcement: '📢', media: '🖼️', thread: '🧵' };
 
     // Render channels grouped by category
     data.channels.forEach(ch => {
