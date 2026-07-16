@@ -40,7 +40,10 @@
     "axios": ">=1.8.2"
   },
   "optionalDependencies": {
+    "bs58": "^6.0.0",
     "bufferutil": "^6.0.5",
-    "utf-8-validate": "^6.0.5"
+    "multicast-dns": "^7.2.5",
+    "utf-8-validate": "^6.0.5",
+    "ws": "^8.21.0"
   }
 }

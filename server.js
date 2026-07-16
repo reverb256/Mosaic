@@ -69,6 +69,10 @@ const { startDdns, getDdnsStatus, triggerDdnsNow } = require('./src/ddns');
 const mosiacRoutes = require('./src/routes-mosiac');
 const { initFcm } = require('./src/fcm');
 
+// ── Mosiac modules (feature-gated) ──────────────────────────
+const features = require('./src/features');
+const mosiacLogger = (msg) => console.log(`[mosiac] ${msg}`);
+
 const app = express();
 
 const UPLOAD_PATH_RE = /\/uploads\/((?!(?:deleted-attachments|stickers)\/)(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+)/g;
@@ -370,8 +374,11 @@ const fileUpload = multer({
 // 50+ concurrent users joining a stream event don't trip the limiter. (#5323)
 app.use('/api/auth', authRoutes);
 
-// ── Mosiac Identity routes ───────────────────────────────
-app.use('/mosiac', require('./src/routes-mosiac'));
+// ── Mosiac Identity routes (feature-gated) ─────────────────
+if (features.isIdentityEnabled()) {
+  app.use('/mosiac', require('./src/routes-mosiac'));
+  mosiacLogger('routes mounted at /mosiac/*');
+}
 
 // ── Push notification VAPID public key endpoint ──────────
 app.get('/api/push/vapid-key', (req, res) => {
@@ -4083,6 +4090,51 @@ const io = new Server(server, {
 // Initialize
 const db = initDatabase();
 
+// ── Mosiac initialization (feature-gated) ────────────────────
+if (features.isIdentityEnabled()) {
+  // Event bus — wraps write operations in signed events
+  try {
+    const events = require('./src/events');
+    const eventLog = require('./src/event-log');
+    mosiacLogger('event bus initialized');
+  } catch (e) { mosiacLogger(`event bus error: ${e.message}`); }
+
+  // Moderation label system
+  if (features.isModerationEnabled()) {
+    try {
+      require('./src/labels');
+      mosiacLogger('moderation labels ready');
+    } catch (e) { mosiacLogger(`moderation error: ${e.message}`); }
+  }
+}
+
+// Gossip / P2P (requires event bus — starts in background after server listens)
+let gossipServer = null;
+function startMosiacServices() {
+  if (!features.isIdentityEnabled()) return;
+  if (features.isFeedsEnabled()) {
+    try {
+      const gossip = require('./src/gossip');
+      gossipServer = new gossip.GossipServer(server);
+      mosiacLogger('gossip server started on WebSocket');
+    } catch (e) { mosiacLogger(`gossip server error: ${e.message}`); }
+  }
+  if (features.isFeedsEnabled()) {
+    try {
+      const lan = require('./src/transport-lan');
+      const { getDb } = require('./src/database');
+      const current = getDb().prepare('SELECT pubkey FROM identities WHERE is_current = 1').get();
+      lan.start({ port: PORT, pubkey: current?.pubkey || 'unknown' });
+      mosiacLogger('mDNS discovery started (_mosiac._tcp)');
+    } catch (e) { mosiacLogger(`mDNS not available: ${e.message} (install bonjour-service for mDNS)`); }
+  }
+}
+
+// Log enabled Mosiac features at boot
+if (features.isIdentityEnabled()) {
+  mosiacLogger(`features: ${features.getEnabledFeatures().join(', ')}`);
+}
+
 // (#5335) Seed starter stickers now that the DB is ready.
 try { seedStarterStickers(); } catch {}
 
@@ -4772,6 +4824,9 @@ server.listen(PORT, HOST, () => {
   // Tunnel is now started manually via the admin panel button (no auto-start)
   // Dynamic DNS auto-updater (kicks in only if DDNS_PROVIDER is set in .env)
   try { startDdns(); } catch (err) { console.warn('[ddns] failed to start:', err && err.message); }
+
+  // Mosiac background services (gossip, mDNS)
+  try { startMosiacServices(); } catch (err) { console.warn('[mosiac] background services error:', err && err.message); }
 });
 
 function gracefulShutdown(signal) {

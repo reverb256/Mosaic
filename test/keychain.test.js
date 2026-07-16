@@ -266,9 +266,11 @@ describe('Keychain Module', () => {
       const kp = keychain.mnemonicToKeypair(mnemonic);
 
       const enc = keychain.encryptPrivkey(kp.privkey, 'my-pass');
-      // Flip one character in the encrypted data
-      const tampered = enc.encrypted.slice(0, -1) +
-        (enc.encrypted.slice(-1) === 'A' ? 'B' : 'A');
+      // Decode, modify a byte in the middle, re-encode (reliable method,
+      // unlike flipping trailing Base64URL chars which may be padding)
+      const buf = keychain.fromBase64URL(enc.encrypted);
+      buf[Math.floor(buf.length / 2)] ^= 0xFF; // flip all bits in middle byte
+      const tampered = keychain.toBase64URL(buf);
 
       assert.throws(() => {
         keychain.decryptPrivkey(tampered, enc.iv, enc.tag, 'my-pass');

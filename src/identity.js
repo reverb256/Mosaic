@@ -198,6 +198,38 @@ function parsePubkeyURI(uri) {
   }
 }
 
+// ─── DID key export (atproto-compatible) ────────────────────
+
+/**
+ * Encode a Mosiac native pubkey as an atproto-compatible did:key string.
+ *
+ * did:key uses multicodec + multibase (base58btc). The Ed25519 raw public
+ * key bytes are prefixed with the Ed25519 varint (0x01 0xed), then encoded
+ * as base58btc with a leading 'z' (multibase indicator).
+ *
+ * Returns null if the optional `bs58` dependency is not installed.
+ *
+ * @param {string} pubkey - Base64URL-encoded Ed25519 public key (native format)
+ * @returns {string|null} e.g. "did:key:zQ3sh..." or null
+ */
+function did(pubkey) {
+  try {
+    const bs58 = require('bs58');
+    // bs58 v6 exports { default: { encode } }
+    const encode = bs58.default ? bs58.default.encode : bs58.encode;
+    const bytes = fromBase64URL(pubkey);
+    // Multicodec prefix for Ed25519 public key: 0xed (as unsigned varint)
+    // varint encoding of 0xed: [0x01, 0xed] (because 0xed > 0x7f, so low 7 bits
+    // go into byte 0 with continuation bit set, remaining bits in byte 1)
+    const prefix = Buffer.from([0x01, 0xed]);
+    const prefixedBytes = Buffer.concat([prefix, bytes]);
+    // base58btc (multibase 'z' prefix)
+    return 'did:key:z' + encode(prefixedBytes);
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
   generateKeyPair,
   derivePublicKey,
@@ -213,4 +245,5 @@ module.exports = {
   fromBase64URL,
   toHex,
   fromHex,
+  did,
 };

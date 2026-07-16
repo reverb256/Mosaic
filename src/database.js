@@ -1102,6 +1102,40 @@ function initDatabase() {
     db.exec("ALTER TABLE roles ADD COLUMN icon TEXT DEFAULT NULL");
   }
 
+  // ── Mosiac Phase 5: Event Log ──────────────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS event_log (
+      pubkey      TEXT    NOT NULL,
+      seq         INTEGER NOT NULL,
+      event_hash  TEXT    NOT NULL,
+      prev_hash   TEXT,
+      event_type  TEXT    NOT NULL,
+      payload     TEXT    NOT NULL,
+      timestamp   INTEGER NOT NULL,
+      signature   TEXT    NOT NULL,
+      created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (pubkey, seq)
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_log_pubkey_ts ON event_log(pubkey, timestamp DESC);
+  `);
+
+  // ── Mosiac Phase 6: P2P peer connections ───────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS peer_connections (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      peer_pubkey     TEXT    NOT NULL UNIQUE,
+      peer_url        TEXT    NOT NULL,
+      discovered_via  TEXT    DEFAULT 'gossip',
+      label           TEXT,
+      last_seen_at    TEXT,
+      first_seen_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+      is_active       INTEGER NOT NULL DEFAULT 0,
+      cursor_pubkey   TEXT,
+      cursor_seq      INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_peer_connections_active ON peer_connections(is_active);
+  `);
+
   // ── Migration: bot_commands table for extensible slash commands ──
   db.exec(`
     CREATE TABLE IF NOT EXISTS bot_commands (
@@ -1149,6 +1183,99 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor_id);
     CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action);
+  `);
+
+  // ── Mosiac: Moderation Label System tables ────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS moderation_labels (
+      cid         TEXT    PRIMARY KEY,
+      uri         TEXT    NOT NULL,
+      val         TEXT    NOT NULL,
+      src         TEXT    NOT NULL,
+      neg         INTEGER NOT NULL DEFAULT 0,
+      note        TEXT,
+      expires_at  TEXT    NOT NULL,
+      sig         TEXT    NOT NULL,
+      created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS moderation_reports (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      uri          TEXT    NOT NULL,
+      reason_type  TEXT    NOT NULL,
+      reason       TEXT,
+      reported_by  TEXT    NOT NULL,
+      created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS moderation_appeals (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      label_cid    TEXT    NOT NULL,
+      pubkey       TEXT    NOT NULL,
+      reason       TEXT    NOT NULL,
+      evidence     TEXT,
+      status       TEXT    NOT NULL DEFAULT 'pending',
+      resolution   TEXT,
+      created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mod_labels_uri ON moderation_labels(uri);
+    CREATE INDEX IF NOT EXISTS idx_mod_labels_src ON moderation_labels(src);
+    CREATE INDEX IF NOT EXISTS idx_mod_labels_expires ON moderation_labels(expires_at);
+    CREATE INDEX IF NOT EXISTS idx_mod_reports_uri ON moderation_reports(uri);
+    CREATE INDEX IF NOT EXISTS idx_mod_appeals_pubkey ON moderation_appeals(pubkey);
+    CREATE INDEX IF NOT EXISTS idx_mod_appeals_label ON moderation_appeals(label_cid);
+  `);
+
+  // ── Mosiac Phase 2-4: Profiles, Feeds, Connections tables ──
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS profiles (
+      pubkey      TEXT    PRIMARY KEY REFERENCES identities(pubkey),
+      manifest    TEXT    NOT NULL,
+      published   INTEGER NOT NULL DEFAULT 0,
+      updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS feed_posts (
+      cid         TEXT    PRIMARY KEY,
+      pubkey      TEXT    NOT NULL REFERENCES identities(pubkey),
+      content     TEXT    NOT NULL,
+      created_at  TEXT    NOT NULL,
+      signature   TEXT    NOT NULL,
+      reply_to    TEXT,
+      indexed_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS feed_reactions (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      cid         TEXT    NOT NULL REFERENCES feed_posts(cid),
+      pubkey      TEXT    NOT NULL REFERENCES identities(pubkey),
+      type        TEXT    NOT NULL,
+      created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(cid, pubkey, type)
+    );
+
+    CREATE TABLE IF NOT EXISTS follows (
+      follower    TEXT    NOT NULL REFERENCES identities(pubkey),
+      followee    TEXT    NOT NULL,
+      created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (follower, followee)
+    );
+
+    CREATE TABLE IF NOT EXISTS blocked (
+      blocker     TEXT    NOT NULL REFERENCES identities(pubkey),
+      blockee     TEXT    NOT NULL,
+      reason      TEXT,
+      created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (blocker, blockee)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_feed_posts_pubkey ON feed_posts(pubkey);
+    CREATE INDEX IF NOT EXISTS idx_feed_posts_created ON feed_posts(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_feed_reactions_cid ON feed_reactions(cid);
+    CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows(follower);
+    CREATE INDEX IF NOT EXISTS idx_follows_followee ON follows(followee);
+    CREATE INDEX IF NOT EXISTS idx_blocked_blocker ON blocked(blocker);
   `);
 
   return db;
@@ -1284,6 +1411,85 @@ function deleteSession(tokenHash) {
   db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
 }
 
+// ── Mosiac Phase 5: Event Log CRUD ──────────────────────────
+
+function getLatestSeq(pubkey) {
+  const row = db.prepare('SELECT MAX(seq) as seq FROM event_log WHERE pubkey = ?').get(pubkey);
+  return (row && row.seq) || 0;
+}
+
+function getLatestHash(pubkey) {
+  const row = db.prepare('SELECT event_hash FROM event_log WHERE pubkey = ? ORDER BY seq DESC LIMIT 1').get(pubkey);
+  return (row && row.event_hash) || null;
+}
+
+function getEvents(pubkey, fromSeq, limit) {
+  return db.prepare(
+    'SELECT * FROM event_log WHERE pubkey = ? AND seq > ? ORDER BY seq ASC LIMIT ?'
+  ).all(pubkey, fromSeq || 0, limit || 100);
+}
+
+function appendEvent(pubkey, event) {
+  const result = db.prepare(`
+    INSERT INTO event_log (pubkey, seq, event_hash, prev_hash, event_type, payload, timestamp, signature)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    pubkey,
+    event.seq,
+    event.event_hash,
+    event.prev_hash || null,
+    event.type,
+    JSON.stringify(event.payload),
+    event.timestamp,
+    event.signature
+  );
+  return result.changes > 0 ? event.seq : null;
+}
+
+function getEventsSince(pubkey, sinceTimestamp) {
+  const row = db.prepare(
+    'SELECT * FROM event_log WHERE pubkey = ? AND timestamp >= ? ORDER BY seq ASC'
+  ).all(pubkey, sinceTimestamp);
+  return row || [];
+}
+
+function pruneEvents(beforeTimestamp) {
+  const result = db.prepare('DELETE FROM event_log WHERE timestamp < ?').run(beforeTimestamp);
+  return result.changes;
+}
+
+// ── Mosiac Phase 6: Peer Connection CRUD ────────────────────
+
+function savePeerConnection({ peerPubkey, peerUrl, discoveredVia, label }) {
+  db.prepare(`
+    INSERT INTO peer_connections (peer_pubkey, peer_url, discovered_via, label, is_active, last_seen_at)
+    VALUES (?, ?, ?, ?, 1, datetime('now'))
+    ON CONFLICT(peer_pubkey) DO UPDATE SET
+      peer_url = excluded.peer_url,
+      is_active = 1,
+      last_seen_at = datetime('now'),
+      label = COALESCE(excluded.label, peer_connections.label)
+  `).run(peerPubkey, peerUrl, discoveredVia || 'gossip', label || null);
+}
+
+function getPeerConnection(peerPubkey) {
+  return db.prepare('SELECT * FROM peer_connections WHERE peer_pubkey = ?').get(peerPubkey) || null;
+}
+
+function listPeerConnections() {
+  return db.prepare('SELECT * FROM peer_connections ORDER BY last_seen_at DESC').all();
+}
+
+function updatePeerCursor(peerPubkey, cursorPubkey, cursorSeq) {
+  db.prepare('UPDATE peer_connections SET cursor_pubkey = ?, cursor_seq = ? WHERE peer_pubkey = ?')
+    .run(cursorPubkey, cursorSeq, peerPubkey);
+}
+
+function updatePeerSeen(peerPubkey) {
+  db.prepare("UPDATE peer_connections SET last_seen_at = datetime('now'), is_active = 1 WHERE peer_pubkey = ?")
+    .run(peerPubkey);
+}
+
 module.exports = {
   initDatabase, getDb, close, getIdentityDb,
   createIdentity, getIdentity, getIdentityByPubkey,
@@ -1292,4 +1498,17 @@ module.exports = {
   updatePasskeyCounter, deletePasskey,
   addContact, getContact, listContacts, deleteContact,
   createSession, getSession, deleteSession,
+  // Mosiac Phase 5: Event Log CRUD
+  getLatestSeq,
+  getLatestHash,
+  getEvents,
+  appendEvent,
+  getEventsSince,
+  pruneEvents,
+  // Mosiac Phase 6: Peer Connection CRUD
+  savePeerConnection,
+  getPeerConnection,
+  listPeerConnections,
+  updatePeerCursor,
+  updatePeerSeen,
 };

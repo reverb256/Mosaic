@@ -1,8 +1,6 @@
 # Mosiac Fork Plan
 
-**From Haven (Discord-alike) → Mosiac (Discord + MySpace + Facebook + Matrix)**
-
-Mosiac is a fork of [Haven](https://github.com/ancsemi/Haven) (AGPL-3.0) that adds sovereign identity,
+**From Haven (Discord-alike) → Mosiac (Discord + MySpace + Facebook + Matrix)**\n\n**Status: v0.1.8-full — All 6 phases implemented.**\n**[Deployed](https://github.com/reverb256/Mosiac) on K3s cluster at 10.1.1.120:32100.**\n\nMosiac is a fork of [Haven](https://github.com/ancsemi/Haven) (AGPL-3.0) that adds sovereign identity,
 customizable profiles, activity feeds, and P2P federation on top of Haven's realtime chat/voice/screenshare
 foundation. No domain required. No KYC. No Big Tech.
 
@@ -894,11 +892,11 @@ No domain. No DNS. No certificate authority. Just an IP, a port, and a cryptogra
 - [x] Phase 1: Identity layer — Ed25519 keys, Passkeys, QR, signing
 - [x] `reverb256/mosiac-identity` — standalone sidecar (multi-platform OCI + Nix + direct)
 - [x] sql.js WASM fallback for exotic platforms (Termux, Wii Linux, etc.)
-- [ ] Phase 2: Profiles
-- [ ] Phase 3: Feeds & posts
-- [ ] Phase 4: Connections & following
-- [ ] Phase 5: Signed event bus
-- [ ] Phase 6: Federation
+- [x] Phase 2: Profiles
+- [x] Phase 3: Feeds & posts
+- [x] Phase 4: Connections & following
+- [x] Phase 5: Signed event bus
+- [x] Phase 6: Federation
 
 ### Multi-Platform Targets
 
