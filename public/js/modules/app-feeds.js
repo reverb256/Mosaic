@@ -1,9 +1,9 @@
 /**
- * Mosiac Feeds Module — Timeline view, feed composer, reaction buttons,
+ * Mosaic Feeds Module — Timeline view, feed composer, reaction buttons,
  * pagination via cursor.
  *
  * Usage:
- *   const feeds = new MosiacFeeds('#feeds-container', currentPubkey);
+ *   const feeds = new MosaicFeeds('#feeds-container', currentPubkey);
  *   await feeds.loadFeed('recent', { limit: 30 });
  *
  * The module supports multiple feed algorithms and infinite-scroll pagination.
@@ -11,9 +11,9 @@
 
 // ─── Base URL ──────────────────────────────────────────────────────────────
 
-const MOSIAC_API_FEED = '';
+const MOSAIC_API_FEED = '';
 
-class MosiacFeeds {
+class MosaicFeeds {
   constructor(containerSelector, currentPubkey) {
     this.container = document.querySelector(containerSelector);
     this.currentPubkey = currentPubkey || null;
@@ -28,7 +28,7 @@ class MosiacFeeds {
   // ─── API Helpers ─────────────────────────────────────────────────────────
 
   async _fetch(path, options = {}) {
-    const res = await fetch(`${MOSIAC_API_FEED}/mosiac${path}`, {
+    const res = await fetch(`${MOSAIC_API_FEED}/mosaic${path}`, {
       headers: { 'Content-Type': 'application/json', ...options.headers },
       ...options,
     });
@@ -327,6 +327,6 @@ class MosiacFeeds {
 
 (function() {
   if (typeof window !== 'undefined') {
-    window.MosiacFeeds = MosiacFeeds;
+    window.MosaicFeeds = MosaicFeeds;
   }
 })();

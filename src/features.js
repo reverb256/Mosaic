@@ -1,15 +1,15 @@
 'use strict';
 
 /**
- * Mosiac Feature Flag System
+ * Mosaic Feature Flag System
  *
  * Reads the FEATURES environment variable and provides query functions
- * so every Mosiac subsystem can check whether it should activate.
+ * so every Mosaic subsystem can check whether it should activate.
  *
  * FEATURES format:
  *   all               — enable everything (default)
  *   identity,profiles — enable only the listed features
- *   chat              — Haven-only mode (no Mosiac features)
+ *   chat              — Haven-only mode (no Mosaic features)
  *
  * Recognised feature names:
  *   chat, identity, profiles, feeds, connections, moderation

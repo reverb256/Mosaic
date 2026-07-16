@@ -386,7 +386,7 @@
 
 .music-link-preview {
   min-height: 0;
-  transition: all 0.2s;
+  transition: opacity, transform 0.2s;
 }
 .music-link-preview.active {
   background: var(--bg-primary);

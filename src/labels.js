@@ -1,10 +1,10 @@
 'use strict';
 
 /**
- * Mosiac Moderation Label System
+ * Mosaic Moderation Label System
  *
  * Infrastructure inspired by atproto's label system (signed labels,
- * label streams, labeler identity) with Mosiac-specific policies:
+ * label streams, labeler identity) with Mosaic-specific policies:
  *
  * - Labels carry a mandatory `note` (reason for labelling)
  * - Labels carry a mandatory `expiresAt` TTL

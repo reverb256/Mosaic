@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Mosiac Connections Module — Follow/unfollow + blocklist CRUD.
+ * Mosaic Connections Module — Follow/unfollow + blocklist CRUD.
  *
  * All operations use Ed25519 pubkey references (ed25519:<base64> format).
  */

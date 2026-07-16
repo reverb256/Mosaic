@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [mosiac]
+    branches: [mosaic]
   pull_request:
-    branches: [mosiac]
+    branches: [mosaic]
 
 env:
   NODE_VERSION: '22'

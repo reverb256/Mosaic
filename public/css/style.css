@@ -1958,7 +1958,7 @@ html.rgb-cycling *::after {
   height: 10px;
   border-radius: 50%;
   flex-shrink: 0;
-  transition: all 0.3s ease;
+  transition: color, border-color 0.3s ease;
   border: 1px solid rgba(0,0,0,0.3);
 }
 
@@ -2159,7 +2159,7 @@ html.rgb-cycling *::after {
   cursor: pointer;
   font-size: 14px;
   color: var(--text-secondary);
-  transition: all 0.2s;
+  transition: opacity 0.2s;
   line-height: 1;
 }
 .sidebar-bottom-btn:hover {
@@ -2215,7 +2215,7 @@ html.rgb-cycling *::after {
   border-radius: 50%;
   border: 2px solid var(--border);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: opacity, transform 0.2s ease;
   position: relative;
   display: flex;
   align-items: center;
@@ -2298,7 +2298,7 @@ html.rgb-cycling *::after {
   border: 2px solid var(--border);
   background: var(--bg-tertiary);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: opacity, transform 0.2s ease;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3010,7 +3010,7 @@ html.rgb-cycling *::after {
   color: var(--text-secondary);
   font-size: 14px;
   font-weight: 500;
-  transition: all var(--transition);
+  transition: background-color var(--transition);
 }
 
 .auth-tab:hover { color: var(--text-primary); }
@@ -3226,7 +3226,7 @@ html.rgb-cycling *::after {
   padding: 4px;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: all var(--transition);
+  transition: background-color var(--transition);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3278,7 +3278,7 @@ html.rgb-cycling *::after {
   border-radius: var(--radius-sm);
   font-size: 12px;
   font-weight: 600;
-  transition: all var(--transition);
+  transition: background-color var(--transition);
   white-space: nowrap;
 }
 
@@ -5615,7 +5615,7 @@ details.sound-section:not([open]) .sound-section-label::before {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: opacity, transform 0.2s ease;
   background: var(--bg-tertiary);
   position: relative;
   flex-shrink: 0;
@@ -6155,7 +6155,7 @@ details.sound-section:not([open]) .sound-section-label::before {
   font-size: 13px;
   font-weight: 700;
   color: var(--text-secondary);
-  transition: all 0.2s ease;
+  transition: opacity, transform 0.2s ease;
 }
 
 .wizard-indicator.active {
@@ -6704,7 +6704,7 @@ details.sound-section:not([open]) .sound-section-label::before {
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all var(--transition);
+  transition: background-color var(--transition);
   flex-shrink: 0;
 }
 
@@ -6859,7 +6859,7 @@ details.sound-section:not([open]) .sound-section-label::before {
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all var(--transition);
+  transition: background-color var(--transition);
   flex-shrink: 0;
   font-size: 18px;
 }
@@ -7103,7 +7103,7 @@ details.sound-section:not([open]) .sound-section-label::before {
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all var(--transition);
+  transition: background-color var(--transition);
   flex-shrink: 0;
   font-size: 11px;
   font-weight: 700;
@@ -7301,7 +7301,7 @@ details.sound-section:not([open]) .sound-section-label::before {
   font-size: 13px;
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all var(--transition);
+  transition: background-color var(--transition);
 }
 
 /* Emoji Reaction Size tiers */
@@ -7827,7 +7827,7 @@ html:not([data-toolbaricons="emoji"]):not([data-toolbaricons="color"]) .tb-icon-
   color: var(--text-muted);
   font-size: 16px;
   flex-shrink: 0;
-  transition: all var(--transition);
+  transition: background-color var(--transition);
 }
 
 .reply-bar-close:hover { color: var(--text-primary); background: var(--bg-secondary); }
@@ -9131,7 +9131,7 @@ html:not([data-toolbaricons="emoji"]):not([data-toolbaricons="color"]) .tb-icon-
   font-weight: 600;
   cursor: pointer;
   border: none;
-  transition: all var(--transition);
+  transition: background-color var(--transition);
 }
 
 .edit-save-btn {
@@ -9155,7 +9155,7 @@ html:not([data-toolbaricons="emoji"]):not([data-toolbaricons="color"]) .tb-icon-
   cursor: pointer;
   border: none;
   background: var(--bg-tertiary);
-  transition: all var(--transition);
+  transition: background-color var(--transition);
   line-height: 1;
 }
 .edit-emoji-btn:hover { background: var(--bg-hover); }
@@ -9171,7 +9171,7 @@ html:not([data-toolbaricons="emoji"]):not([data-toolbaricons="color"]) .tb-icon-
   border-radius: 3px;
   padding: 0 4px;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: opacity, transform 0.2s ease;
   user-select: none;
 }
 
@@ -10552,7 +10552,7 @@ html:not([data-toolbaricons="emoji"]):not([data-toolbaricons="color"]) .tb-icon-
   justify-content: center;
   cursor: pointer;
   flex-shrink: 0;
-  transition: all 0.2s ease;
+  transition: opacity, transform 0.2s ease;
 }
 
 .mobile-srv-add-btn:hover {
@@ -10585,7 +10585,7 @@ html:not([data-toolbaricons="emoji"]):not([data-toolbaricons="color"]) .tb-icon-
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  transition: all var(--transition);
+  transition: background-color var(--transition);
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -11460,7 +11460,7 @@ body.is-ios.ios-keyboard-open .message-input-area {
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
-  transition: all var(--transition);
+  transition: background-color var(--transition);
 }
 
 .btn-game:hover {
@@ -14127,7 +14127,7 @@ ul.chat-list { list-style-type: disc; }
   border-radius: var(--radius);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.2s;
+  transition: opacity 0.2s;
   font-size: 12px;
 }
 .density-btn:hover {
@@ -14736,7 +14736,7 @@ ul.chat-list { list-style-type: disc; }
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all var(--transition);
+  transition: background-color var(--transition);
   flex-shrink: 0;
   cursor: pointer;
 }
@@ -14753,7 +14753,7 @@ ul.chat-list { list-style-type: disc; }
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all var(--transition);
+  transition: background-color var(--transition);
   flex-shrink: 0;
   cursor: pointer;
   font-size: 18px;
@@ -14804,7 +14804,7 @@ ul.chat-list { list-style-type: disc; }
   padding: 6px 12px;
   cursor: pointer;
   font-size: 0.875rem;
-  transition: all var(--transition);
+  transition: background-color var(--transition);
 }
 .burn-reveal-btn:hover {
   background: rgba(255, 107, 53, 0.22);

@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Mosiac CAR Export / Import (Phase 6 — atproto interop)
+ * Mosaic CAR Export / Import (Phase 6 — atproto interop)
  *
  * Export a pubkey's signed event log as a CAR (Content-Addressable Archive)
  * file for portable backup, transfer between nodes, or atproto interop.

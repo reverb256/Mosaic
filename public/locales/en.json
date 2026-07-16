@@ -1707,11 +1707,11 @@
       "unavailable_desc": "An admin needs to set up the GIPHY API key before GIF search can work."
     }
   },
-  "mosiac": {
-    "page_title": "Mosiac — Identity",
-    "brand": "⍟ Mosiac",
+  "mosaic": {
+    "page_title": "Mosaic — Identity",
+    "brand": "⍟ Mosaic",
     "phase_badge": "Phase 1: Identity Layer",
-    "splash_welcome": "Welcome to Mosiac",
+    "splash_welcome": "Welcome to Mosaic",
     "splash_subtitle": "A decentralized social platform built on Ed25519 identities.",
     "splash_create_identity": "Create Identity with Passkey",
     "splash_login_passkey": "Login with Passkey",
@@ -1739,9 +1739,9 @@
     "dashboard_hex": "Hex",
     "dashboard_uri": "URI",
     "dashboard_share_title": "Share Your Identity",
-    "dashboard_share_hint": "Scan this QR code with another Mosiac user to connect.",
+    "dashboard_share_hint": "Scan this QR code with another Mosaic user to connect.",
     "dashboard_add_contact": "Add a Contact",
-    "dashboard_add_placeholder": "Paste a mosiac:// URI or Base64URL pubkey",
+    "dashboard_add_placeholder": "Paste a mosaic:// URI or Base64URL pubkey",
     "dashboard_add_btn": "Add Contact",
     "dashboard_contacts": "Contacts",
     "dashboard_signing_title": "Test Signing",
@@ -1750,7 +1750,7 @@
     "dashboard_signature": "Signature",
     "existing_title": "Existing Identities",
     "existing_back": "Back",
-    "footer_version": "Mosiac v0.1.0 — Identity Layer",
+    "footer_version": "Mosaic v0.1.0 — Identity Layer",
     "footer_connected": "connected",
     "footer_disconnected": "disconnected",
     "errors": {

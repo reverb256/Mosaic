@@ -1,10 +1,10 @@
-# Mosiac Developer Tooling
+# Mosaic Developer Tooling
 
 ## Overview
 
-Mosiac extends the Haven chat platform with sovereign Ed25519 identity, profiles,
+Mosaic extends the Haven chat platform with sovereign Ed25519 identity, profiles,
 feeds, and P2P federation. This document covers the developer tooling available
-for building, testing, and debugging Mosiac features.
+for building, testing, and debugging Mosaic features.
 
 ---
 
@@ -14,8 +14,8 @@ for building, testing, and debugging Mosiac features.
 # Install dependencies
 npm install
 
-# Copy the example env file (creates ~/.config/mosiac/.env on first run)
-cp .env.example ~/.config/mosiac/.env   # or let server.js bootstrap it
+# Copy the example env file (creates ~/.config/mosaic/.env on first run)
+cp .env.example ~/.config/mosaic/.env   # or let server.js bootstrap it
 
 # Set a JWT secret
 export JWT_SECRET="your-secret-here"
@@ -41,15 +41,15 @@ npm start
 
 ## FEATURES Environment Variable
 
-The `FEATURES` env var controls which Mosiac subsystems activate at startup.
+The `FEATURES` env var controls which Mosaic subsystems activate at startup.
 Every feature is a module: optional, skippable, and delegatable.
 
 ### Values
 
 | Value              | Meaning                          |
 |--------------------|----------------------------------|
-| `all` (default)    | Enable all Mosiac features       |
-| `chat`             | Haven-only — no Mosiac features  |
+| `all` (default)    | Enable all Mosaic features       |
+| `chat`             | Haven-only — no Mosaic features  |
 | `identity`         | Ed25519 keys, passkeys, auth     |
 | `profiles`         | User profiles                    |
 | `feeds`            | Content feeds and posts          |
@@ -59,13 +59,13 @@ Every feature is a module: optional, skippable, and delegatable.
 ### Examples
 
 ```bash
-# Run with all Mosiac features (default)
+# Run with all Mosaic features (default)
 FEATURES=all node server.js
 
 # Run with identity and profile features only
 FEATURES=identity,profiles node server.js
 
-# Run as pure Haven chat (no Mosiac features)
+# Run as pure Haven chat (no Mosaic features)
 FEATURES=chat node server.js
 
 # Run a dedicated moderation node
@@ -85,14 +85,14 @@ split identity and chat onto separate processes or hosts.
 CHAT_SERVER_URL=https://chat.example.com FEATURES=identity node server.js
 ```
 
-The frontend reads this from `GET /mosiac/config` and configures its
+The frontend reads this from `GET /mosaic/config` and configures its
 Socket.IO connection accordingly.
 
 ---
 
 ## Capabilities Endpoint
 
-`GET /mosiac/config` returns the server's full capabilities:
+`GET /mosaic/config` returns the server's full capabilities:
 
 ```json
 {
@@ -115,7 +115,7 @@ Socket.IO connection accordingly.
     "type": "haven",
     "server_url": "https://chat.example.com"
   },
-  "mosiac_version": "0.1.0"
+  "mosaic_version": "0.1.0"
 }
 ```
 
@@ -158,8 +158,8 @@ jobs:
 
 ## Moderation Label System
 
-Mosiac implements a moderation label infrastructure inspired by atproto,
-but with Mosiac-specific policies:
+Mosaic implements a moderation label infrastructure inspired by atproto,
+but with Mosaic-specific policies:
 
 - **Labels** are signed key-value assertions (e.g. `spam`, `harassment`) on a URI
 - **Labelers** are Ed25519 identities (`ed25519:<base64>` format)
@@ -172,12 +172,12 @@ but with Mosiac-specific policies:
 
 | Method | Path                        | Description               |
 |--------|-----------------------------|---------------------------|
-| POST   | `/mosiac/label/apply`       | Apply a label             |
-| POST   | `/mosiac/label/negate`      | Negate a label            |
-| GET    | `/mosiac/label/list`        | Get labels for a URI      |
-| POST   | `/mosiac/report/create`     | Submit a report           |
-| POST   | `/mosiac/appeal/create`     | Appeal a label            |
-| GET    | `/mosiac/appeal/list`       | List appeals by user      |
+| POST   | `/mosaic/label/apply`       | Apply a label             |
+| POST   | `/mosaic/label/negate`      | Negate a label            |
+| GET    | `/mosaic/label/list`        | Get labels for a URI      |
+| POST   | `/mosaic/report/create`     | Submit a report           |
+| POST   | `/mosaic/appeal/create`     | Appeal a label            |
+| GET    | `/mosaic/appeal/list`       | List appeals by user      |
 
 ### Client-Side Filtering
 
@@ -255,7 +255,7 @@ goat firehose --watch
 
 ### Feature Module Pattern
 
-Every Mosiac feature follows these design rules:
+Every Mosaic feature follows these design rules:
 
 1. **Zero modifications to existing Haven code** — only append, never edit
 2. **Zero new required dependencies for Haven users** — npm packages are optional

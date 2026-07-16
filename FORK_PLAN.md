@@ -1,6 +1,6 @@
-# Mosiac Fork Plan
+# Mosaic Fork Plan
 
-**From Haven (Discord-alike) → Mosiac (Discord + MySpace + Facebook + Matrix)**\n\n**Status: v0.1.8-full — All 6 phases implemented.**\n**[Deployed](https://github.com/reverb256/Mosiac) on K3s cluster at 10.1.1.120:32100.**\n\nMosiac is a fork of [Haven](https://github.com/ancsemi/Haven) (AGPL-3.0) that adds sovereign identity,
+**From Haven (Discord-alike) → Mosaic (Discord + MySpace + Facebook + Matrix)**\n\n**Status: v0.1.8-full — All 6 phases implemented.**\n**[Deployed](https://github.com/reverb256/Mosaic) on K3s cluster at 10.1.1.120:32100.**\n\nMosaic is a fork of [Haven](https://github.com/ancsemi/Haven) (AGPL-3.0) that adds sovereign identity,
 customizable profiles, activity feeds, and P2P federation on top of Haven's realtime chat/voice/screenshare
 foundation. No domain required. No KYC. No Big Tech.
 
@@ -10,14 +10,14 @@ foundation. No domain required. No KYC. No Big Tech.
 
 ```
 ┌─────────────────────────────────────────┐
-│  Mosiac Core (always runs)              │
+│  Mosaic Core (always runs)              │
 │  ├─ Identity (Ed25519 + Passkey + QR)   │
 │  ├─ Profiles (optional external)        │
 │  ├─ Feeds / Bulletins (optional)        │
 │  ├─ Connections (optional)              │
 │  └─ Signed Event Bus (optional)         │
 ├─────────────────────────────────────────┤
-│  Mosiac Plugins (modular, swappable)    │
+│  Mosaic Plugins (modular, swappable)    │
 │  ├─ Chat/Discord (Haven, external)      │ ← can skip or delegate
 │  ├─ Voice/Video (Haven WebRTC)          │
 │  ├─ Music (Haven music system)          │
@@ -93,7 +93,7 @@ Customizable per-user profile pages alongside the chat UI.
 | `src/profiles-sandbox.js` | CSP sandbox configuration for user-supplied HTML/CSS/JS |
 | `public/js/modules/app-profile.js` | Client-side profile editor and viewer |
 | `public/js/modules/app-profile-widgets.js` | Widget system (music player, about, recent posts, friends) |
-| `themes/mosiac-default/` | Default Mosiac profile theme |
+| `themes/mosaic-default/` | Default Mosaic profile theme |
 
 ### Files to modify
 
@@ -114,7 +114,7 @@ Customizable per-user profile pages alongside the chat UI.
   "bio": "building sovereign social",
   "avatar": "ipfs://Qm...",
   "background": "ipfs://Qm...",
-  "theme": "mosiac-dark",
+  "theme": "mosaic-dark",
   "template": "html",  // or "sandboxed_html"
   "content": "<div>my custom profile HTML</div>",
   "widgets": [
@@ -211,7 +211,7 @@ All user actions produce signed events, laying groundwork for P2P gossip.
 
 ## Phase 6: Federation (P2P Gossip)
 
-Gossip protocol between Mosiac nodes.
+Gossip protocol between Mosaic nodes.
 
 ### Files to add
 
@@ -263,8 +263,8 @@ Phase 6:
 
 Already running: `ghcr.io/ancsemi/haven:3.1.1` on nexus, `haven` namespace.
 
-Mosiac will ship as:
-- `ghcr.io/reverb256/mosiac:<tag>` (or nexus registry mirror)
+Mosaic will ship as:
+- `ghcr.io/reverb256/mosaic:<tag>` (or nexus registry mirror)
 - Single OCI container, same pattern as Haven
 - Persistent volumes: `/data` for keys, db, media
 - No domain needed — FORCE_HTTP=true, expose via NodePort or ClusterIP + Tailscale funnel
@@ -274,30 +274,30 @@ Mosiac will ship as:
 ## Git Strategy
 
 - `main` branch tracks upstream `ancsemi/Haven` (git pull to merge upstream fixes)
-- `mosiac` branch is our divergence point
-- Feature branches off `mosiac`: `mosiac/phase-1-identity`, `mosiac/phase-2-profiles`, etc.
-- Upstream changes merged into `main`, then cherry-pick or rebase `mosiac` onto `main`
+- `mosaic` branch is our divergence point
+- Feature branches off `mosaic`: `mosaic/phase-1-identity`, `mosaic/phase-2-profiles`, etc.
+- Upstream changes merged into `main`, then cherry-pick or rebase `mosaic` onto `main`
 
 ---
 
 ## Compatibility Guarantee: Total Haven Backward Compatibility
 
-Mosiac is an **additive layer** over Haven. Haven must continue working exactly as it did before Mosiac existed — no behavioral changes, no config migration, no database migration, no frontend changes.
+Mosaic is an **additive layer** over Haven. Haven must continue working exactly as it did before Mosaic existed — no behavioral changes, no config migration, no database migration, no frontend changes.
 
 ### The Rules
 
 | Rule | Example |
 |------|---------|
-| **Zero modifications to existing Haven routes** | New Mosiac routes are mounted separately (`/mosiac/*`) or appended to route files (`/api/auth/passkey/*`) |
-| **Zero modifications to existing Haven database schema** | Mosiac tables use `CREATE TABLE IF NOT EXISTS` and are added after Haven's existing tables |
-| **Zero modifications to existing Haven frontend** | Mosiac UI is in separate files (`identity.html`, `app-identity.js`, `mosiac-identity.css`) |
-| **Zero new required dependencies for Haven users** | New npm packages (`tweetnacl`, `@simplewebauthn/server`) are only required if Mosiac features are used |
-| **Zero config changes for existing Haven installs** | Mosiac reads its config from env vars that default to non-domain localhost values |
+| **Zero modifications to existing Haven routes** | New Mosaic routes are mounted separately (`/mosaic/*`) or appended to route files (`/api/auth/passkey/*`) |
+| **Zero modifications to existing Haven database schema** | Mosaic tables use `CREATE TABLE IF NOT EXISTS` and are added after Haven's existing tables |
+| **Zero modifications to existing Haven frontend** | Mosaic UI is in separate files (`identity.html`, `app-identity.js`, `__MOSAIC_IDENTITY__.css`) |
+| **Zero new required dependencies for Haven users** | New npm packages (`tweetnacl`, `@simplewebauthn/server`) are only required if Mosaic features are used |
+| **Zero config changes for existing Haven installs** | Mosaic reads its config from env vars that default to non-domain localhost values |
 | **Zero migration for existing Haven databases** | Identity tables are new — they don't touch users, channels, messages, etc. |
 
 ### The One Database Rule
 
-Haven's database contains user chat data. Mosiac's database contains identity keys, passkeys, and contacts. **They coexist in the same SQLite file** but are completely independent. A query against Haven's tables never touches Mosiac's tables and vice versa.
+Haven's database contains user chat data. Mosaic's database contains identity keys, passkeys, and contacts. **They coexist in the same SQLite file** but are completely independent. A query against Haven's tables never touches Mosaic's tables and vice versa.
 
 ```sql
 -- Haven tables (untouched):
@@ -305,7 +305,7 @@ CREATE TABLE users (...);
 CREATE TABLE channels (...);
 CREATE TABLE messages (...);
 
--- Mosiac tables (added alongside, never modified):
+-- Mosaic tables (added alongside, never modified):
 CREATE TABLE identities (...);
 CREATE TABLE passkeys (...);
 CREATE TABLE contacts (...);
@@ -314,22 +314,22 @@ CREATE TABLE sessions (...);
 
 ### What This Means
 
-- `git pull` upstream Haven changes merge cleanly — Mosiac additions don't conflict
-- A fresh install of upstream Haven works identically with or without Mosiac code
+- `git pull` upstream Haven changes merge cleanly — Mosaic additions don't conflict
+- A fresh install of upstream Haven works identically with or without Mosaic code
 - Users who only want chat see no difference
-- Users who discover `/identity.html` get the Mosiac layer
+- Users who discover `/identity.html` get the Mosaic layer
 
 ---
 
 ## Modularity Principle: Every Feature Is Optional, Skippable, Delegatable
 
-Every Mosiac feature is a **module**. You can run it, skip it, self-host it, or delegate it to someone else's server. The system degrades gracefully when a module is absent.
+Every Mosaic feature is a **module**. You can run it, skip it, self-host it, or delegate it to someone else's server. The system degrades gracefully when a module is absent.
 
 ### The Module Contract
 
 Each module:
 1. Has a **standalone entry point** (e.g. `node server.js` for identity)
-2. Has **zero runtime dependencies** on other Mosiac modules
+2. Has **zero runtime dependencies** on other Mosaic modules
 3. Can **point to an external service** instead of running its own
 4. When unavailable, the **frontend hides or degrades** the feature
 
@@ -337,7 +337,7 @@ Each module:
 
 | Module | Run It | Skip It | Delegate It |
 |--------|--------|---------|-------------|
-| **Identity** | `docker run reverb256/mosiac-identity` | — (core) | Not delegatable |
+| **Identity** | `docker run reverb256/__MOSAIC_IDENTITY__` | — (core) | Not delegatable |
 | **Chat** | Run Haven locally | Remove chat tab from UI | Point to `https://friend.haven.lan` |
 | **Profiles** | `node src/profiles.js` | Profile tab hidden | Use external profile service |
 | **Feeds** | `node src/feeds.js` | Feed tab hidden | Use external feed service |
@@ -350,8 +350,8 @@ Each module:
 // In the frontend, each module checks if its backend is available:
 const features = {
   chat:     await checkEndpoint('/api/auth/me'),
-  identity: await checkEndpoint('/mosiac/identity'),
-  feeds:    await checkEndpoint('/mosiac/feed/posts'),
+  identity: await checkEndpoint('/mosaic/identity'),
+  feeds:    await checkEndpoint('/mosaic/feed/posts'),
   music:    await checkEndpoint('/api/music/status'),
 };
 
@@ -362,8 +362,8 @@ if (!features.feeds) document.getElementById('feed-tab').style.display = 'none';
 
 ### What This Enables
 
-- **Chat-only users**: Run just Haven. No Mosiac code needed.
-- **Identity-only users**: Run `mosiac-identity` container. No chat server. Use Mosiac for profiles/feeds/auth, link to a friend's Haven for chat.
+- **Chat-only users**: Run just Haven. No Mosaic code needed.
+- **Identity-only users**: Run `__MOSAIC_IDENTITY__` container. No chat server. Use Mosaic for profiles/feeds/auth, link to a friend's Haven for chat.
 - **Experienced users**: Self-host everything. Maximum sovereignty.
 - **Resource-constrained users**: Delegate chat/music/federation to trusted peers. Run only identity locally.
 
@@ -371,12 +371,12 @@ if (!features.feeds) document.getElementById('feed-tab').style.display = 'none';
 
 ## Composability Principle: Mix and Match Features from Any Servers
 
-Modularity means each feature *can* run independently. Composability means they *do* — a user's Mosiac node pulls features from multiple backends simultaneously, and the system treats this as the normal case, not an edge case.
+Modularity means each feature *can* run independently. Composability means they *do* — a user's Mosaic node pulls features from multiple backends simultaneously, and the system treats this as the normal case, not an edge case.
 
 ### The Composability Model
 
-User's Mosiac Frontend connects to:
-- Identity from self-hosted Raspberry Pi (mosiac-identity)
+User's Mosaic Frontend connects to:
+- Identity from self-hosted Raspberry Pi (__MOSAIC_IDENTITY__)
 - Chat from friend's Haven server
 - Profiles from self-hosted alongside identity
 - Feeds from a community hub
@@ -387,7 +387,7 @@ Each feature resolves to a different backend. The frontend discovers which backe
 
 ### The Capabilities Endpoint
 
-Every Mosiac module exposes GET /capabilities returning:
+Every Mosaic module exposes GET /capabilities returning:
 ```json
 {
   "features": ["identity", "profiles", "feeds", "chat", "music"],
@@ -408,7 +408,7 @@ The frontend discovers available features at boot by probing each configured bac
 
 ### Implementation Rule
 
-No Mosiac module may assume it is the only backend. Every API call must be made against a configurable base URL. The frontend must never assume all features share an origin.
+No Mosaic module may assume it is the only backend. Every API call must be made against a configurable base URL. The frontend must never assume all features share an origin.
 
 ---
 
@@ -461,13 +461,13 @@ This means: **just by using the network, you learn about other nodes**. You don'
 
 ### Layer 4: LAN/mDNS (Zero-Config Local Discovery)
 
-On a local network, Mosiac nodes broadcast their existence via mDNS/Bonjour:
+On a local network, Mosaic nodes broadcast their existence via mDNS/Bonjour:
 
 ```
-mosiac._tcp.local.  →  "ed25519:a3f8c91e...@10.1.1.50:3000"
+mosaic._tcp.local.  →  "ed25519:a3f8c91e...@10.1.1.50:3000"
 ```
 
-Any Mosiac node on the LAN automatically discovers all others. A "People Nearby" tab in the UI shows the list. This is zero-config, works on any LAN, and requires no infrastructure.
+Any Mosaic node on the LAN automatically discovers all others. A "People Nearby" tab in the UI shows the list. This is zero-config, works on any LAN, and requires no infrastructure.
 
 ### Layer 5: DHT (Global Discovery, No Server)
 
@@ -485,7 +485,7 @@ The DHT is entirely P2P — no servers, no directories. Implemented via libp2p o
 Some users may choose to run a **profile index** — a node that crawls profiles and provides search:
 
 ```http
-GET https://index.mosiac.lan/search?q=username
+GET https://index.mosaic.lan/search?q=username
 → [{ pubkey, display_name, node_url, avatar }]
 ```
 
@@ -536,20 +536,20 @@ Nothing works?
 
 ## Neocities Integration: Bridge to the Static Web
 
-[Neocities](https://neocities.org) is a modern GeoCities revival — free static site hosting with 1GB storage, CLI tools, a REST API, and an open-source backend ([github.com/neocities/neocities](https://github.com/neocities/neocities), 1.8k stars, MIT). It serves the exact same spirit as Mosiac: user-owned, creative, expressive personal web pages. Integrating with Neocities bridges Mosiac's decentralized identity layer with the browsable, crawlable static web.
+[Neocities](https://neocities.org) is a modern GeoCities revival — free static site hosting with 1GB storage, CLI tools, a REST API, and an open-source backend ([github.com/neocities/neocities](https://github.com/neocities/neocities), 1.8k stars, MIT). It serves the exact same spirit as Mosaic: user-owned, creative, expressive personal web pages. Integrating with Neocities bridges Mosaic's decentralized identity layer with the browsable, crawlable static web.
 
 ### Webrings: The Original Social Graph
 
 Webrings are circular chains of related sites. Each site links to "previous" and "next" in the ring, and a central "ringmaster" page lists all members. They were the original decentralized discovery mechanism — no central search needed, just trust-based linking.
 
-Mosiac's connection graph maps directly to webrings:
+Mosaic's connection graph maps directly to webrings:
 
 ```
 Webring:         prev ← [Your Profile] → next
-Mosiac Follows:  follower ← [Your Profile] → following
+Mosaic Follows:  follower ← [Your Profile] → following
 ```
 
-A Mosiac node implements:
+A Mosaic node implements:
 
 ```http
 GET /webring/prev   → the previous person in your follow graph
@@ -557,22 +557,22 @@ GET /webring/next   → the next person
 GET /webring/random → a random person from your extended network
 ```
 
-Any Mosiac profile automatically becomes part of the webring ecosystem. A Neocities user can link to `mosiac.lan/webring/next` and get a live, always-up-to-date trail through their social graph.
+Any Mosaic profile automatically becomes part of the webring ecosystem. A Neocities user can link to `mosaic.lan/webring/next` and get a live, always-up-to-date trail through their social graph.
 
 ### Integration Points
 
 | Feature | What It Does | How |
 |---------|-------------|-----|
-| **Profile Publishing** | Mosiac profile manifest auto-deploys as static HTML to Neocities | POST to `/api/upload` on profile save. Viewers see `you.neocities.org` without a Mosiac node |
-| **Webring Bridge** | Mosiac connection graph feeds into Neocities webrings | `GET /webring/*` routes. Neocities site embeds webring nav iframe pointing to your Mosiac node |
+| **Profile Publishing** | Mosaic profile manifest auto-deploys as static HTML to Neocities | POST to `/api/upload` on profile save. Viewers see `you.neocities.org` without a Mosaic node |
+| **Webring Bridge** | Mosaic connection graph feeds into Neocities webrings | `GET /webring/*` routes. Neocities site embeds webring nav iframe pointing to your Mosaic node |
 | **Media Hosting** | Profile assets optionally served from Neocities | Upload avatars, backgrounds, music to Neocities via API. Link from profile manifest |
-| **Discovery Relay** | Neocities tags/browse feed into Mosiac directory | Mosiac directory node crawls Neocities tags matching `mosiac` → discovers new profiles |
+| **Discovery Relay** | Neocities tags/browse feed into Mosaic directory | Mosaic directory node crawls Neocities tags matching `mosaic` → discovers new profiles |
 | **Cross-Posting** | Feed posts auto-publish as static page on Neocities | Blog-style archive of your public posts at `you.neocities.org/blog/` |
-| **Two-Way Linking** | Neocities profiles link back to Mosiac identity | `mosiac://<pubkey>` link on your Neocities page. QR code in your site's sidebar |
+| **Two-Way Linking** | Neocities profiles link back to Mosaic identity | `mosaic://<pubkey>` link on your Neocities page. QR code in your site's sidebar |
 
 ### The Capabilities Endpoint
 
-A Neocities-connected Mosiac module exposes:
+A Neocities-connected Mosaic module exposes:
 
 ```http
 GET /capabilities
@@ -590,17 +590,17 @@ GET /capabilities
 
 | | Without Neocities | With Neocities |
 |--|------------------|----------------|
-| **Viewing a profile** | Need a Mosiac node or QR scan | Visit `you.neocities.org` in any browser |
+| **Viewing a profile** | Need a Mosaic node or QR scan | Visit `you.neocities.org` in any browser |
 | **Discovering people** | QR exchange, friend-of-friend | Neocities browse, tags, search engines |
-| **Your profile's reach** | Your Mosiac node only | The open web — indexed, crawled, linked |
+| **Your profile's reach** | Your Mosaic node only | The open web — indexed, crawled, linked |
 | **Webring navigation** | Connection graph traversal | Standard webring nav — works everywhere |
 | **Media storage** | Self-hosted disk or IPFS | Neocities free tier (1GB, 200GB bandwidth) |
 
 ### Implementation
 
-Neocities integration is a Mosiac module that follows the Modularity and Composability principles:
+Neocities integration is a Mosaic module that follows the Modularity and Composability principles:
 
-- **Optional**: Only turns on if the user configures `MOSIAC_NEOCITIES_USER` and `MOSIAC_NEOCITIES_PASS`
+- **Optional**: Only turns on if the user configures `MOSAIC_NEOCITIES_USER` and `MOSAIC_NEOCITIES_PASS`
 - **Delegatable**: User can publish to Neocities or skip it entirely
 - **Graceful degradation**: Without Neocities, everything still works — profile served from local node
 
@@ -721,8 +721,8 @@ FEATURES=identity
 When a feature is disabled, its routes are not mounted and its frontend elements are hidden. The server logs which features are active at boot:
 
 ```
-[mosiac] chat enabled
-[mosiac] identity/profiles/feeds routes at /mosiac/*
+[mosaic] chat enabled
+[mosaic] identity/profiles/feeds routes at /mosaic/*
 ```
 
 ### CHAT_SERVER_URL: Delegate Chat to Another Server
@@ -737,10 +737,10 @@ CHAT_SERVER_URL=https://friend.haven.lan
 CHAT_SERVER_URL=http://chat-server:32100
 ```
 
-The frontend fetches `/mosiac/config` at boot, reads `chat_server`, and passes it to `io()`:
+The frontend fetches `/mosaic/config` at boot, reads `chat_server`, and passes it to `io()`:
 
 ```javascript
-const cfg = await fetch('/mosiac/config').then(r => r.json());
+const cfg = await fetch('/mosaic/config').then(r => r.json());
 this.socket = io(cfg.chat_server || undefined, { auth: { token } });
 ```
 
@@ -759,12 +759,12 @@ If `CHAT_SERVER_URL` is unset, the frontend connects to the default origin (loca
 ### The Composability Model
 
 ```
-User's Mosiac Frontend
+User's Mosaic Frontend
 │
-├─ Identity  ← self-hosted on Raspberry Pi (mosiac-identity)
+├─ Identity  ← self-hosted on Raspberry Pi (__MOSAIC_IDENTITY__)
 ├─ Chat      ← friend's Haven server (haven.lan)
 ├─ Profiles  ← self-hosted alongside identity
-├─ Feeds     ← community hub (feeds.mosiac.lan)
+├─ Feeds     ← community hub (feeds.mosaic.lan)
 ├─ Music     ← different friend's Haven (music.haven.lan)
 └─ Media     ← IPFS (distributed, no server)
 ```
@@ -773,7 +773,7 @@ Each feature resolves to a different backend. The frontend discovers which backe
 
 ### The Capabilities Endpoint
 
-Every Mosiac module exposes:
+Every Mosaic module exposes:
 
 ```http
 GET /capabilities
@@ -836,19 +836,19 @@ User → Identity Server (Passkey login)
 
 ### Implementation Rule
 
-**No Mosiac module may assume it is the only backend.** Every API call must be made against a configurable base URL, not a hardcoded path. The frontend must never assume all features share an origin.
+**No Mosaic module may assume it is the only backend.** Every API call must be made against a configurable base URL, not a hardcoded path. The frontend must never assume all features share an origin.
 
 ---
 
 ## Deployment Philosophy: Domain-Free by Default
 
-Mosiac must **never require** a domain name. It is designed to work on bare IP addresses, LAN hostnames, Tor onion addresses, or Tailscale IPs — whatever the user has. This is a hard architectural constraint, not a preference.
+Mosaic must **never require** a domain name. It is designed to work on bare IP addresses, LAN hostnames, Tor onion addresses, or Tailscale IPs — whatever the user has. This is a hard architectural constraint, not a preference.
 
 ### The Stack
 
 | Layer | Mechanism | Domain Required? |
 |-------|-----------|------------------|
-| **Identity** | `mosiac://<pubkey>` URI scheme | Never |
+| **Identity** | `mosaic://<pubkey>` URI scheme | Never |
 | **Authentication** | WebAuthn RP_ID defaults to IP/hostname | Never — configurable via env |
 | **Transport** | Direct TCP, WebRTC, or Tor | Never |
 | **Discovery** | QR codes, LAN mDNS, DHT, manual pubkey | Never |
@@ -860,23 +860,23 @@ After deployment, users may optionally add local hostnames:
 
 ```bash
 # /etc/hosts entry for LAN convenience
-echo '<ip> mosiac.lan' >> /etc/hosts
+echo '<ip> mosaic.lan' >> /etc/hosts
 
 # mDNS broadcast (Avahi)
-avahi-publish -a -R mosiac.lan <ip>
+avahi-publish -a -R mosaic.lan <ip>
 
 # LAN DNS (unbound/dnsmasq)
-local-data: "mosiac.lan A <ip>"
+local-data: "mosaic.lan A <ip>"
 ```
 
 These are **never referenced in code**. They are post-deployment niceties that the deployment script may offer but the architecture never depends on.
 
 ### The Deployment Contract
 
-When someone installs Mosiac (OCI, npm, Nix, K8s), the output says:
+When someone installs Mosaic (OCI, npm, Nix, K8s), the output says:
 
 ```
-Your Mosiac node is running at http://<this-ip>:3000
+Your Mosaic node is running at http://<this-ip>:3000
 Your pubkey is: ed25519:<base64>
 Share this QR code to let others connect.
 ```
@@ -887,10 +887,10 @@ No domain. No DNS. No certificate authority. Just an IP, a port, and a cryptogra
 
 ## Current Status
 
-- [x] Repo cloned and rebranded to Mosiac (package.json, Dockerfile, paths.js)
-- [x] `mosiac` branch created
+- [x] Repo cloned and rebranded to Mosaic (package.json, Dockerfile, paths.js)
+- [x] `mosaic` branch created
 - [x] Phase 1: Identity layer — Ed25519 keys, Passkeys, QR, signing
-- [x] `reverb256/mosiac-identity` — standalone sidecar (multi-platform OCI + Nix + direct)
+- [x] `reverb256/__MOSAIC_IDENTITY__` — standalone sidecar (multi-platform OCI + Nix + direct)
 - [x] sql.js WASM fallback for exotic platforms (Termux, Wii Linux, etc.)
 - [x] Phase 2: Profiles
 - [x] Phase 3: Feeds & posts

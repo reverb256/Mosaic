@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Mosiac Event Log (Phase 5)
+ * Mosaic Event Log (Phase 5)
  *
  * Append-only per-pubkey event log backed by SQLite.  Events are stored
  * in the `event_log` table (defined in src/database.js) and accessed via

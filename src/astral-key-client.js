@@ -5,7 +5,7 @@
  * astral-key (reverb256/astral-key), a Rust/Axum auth microservice.
  *
  * Each method returns the *same shape* as the corresponding passkey.js
- * function so that routes-mosiac.js can be a drop-in replacement.
+ * function so that routes-mosaic.js can be a drop-in replacement.
  *
  * Uses Node 18+ global `fetch()` — zero additional dependencies.
  */

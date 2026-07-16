@@ -7,9 +7,9 @@
  * force-adds files, or pushes to a public repo.
  *
  * Locations:
- *   Windows : %APPDATA%\Mosiac\          (e.g. C:\Users\you\AppData\Roaming\Mosiac)
- *   Linux   : ~/.mosiac/
- *   macOS   : ~/.mosiac/
+ *   Windows : %APPDATA%\Mosaic\          (e.g. C:\Users\you\AppData\Roaming\Mosaic)
+ *   Linux   : ~/.mosaic/
+ *   macOS   : ~/.mosaic/
  *
  * Override : set HAVEN_DATA_DIR env var to any absolute path.
  */
@@ -32,14 +32,14 @@ function getDataDir() {
   } else {
     base = os.homedir();
   }
-  base = path.join(base, '.mosiac');
+  base = path.join(base, '.mosaic');
   fs.mkdirSync(base, { recursive: true });
   return base;
 }
 
 // Pre-computed paths for convenience
 const DATA_DIR     = getDataDir();
-const DB_PATH      = path.join(DATA_DIR, 'mosiac.db');
+const DB_PATH      = path.join(DATA_DIR, 'mosaic.db');
 const ENV_PATH     = path.join(DATA_DIR, '.env');
 const CERTS_DIR    = path.join(DATA_DIR, 'certs');
 const UPLOADS_DIR  = path.join(DATA_DIR, 'uploads');

@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Mosiac Profile Module — Profile CRUD with Ed25519 signing.
+ * Mosaic Profile Module — Profile CRUD with Ed25519 signing.
  *
  * Profile manifest schema:
  * {
@@ -10,7 +10,7 @@
  *   "display_name": "cooluser",
  *   "bio": "building sovereign social",
  *   "avatar": null,
- *   "theme": "mosiac-dark",
+ *   "theme": "mosaic-dark",
  *   "content": {"html": "<h1>Welcome</h1>", "css": "body { color: #eee; }"},
  *   "widgets": [
  *     {"type": "music_player", "pinned_track": null},
@@ -101,7 +101,7 @@ function createProfile(pubkey, manifestData, signFn) {
     display_name: manifestData.display_name || 'Anonymous',
     bio: manifestData.bio || '',
     avatar: manifestData.avatar || null,
-    theme: manifestData.theme || 'mosiac-dark',
+    theme: manifestData.theme || 'mosaic-dark',
     content: manifestData.content || null,
     widgets: manifestData.widgets || [],
     links: manifestData.links || [],

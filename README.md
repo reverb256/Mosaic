@@ -1,18 +1,18 @@
-# ⬡ MOSIAC — Sovereign, Self-Hosted Social Platform
+# ⬡ MOSAIC — Sovereign, Self-Hosted Social Platform
 
 > **Chat + Profiles + Feeds + Federation.** Built on Haven. No domain required. No Big Tech. No KYC.
 
-[![GitHub](https://img.shields.io/badge/repo-reverb256/Mosiac-blue)](https://github.com/reverb256/Mosiac)
+[![GitHub](https://img.shields.io/badge/repo-reverb256/Mosaic-blue)](https://github.com/reverb256/Mosaic)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-green)](LICENSE)
-[![Status](https://img.shields.io/badge/status-Phase%201%20(Identity)-orange)](https://github.com/reverb256/Mosiac/issues/1)
-[![CI](https://github.com/reverb256/Mosiac/actions/workflows/ci.yml/badge.svg?branch=mosiac)](https://github.com/reverb256/Mosiac/actions/workflows/ci.yml)
+[![Status](https://img.shields.io/badge/status-Phase%201%20(Identity)-orange)](https://github.com/reverb256/Mosaic/issues/1)
+[![CI](https://github.com/reverb256/Mosaic/actions/workflows/ci.yml/badge.svg?branch=mosaic)](https://github.com/reverb256/Mosaic/actions/workflows/ci.yml)
 
-Mosiac is a fork of [Haven](https://github.com/ancsemi/Haven) (the self-hosted Discord alternative) that adds
+Mosaic is a fork of [Haven](https://github.com/ancsemi/Haven) (the self-hosted Discord alternative) that adds
 cryptographic identity (Ed25519 + Passkey), customizable MySpace-style profiles, activity feeds, pubkey-based
 connections, and eventual P2P federation — all while preserving Haven's realtime chat, voice, and screenshare.
 
-**Status:** [Phase 1 (Identity Layer)](https://github.com/reverb256/Mosiac/issues/1) in development.
-**Issues:** [github.com/reverb256/Mosiac/issues](https://github.com/reverb256/Mosiac/issues)
+**Status:** [Phase 1 (Identity Layer)](https://github.com/reverb256/Mosaic/issues/1) in development.
+**Issues:** [github.com/reverb256/Mosaic/issues](https://github.com/reverb256/Mosaic/issues)
 
 ---
 

@@ -2,9 +2,9 @@ name: test
 
 on:
   push:
-    branches: [main, mosiac]
+    branches: [main, mosaic]
   pull_request:
-    branches: [main, mosiac]
+    branches: [main, mosaic]
 
 jobs:
   test:

@@ -16,9 +16,9 @@ const {
 const crypto = require('crypto');
 const { getDb } = require('./database');
 
-const RP_NAME = 'Mosiac';
-const RP_ID = process.env.MOSIAC_RP_ID || 'localhost';
-const ORIGIN = (process.env.MOSIAC_ORIGIN || 'http://localhost:3000').replace(/\/+$/, '');
+const RP_NAME = 'Mosaic';
+const RP_ID = process.env.MOSAIC_RP_ID || 'localhost';
+const ORIGIN = (process.env.MOSAIC_ORIGIN || 'http://localhost:3000').replace(/\/+$/, '');
 
 // In-memory challenge store (per session)
 const challengeStore = new Map();
@@ -44,7 +44,7 @@ function beginRegistration({ label } = {}) {
     rpName: RP_NAME,
     rpID: RP_ID,
     userName: pubkey.slice(0, 16) + '\u2026',
-    userDisplayName: label || `Mosiac ${pubkey.slice(0, 8)}`,
+    userDisplayName: label || `Mosaic ${pubkey.slice(0, 8)}`,
     challenge,
     userID: userId,
     attestationType: 'none',
@@ -159,7 +159,7 @@ function sessionMiddleware(req, res, next) {
   const cookie = req.headers.cookie
     ? Object.fromEntries(req.headers.cookie.split(';').map(c => c.trim().split('=').map(decodeURIComponent)))
     : {};
-  const token = header?.startsWith('Bearer ') ? header.slice(7) : cookie?.mosiac_session;
+  const token = header?.startsWith('Bearer ') ? header.slice(7) : cookie?.mosaic_session;
   if (token) {
     const session = validateSession(token);
     if (session) { req.identity = session; req.sessionToken = token; }

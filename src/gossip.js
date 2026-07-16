@@ -1,15 +1,15 @@
 'use strict';
 
 /**
- * Mosiac P2P Gossip (Phase 6)
+ * Mosaic P2P Gossip (Phase 6)
  *
  * WebSocket-based peer-to-peer gossip for exchanging signed event logs
- * between Mosiac nodes.  Uses Ed25519 challenge-response authentication
+ * between Mosaic nodes.  Uses Ed25519 challenge-response authentication
  * on connect, then exchanges event batches in a subscribe/replicate
  * pattern (inspired by atproto's subscribeRepos).
  *
  * The `ws` package is a transitive dependency of Socket.IO but is listed
- * as optional in Mosiac's package.json for clarity.
+ * as optional in Mosaic's package.json for clarity.
  *
  * Architecture:
  *   GossipServer  — runs alongside the HTTP server, accepts WS connections
@@ -55,7 +55,7 @@ function GossipServer(httpServer, opts) {
 
   try {
     const WebSocketServer = require('ws').Server;
-    wss = new WebSocketServer({ server: httpServer, path: '/mosiac/gossip' });
+    wss = new WebSocketServer({ server: httpServer, path: '/mosaic/gossip' });
 
     wss.on('connection', (ws, req) => {
       let authenticated = false;
@@ -205,7 +205,7 @@ function handleMessage(ws, peerPubkey, msg, opts) {
 // ─── GossipClient ───────────────────────────────────────────
 
 /**
- * Connect to a remote Mosiac gossip peer.
+ * Connect to a remote Mosaic gossip peer.
  *
  * Handles:
  *   - Ed25519 challenge-response auth
@@ -213,7 +213,7 @@ function handleMessage(ws, peerPubkey, msg, opts) {
  *   - Initial sync request for missing events
  *   - Real-time event streaming after sync
  *
- * @param {string}  peerUrl   - WebSocket URL, e.g. 'ws://192.168.1.50:3000/mosiac/gossip'
+ * @param {string}  peerUrl   - WebSocket URL, e.g. 'ws://192.168.1.50:3000/mosaic/gossip'
  * @param {object}  keypair   - { pubkey, privkey } of the local identity
  * @param {object}  [opts]
  * @param {function} [opts.onEvent] - Called when an event arrives: (event)

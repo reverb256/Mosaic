@@ -14,14 +14,14 @@ describe('Server Smoke Tests', () => {
   let tmpDir;
 
   before(async () => {
-    tmpDir = path.join(os.tmpdir(), `mosiac-server-test-${Date.now()}`);
-    const testDbPath = path.join(tmpDir, 'mosiac.db');
+    tmpDir = path.join(os.tmpdir(), `mosaic-server-test-${Date.now()}`);
+    const testDbPath = path.join(tmpDir, 'mosaic.db');
     fs.mkdirSync(tmpDir, { recursive: true });
 
     // Set env vars before loading server
     process.env.HAVEN_DATA_DIR = tmpDir;
-    process.env.MOSIAC_RP_ID = 'localhost';
-    process.env.MOSIAC_ORIGIN = 'http://localhost:0';
+    process.env.MOSAIC_RP_ID = 'localhost';
+    process.env.MOSAIC_ORIGIN = 'http://localhost:0';
     process.env.PORT = '0';
     process.env.JWT_SECRET = 'test-server-secret';
 
@@ -87,27 +87,27 @@ describe('Server Smoke Tests', () => {
     });
   }
 
-  it('GET /mosiac/health returns ok', async () => {
-    const res = await get('/mosiac/health');
+  it('GET /mosaic/health returns ok', async () => {
+    const res = await get('/mosaic/health');
     assert.equal(res.status, 200);
     assert.ok(res.body.ok);
   });
 
-  it('GET /mosiac/config returns features', async () => {
-    const res = await get('/mosiac/config');
+  it('GET /mosaic/config returns features', async () => {
+    const res = await get('/mosaic/config');
     assert.equal(res.status, 200);
     assert.ok(res.body.features);
   });
 
-  it('GET /mosiac/identity/current returns identity data (or null)', async () => {
-    const res = await get('/mosiac/identity/current');
+  it('GET /mosaic/identity/current returns identity data (or null)', async () => {
+    const res = await get('/mosaic/identity/current');
     // May be null (no identity created yet) or return an identity — both are valid
     assert.ok(res.status === 200);
     assert.ok('identity' in res.body);
   });
 
-  it('GET /mosiac/contacts returns list', async () => {
-    const res = await get('/mosiac/contacts');
+  it('GET /mosaic/contacts returns list', async () => {
+    const res = await get('/mosaic/contacts');
     assert.equal(res.status, 200);
     assert.ok(Array.isArray(res.body));
   });

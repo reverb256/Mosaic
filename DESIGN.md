@@ -1,6 +1,6 @@
 ---
 version: 1.0.0
-name: Mosiac
+name: Mosaic
 description: >
   Sovereign self-hosted social platform — Discord + MySpace + Facebook + Matrix.
   Built on Haven. Ed25519 identity. P2P federation. No domain required.
@@ -63,9 +63,19 @@ border-radius:
   default: 8px
   lg: 12px
   pill: 999px
+motion:
+  instant: 0ms
+  fast: 100ms
+  normal: 200ms
+  slow: 300ms
+  marketing: 500ms
+  eased: "cubic-bezier(0.22, 1, 0.36, 1)"
+  ease-out: "cubic-bezier(0.22, 1, 0.36, 1)"
+  ease-in-out: "cubic-bezier(0.65, 0, 0.35, 1)"
+  spring-cta: "spring(stiffness 600, damping 30, mass 0.8)"
 ---
 
-# Mosiac Design System
+# Mosaic Design System
 
 > **Sovereign, self-hosted social platform.** Built on Haven.
 > Ed25519 identity + Passkey auth + MySpace profiles + algorithmic feeds
@@ -77,7 +87,7 @@ border-radius:
 
 ```
 ┌─────────────────────────────────────────┐
-│  Mosiac Core (always runs)              │
+│  Mosaic Core (always runs)              │
 │  ├─ Identity (Ed25519 + Passkey + QR)   │ ✅ Phase 1
 │  ├─ Profiles (optional external)        │ ✅ Phase 2
 │  ├─ Feeds / Bulletins (optional)        │ ✅ Phase 3
@@ -85,7 +95,7 @@ border-radius:
 │  ├─ Signed Event Bus (optional)         │ ✅ Phase 5
 │  └─ Moderation (optional)               │ ✅
 ├─────────────────────────────────────────┤
-│  Mosiac Plugins (modular, swappable)    │
+│  Mosaic Plugins (modular, swappable)    │
 │  ├─ Chat/Discord (Haven, external)      │ ← delegated
 │  ├─ Voice/Video (Haven WebRTC)          │
 │  ├─ Music (Haven music system)          │
@@ -95,11 +105,11 @@ border-radius:
 
 ### Key Design Principles
 
-1. **Zero modifications to existing Haven code** — New routes mount at `/mosiac/*`, new tables use `CREATE TABLE IF NOT EXISTS`, new UI lives in separate files.
+1. **Zero modifications to existing Haven code** — New routes mount at `/mosaic/*`, new tables use `CREATE TABLE IF NOT EXISTS`, new UI lives in separate files.
 2. **Every feature is a module: optional, skippable, delegatable** — Controlled by `FEATURES` env var.
 3. **No domain required** — Discovery via QR codes, IP addresses, mDNS, Tor onion services.
 4. **Ed25519 root identity** — Every user has a Ed25519 keypair as their cryptographic anchor. Format: `ed25519:<base64URL>`.
-5. **Additive atproto interop** — Optional did:key export, CAR format for event log export, label protocol patterns — but Mosiac's native formats are simpler and self-contained.
+5. **Additive atproto interop** — Optional did:key export, CAR format for event log export, label protocol patterns — but Mosaic's native formats are simpler and self-contained.
 
 ---
 
@@ -140,7 +150,7 @@ border-radius:
 
 ```
 public/index.html (Haven's SPA)
-  └─ public/identity.html (Mosiac identity management)
+  └─ public/identity.html (Mosaic identity management)
        ├─ Keygen wizard (first-boot flow)
        ├─ Passkey registration
        ├─ QR code display/scan
@@ -200,59 +210,59 @@ identity.js (Ed25519)
 
 ## Route Map
 
-All Mosiac routes mount at `/mosiac/*` on the Express app.
+All Mosaic routes mount at `/mosaic/*` on the Express app.
 
 ### Phase 1 — Identity
 
 | Method | Path | Handler | Auth |
 |--------|------|---------|------|
-| `GET` | `/mosiac/health` | Server health check | No |
-| `GET` | `/mosiac/config` | Runtime config + capabilities | No |
-| `GET` | `/mosiac/identity/current` | Get current identity | No |
+| `GET` | `/mosaic/health` | Server health check | No |
+| `GET` | `/mosaic/config` | Runtime config + capabilities | No |
+| `GET` | `/mosaic/identity/current` | Get current identity | No |
 | `POST` | `/api/auth/identity/generate` | Generate Ed25519 keypair | No |
-| `GET` | `/mosiac/qr/:pubkey` | Generate QR code SVG | No |
-| `POST` | `/mosiac/qr/scan` | Decode + store scanned pubkey | No |
-| `GET` | `/mosiac/contacts` | List known contacts | No |
-| `DELETE` | `/mosiac/contacts/:pubkey` | Remove contact | No |
+| `GET` | `/mosaic/qr/:pubkey` | Generate QR code SVG | No |
+| `POST` | `/mosaic/qr/scan` | Decode + store scanned pubkey | No |
+| `GET` | `/mosaic/contacts` | List known contacts | No |
+| `DELETE` | `/mosaic/contacts/:pubkey` | Remove contact | No |
 
 ### Phase 2 — Profiles
 
 | Method | Path | Handler | Auth |
 |--------|------|---------|------|
-| `GET` | `/mosiac/profile/:pubkey` | Get profile manifest | No |
-| `POST` | `/mosiac/profile` | Create/update profile | Yes |
+| `GET` | `/mosaic/profile/:pubkey` | Get profile manifest | No |
+| `POST` | `/mosaic/profile` | Create/update profile | Yes |
 
 ### Phase 3 — Feeds
 
 | Method | Path | Handler | Auth |
 |--------|------|---------|------|
-| `GET` | `/mosiac/feed` | Get feed (algo/cursor/limit) | No |
-| `POST` | `/mosiac/feed/post` | Create signed feed post | Yes |
-| `POST` | `/mosiac/feed/react` | Add reaction (like/repost) | No |
-| `DELETE` | `/mosiac/feed/react` | Remove reaction | No |
+| `GET` | `/mosaic/feed` | Get feed (algo/cursor/limit) | No |
+| `POST` | `/mosaic/feed/post` | Create signed feed post | Yes |
+| `POST` | `/mosaic/feed/react` | Add reaction (like/repost) | No |
+| `DELETE` | `/mosaic/feed/react` | Remove reaction | No |
 
 ### Phase 4 — Connections
 
 | Method | Path | Handler | Auth |
 |--------|------|---------|------|
-| `POST` | `/mosiac/follow` | Follow a pubkey | Yes |
-| `DELETE` | `/mosiac/follow` | Unfollow a pubkey | Yes |
-| `POST` | `/mosiac/block` | Block a pubkey | Yes |
-| `DELETE` | `/mosiac/block` | Unblock a pubkey | Yes |
-| `GET` | `/mosiac/connections/:pubkey` | Get followers/following | No |
+| `POST` | `/mosaic/follow` | Follow a pubkey | Yes |
+| `DELETE` | `/mosaic/follow` | Unfollow a pubkey | Yes |
+| `POST` | `/mosaic/block` | Block a pubkey | Yes |
+| `DELETE` | `/mosaic/block` | Unblock a pubkey | Yes |
+| `GET` | `/mosaic/connections/:pubkey` | Get followers/following | No |
 
 ### Moderation
 
 | Method | Path | Handler | Auth |
 |--------|------|---------|------|
-| `POST` | `/mosiac/label/apply` | Apply signed label | Yes (labeler) |
-| `POST` | `/mosiac/label/negate` | Negate a label | Yes (labeler) |
-| `GET` | `/mosiac/label/list` | Get labels for URI | No |
-| `GET` | `/mosiac/label/subscribe` | WebSocket label stream | No |
-| `POST` | `/mosiac/report/create` | Submit report | No |
-| `GET` | `/mosiac/report/list` | List reports by user | Yes |
-| `POST` | `/mosiac/appeal/create` | Appeal a label | Yes |
-| `GET` | `/mosiac/appeal/list` | List appeals by user | Yes |
+| `POST` | `/mosaic/label/apply` | Apply signed label | Yes (labeler) |
+| `POST` | `/mosaic/label/negate` | Negate a label | Yes (labeler) |
+| `GET` | `/mosaic/label/list` | Get labels for URI | No |
+| `GET` | `/mosaic/label/subscribe` | WebSocket label stream | No |
+| `POST` | `/mosaic/report/create` | Submit report | No |
+| `GET` | `/mosaic/report/list` | List reports by user | Yes |
+| `POST` | `/mosaic/appeal/create` | Appeal a label | Yes |
+| `GET` | `/mosaic/appeal/list` | List appeals by user | Yes |
 
 ---
 
@@ -265,7 +275,7 @@ User → Identity Page → "Generate Key"
   → identity.generateKeyPair() → Ed25519 keypair
   → passkey.register() → WebAuthn credential bound to pubkey
   → JWT issued (signed with privkey, verified with pubkey)
-  → JWT presented to all Mosiac endpoints
+  → JWT presented to all Mosaic endpoints
 
 On subsequent visits:
   → passkey.login() → biometric challenge
@@ -289,15 +299,15 @@ User writes post in Feed Composer
 ### Moderation Label Flow
 
 ```
-User A reports content via /mosiac/report/create
+User A reports content via /mosaic/report/create
   → Stored in moderation_reports
   → Labeler B's subscribed clients receive report
-  → Labeler B applies label via /mosiac/label/apply
+  → Labeler B applies label via /mosaic/label/apply
   → Label signed with B's Ed25519 key
   → Stored in moderation_labels with mandatory note + expiresAt
   → Peers subscribed to B's label stream receive label
   → User A (content owner) sees label in label viewer
-  → User A appeals via /mosiac/appeal/create
+  → User A appeals via /mosaic/appeal/create
   → Labeler B resolves appeal (accept → negate label, reject → close)
 ```
 
@@ -319,7 +329,7 @@ Node A starts → mDNS broadcasts presence
 
 ## Database Schema
 
-All Mosiac tables coexist in Haven's existing SQLite file via `CREATE TABLE IF NOT EXISTS`. They never touch Haven's tables.
+All Mosaic tables coexist in Haven's existing SQLite file via `CREATE TABLE IF NOT EXISTS`. They never touch Haven's tables.
 
 ### Identity Tables (Phase 1)
 
@@ -467,6 +477,16 @@ CREATE TABLE moderation_appeals (
 
 ## UI Component Patterns
 
+All motion follows the Apple design principles from `motion:` frontmatter: ease-out for entrances, sub-300ms UI, property-specific transitions only, never `scale(0)`, gate reduced-motion.
+
+### Motion Guidelines
+
+- **Entrances:** `opacity: 0; transform: translateY(8px)` → 300ms `ease-out`
+- **Hover states:** system response (150ms `ease-out`), gated behind `@media (hover: hover)`
+- **Active states:** `scale(0.97)` immediate (100ms), never from `scale(0)`
+- **Transitions:** property-specific only (`transition: opacity, transform` — never `transition: all`)
+- **Reduced motion:** cross-fade replaces slide/spring, gated by `prefers-reduced-motion`
+
 ### Buttons
 
 ```
@@ -535,7 +555,7 @@ Derived at call time via `identity.did(pubkey)`. Used in: labeler identity, CAR 
   "display_name": "cooluser",
   "bio": "building sovereign social",
   "avatar": null,
-  "theme": "mosiac-dark",
+  "theme": "mosaic-dark",
   "content": {"html": "<h1>Welcome</h1>", "css": "body { color: #eee; }"},
   "widgets": [
     {"type": "music_player"},
@@ -564,9 +584,9 @@ Derived at call time via `identity.did(pubkey)`. Used in: labeler identity, CAR 
 
 ## Moderation Philosophy
 
-Mosiac uses atproto's labeling **infrastructure** (signed labels, label streams, labeler identity) but with Mosiac's own **policies**:
+Mosaic uses atproto's labeling **infrastructure** (signed labels, label streams, labeler identity) but with Mosaic's own **policies**:
 
-| Policy | Bluesky | Mosiac |
+| Policy | Bluesky | Mosaic |
 |--------|---------|--------|
 | Label visibility | Opaque to user | **Labels visible to the labelled user with note** |
 | Expiry | No TTL required | **Mandatory `expiresAt` on every label** |
@@ -597,9 +617,9 @@ Label values: `spam`, `harassment`, `misinfo`, `nsfw`, `custom`. Each label MUST
 
 ```
 ┌─────────────────────────────────────────────┐
-│  OCI Container (ghcr.io/reverb256/mosiac)   │
+│  OCI Container (ghcr.io/reverb256/mosaic)   │
 │  ├─ Node.js 22 + Express + Socket.IO        │
-│  ├─ SQLite (/data/mosiac.db)                │
+│  ├─ SQLite (/data/mosaic.db)                │
 │  ├─ Ed25519 keys (/data/keys/)              │
 │  └─ Uploads (/data/uploads/)                │
 ├─────────────────────────────────────────────┤
@@ -637,12 +657,12 @@ src/
 ├── labels.js            — Moderation label CRUD + reports + appeals
 ├── label-filter.js      — Per-user label filter engine
 ├── features.js          — FEATURES env var flag system
-├── routes-mosiac.js     — All /mosiac/* Express routes
-└── database.js          — All Mosiac tables (appended to Haven's DB)
+├── routes-mosaic.js     — All /mosaic/* Express routes
+└── database.js          — All Mosaic tables (appended to Haven's DB)
 
 public/
 ├── identity.html         — Identity management SPA
-├── css/mosiac-identity.css — Design token system
+├── css/__MOSAIC_IDENTITY__.css — Design token system
 └── js/modules/
     ├── app-identity.js   — Client-side keygen wizard + identity UI
     ├── app-profile.js    — Profile editor/viewer + sandboxed preview

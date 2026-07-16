@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build-push-mosiac.sh — build the Mosiac image and push to the
+# build-push-mosaic.sh — build the Mosaic image and push to the
 # in-cluster local registry (nexus:5000).
 #
 # IMPORTANT (root-cause fix): push with `--format docker`, NOT the
@@ -16,11 +16,11 @@
 # internet (for the node:22-alpine base pull). 10.1.1.100 qualifies.
 set -euo pipefail
 
-REPO_DIR="${MOSIAC_REPO:-/home/j_kro/Projects/mosiac}"
+REPO_DIR="${MOSAIC_REPO:-/home/j_kro/Projects/mosaic}"
 REG="nexus:5000"
 DATE_TAG="$(date -u +%Y%m%d)"
-LATEST_IMG="${REG}/mosiac:latest"
-VERSIONED_IMG="${REG}/mosiac:${DATE_TAG}-clean"
+LATEST_IMG="${REG}/mosaic:latest"
+VERSIONED_IMG="${REG}/mosaic:${DATE_TAG}-clean"
 PLATFORM="${PLATFORM:-linux/amd64}"
 
 cd "$REPO_DIR" || { echo "FATAL: cannot cd to $REPO_DIR"; exit 1; }
@@ -35,7 +35,7 @@ echo "==> [1/4] building image (docker format)..."
 podman build \
   --platform "$PLATFORM" \
   --format docker \
-  --label "org.opencontainers.image.source=https://github.com/reverb256/Mosiac" \
+  --label "org.opencontainers.image.source=https://github.com/reverb256/Mosaic" \
   --tag "$LATEST_IMG" \
   --file Dockerfile \
   .
@@ -54,7 +54,7 @@ podman push --tls-verify=false --format docker "$VERSIONED_IMG" "$VERSIONED_IMG"
 #    mean the push corrupted it.
 echo "==> [4/4] verifying registry manifest by digest..."
 DIGEST=$(curl -sS --max-time 15 -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
-  "http://${REG}/v2/mosiac/manifests/latest" 2>/dev/null \
+  "http://${REG}/v2/mosaic/manifests/latest" 2>/dev/null \
   | grep -oE '"digest":"sha256:[a-f0-9]{64}"' | head -1 | sed -E 's/.*"sha256:([a-f0-9]{64})".*/\1/')
 if [ -z "$DIGEST" ]; then
   echo "WARN: could not read :latest digest from registry. Check push output above."
@@ -62,7 +62,7 @@ if [ -z "$DIGEST" ]; then
 fi
 HTTP=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 \
   -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
-  "http://${REG}/v2/mosiac/manifests/sha256:${DIGEST}" || true)
+  "http://${REG}/v2/mosaic/manifests/sha256:${DIGEST}" || true)
 if [ "$HTTP" = "200" ]; then
   echo "OK: $LATEST_IMG manifest valid (digest sha256:${DIGEST}, HTTP 200)."
 else

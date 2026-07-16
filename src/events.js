@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Mosiac Signed Event System (Phase 5)
+ * Mosaic Signed Event System (Phase 5)
  *
  * Every user action (post, follow, profile update, label, reaction) is
  * wrapped in a signed envelope and chained into an append-only per-pubkey

@@ -656,11 +656,11 @@ describe('AstralKeyClient', () => {
       });
 
       const result = await client.web3SiweVerify({
-        message: 'Sign in to Mosiac',
+        message: 'Sign in to Mosaic',
         signature: '0xsig123',
       });
       assert.strictEqual(calledUrl, `${BASE_URL}/auth/web3/siwe/verify`);
-      assert.strictEqual(calledBody.message, 'Sign in to Mosiac');
+      assert.strictEqual(calledBody.message, 'Sign in to Mosaic');
       assert.strictEqual(calledBody.signature, '0xsig123');
       assert.strictEqual(result.verified, true);
       assert.strictEqual(result.address, '0x123');

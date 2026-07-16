@@ -1,5 +1,5 @@
 /**
- * Mosiac Identity Layer — Frontend Module
+ * Mosaic Identity Layer — Frontend Module
  *
  * Handles:
  *   - WebAuthn registration ceremony (passkey creation)
@@ -59,7 +59,7 @@ function coerceToBuffer(value) {
 
 async function checkConnection() {
   try {
-    const res = await fetch(`/mosiac/health`);
+    const res = await fetch(`/mosaic/health`);
     if (res.ok) {
       $('conn-status').textContent = 'connected';
       $('conn-status').classList.add('connected');
@@ -94,7 +94,7 @@ async function beginRegistration() {
     // Display the generated identity info
     $('reg-pubkey').textContent = data.pubkey;
     $('reg-fingerprint').textContent = data.pubkeyHex.slice(0, 16) + '…';
-    $('reg-uri').textContent = `mosiac://${data.pubkey}`;
+    $('reg-uri').textContent = `mosaic://${data.pubkey}`;
 
     // Store state for passkey registration
     registrationState = data;
@@ -215,7 +215,7 @@ async function beginLogin() {
     const result = await verifyRes.json();
 
     // Store session token
-    document.cookie = `mosiac_session=${result.sessionToken}; path=/; max-age=604800; SameSite=Strict`;
+    document.cookie = `mosaic_session=${result.sessionToken}; path=/; max-age=604800; SameSite=Strict`;
 
     await loadDashboard();
   } catch (err) {
@@ -255,7 +255,7 @@ async function loadDashboard() {
 async function loadQR(pubkey) {
   const container = $('qr-container');
   try {
-    const res = await fetch(`/mosiac/qr/${encodeURIComponent(pubkey)}`);
+    const res = await fetch(`/mosaic/qr/${encodeURIComponent(pubkey)}`);
     if (!res.ok) throw new Error('QR generation failed');
 
     const svg = await res.text();
@@ -269,7 +269,7 @@ async function loadQR(pubkey) {
 
 async function loadContacts() {
   try {
-    const res = await fetch(`/mosiac/contacts`);
+    const res = await fetch(`/mosaic/contacts`);
     if (!res.ok) return;
     const data = await res.json();
     const list = $('contact-list');
@@ -294,7 +294,7 @@ async function loadContacts() {
 
     list.querySelectorAll('.remove').forEach(btn => {
       btn.addEventListener('click', async () => {
-        await fetch(`/mosiac/contacts/${encodeURIComponent(btn.dataset.pubkey)}`, { method: 'DELETE' });
+        await fetch(`/mosaic/contacts/${encodeURIComponent(btn.dataset.pubkey)}`, { method: 'DELETE' });
         await loadContacts();
       });
     });
@@ -313,7 +313,7 @@ async function scanQR() {
   result.classList.remove('hidden');
 
   try {
-    const res = await fetch(`/mosiac/qr/scan`, {
+    const res = await fetch(`/mosaic/qr/scan`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ data }),
@@ -345,7 +345,7 @@ async function signData() {
 
   try {
     const data = JSON.parse(input.value);
-    const res = await fetch(`/mosiac/sign`, {
+    const res = await fetch(`/mosaic/sign`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ data }),
@@ -367,7 +367,7 @@ async function verifyData() {
   const result = $('verify-result');
 
   try {
-    const res = await fetch(`/mosiac/verify`, {
+    const res = await fetch(`/mosaic/verify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ envelope: lastEnvelope }),
@@ -417,7 +417,7 @@ async function showIdentities() {
 
 async function logout() {
   await fetch(`/api/auth/passkey/logout`, { method: 'POST' });
-  document.cookie = 'mosiac_session=; path=/; max-age=0';
+  document.cookie = 'mosaic_session=; path=/; max-age=0';
   showView('splash');
 }
 

@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Mosiac Label Filter Engine
+ * Mosaic Label Filter Engine
  *
  * Client-side filter that lets each user configure which labelers
  * to trust and how to handle specific label values.

@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Mosiac server-side i18n — lightweight bilingual helper.
+ * Mosaic server-side i18n — lightweight bilingual helper.
  * Loads EN/FR string maps and resolves by Accept-Language header.
  */
 const fs = require('fs');
@@ -36,7 +36,7 @@ function detectLocale(req) {
   // 2. Cookie
   const cookie = req?.headers?.cookie;
   if (cookie) {
-    const match = cookie.match(/(?:^|;\s*)mosiac_lang=(\w+)/);
+    const match = cookie.match(/(?:^|;\s*)mosaic_lang=(\w+)/);
     if (match && ['en', 'fr'].includes(match[1])) return match[1];
     const matchIdentity = cookie.match(/(?:^|;\s*)identity_lang=(\w+)/);
     if (matchIdentity && ['en', 'fr'].includes(matchIdentity[1])) return matchIdentity[1];
@@ -74,7 +74,7 @@ function bilingualError(key, code) {
       en: t(key, 'en'),
       fr: t(key, 'fr'),
     },
-    code: code || 'MOSIAC_000',
+    code: code || 'MOSAIC_000',
   };
 }
 

@@ -4,7 +4,7 @@
  * QR Module — Encode/decode public keys as QR codes for contact sharing.
  *
  * Two representations:
- *   1. mosiac:// URI format — data URI with QR code inside
+ *   1. mosaic:// URI format — data URI with QR code inside
  *   2. Plain text format — just the Base64URL pubkey
  *
  * Uses the `qrcode` npm package for generation and parsing.
@@ -17,7 +17,7 @@ const identity = require('./identity');
 
 /**
  * Generate a QR code as a data URI (SVG or PNG) containing the user's
- * public key in mosiac:// format.
+ * public key in mosaic:// format.
  *
  * @param {string} pubkey - Base64URL-encoded public key
  * @param {object} [options]
@@ -69,8 +69,8 @@ async function generatePubkeyQR_PNG(pubkey, width = 300) {
 // ─── Parsing ───────────────────────────────────────────────────────────────
 
 /**
- * Parse a QR-scanned string to extract a mosiac public key.
- * Accepts both mosiac:// URIs and raw Base64URL pubkeys.
+ * Parse a QR-scanned string to extract a mosaic public key.
+ * Accepts both mosaic:// URIs and raw Base64URL pubkeys.
  *
  * @param {string} scanned - Text scanned from a QR code
  * @returns {{ pubkey: string, fingerprint: string } | null}
@@ -80,8 +80,8 @@ function parseQR(scanned) {
 
   const trimmed = scanned.trim();
 
-  // Try mosiac:// URI format
-  if (trimmed.startsWith('mosiac://')) {
+  // Try mosaic:// URI format
+  if (trimmed.startsWith('mosaic://')) {
     return identity.parsePubkeyURI(trimmed);
   }
 
@@ -111,7 +111,7 @@ const { getDb } = require('./database');
 function processQRScan(scanned, label) {
   const parsed = parseQR(scanned);
   if (!parsed) {
-    throw new Error('Invalid QR content: expected mosiac:// URI or Base64URL pubkey');
+    throw new Error('Invalid QR content: expected mosaic:// URI or Base64URL pubkey');
   }
 
   const db = getDb();

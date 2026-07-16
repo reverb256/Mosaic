@@ -1,13 +1,13 @@
 'use strict';
 
 /**
- * Mosiac mDNS/LAN Discovery (Phase 6)
+ * Mosaic mDNS/LAN Discovery (Phase 6)
  *
- * Broadcasts the Mosiac node's presence on the local network using
- * multicast DNS (mDNS / RFC 6762) so other Mosiac instances on the
+ * Broadcasts the Mosaic node's presence on the local network using
+ * multicast DNS (mDNS / RFC 6762) so other Mosaic instances on the
  * same LAN segment can discover each other automatically.
  *
- * Service type: _mosiac._tcp.local
+ * Service type: _mosaic._tcp.local
  * TXT record carries the node's Ed25519 pubkey and protocol version.
  *
  * The `multicast-dns` package is an optional dependency — if it is
@@ -24,7 +24,7 @@ const listeners = new Set();
 // ─── mDNS helpers ──────────────────────────────────────────
 
 /**
- * Start advertising this Mosiac node on the LAN.
+ * Start advertising this Mosaic node on the LAN.
  *
  * @param {object} opts
  * @param {number} opts.port       - HTTP server port (advertised in SRV)
@@ -46,7 +46,7 @@ function start(opts) {
   }
 
   const host = opts.host || require('os').hostname();
-  const serviceName = `mosiac-${crypto.randomBytes(4).toString('hex')}`;
+  const serviceName = `mosaic-${crypto.randomBytes(4).toString('hex')}`;
 
   try {
     mdns = multicastDns();
@@ -59,7 +59,7 @@ function start(opts) {
             name: serviceName,
             host: host,
             port: opts.port,
-            type: 'mosiac',
+            type: 'mosaic',
             protocol: 'tcp',
             txt: {
               pubkey: opts.pubkey,
@@ -80,8 +80,8 @@ function start(opts) {
     // Discover peers
     browser = mdns;
     browser.on('service', (service) => {
-      // Only respond to _mosiac._tcp services
-      if (service.type !== 'mosiac' || service.protocol !== 'tcp') return;
+      // Only respond to _mosaic._tcp services
+      if (service.type !== 'mosaic' || service.protocol !== 'tcp') return;
       if (!service.txt || !service.txt.pubkey) return;
 
       // Skip self
@@ -108,17 +108,17 @@ function start(opts) {
       }
     });
 
-    // Query for Mosiac services periodically
+    // Query for Mosaic services periodically
     const interval = setInterval(() => {
       if (mdns) {
-        mdns.query({ type: 'mosiac', protocol: 'tcp' });
+        mdns.query({ type: 'mosaic', protocol: 'tcp' });
       } else {
         clearInterval(interval);
       }
     }, 30000);
 
     // Send initial query
-    mdns.query({ type: 'mosiac', protocol: 'tcp' });
+    mdns.query({ type: 'mosaic', protocol: 'tcp' });
 
   } catch (err) {
     console.error('[transport-lan] mDNS setup failed:', err.message);

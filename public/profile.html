@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Mosiac — Profile</title>
+  <title>Mosaic — Profile</title>
   <link rel="stylesheet" href="/css/style.css">
-  <link rel="stylesheet" href="/css/mosiac-identity.css">
+  <link rel="stylesheet" href="/css/__MOSAIC_IDENTITY__.css">
   <style>
     .nav-bar { display: flex; gap: 8px; align-items: center; }
     .nav-bar a { color: var(--text-secondary); text-decoration: none; font-size: 0.85rem; padding: 4px 12px; border-radius: var(--radius-sm); }
@@ -36,7 +36,7 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="logo">⍟ Mosiac</div>
+    <div class="logo">⍟ Mosaic</div>
     <nav class="nav-bar">
       <a href="/identity.html">Identity</a>
       <a href="/profile.html" class="active">Profile</a>
@@ -105,7 +105,7 @@
 
       // Check if identity exists
       try {
-        const res = await fetch('/mosiac/identity/current');
+        const res = await fetch('/mosaic/identity/current');
         const data = await res.json();
         if (!data.identity) {
           noIdMsg.classList.add('active');
@@ -116,7 +116,7 @@
         document.getElementById('profile-pubkey-display').textContent = data.identity.pubkey;
 
         // Load profile manifest
-        const profileRes = await fetch('/mosiac/profile/' + encodeURIComponent(data.identity.pubkey));
+        const profileRes = await fetch('/mosaic/profile/' + encodeURIComponent(data.identity.pubkey));
         if (profileRes.ok) {
           const manifest = await profileRes.json();
           if (manifest.html) document.getElementById('profile-html-editor').value = manifest.html;

@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Mosiac Profile Sandbox — CSP headers and HTML template for rendering
+ * Mosaic Profile Sandbox — CSP headers and HTML template for rendering
  * user-supplied HTML/CSS in a sandboxed iframe.
  *
  * CSP rules:

@@ -89,7 +89,7 @@ require.cache[webauthnPath] = {
 // =========================================================================
 
 // Set data dir BEFORE requiring modules that compute DATA_DIR at load time
-const testDir = path.join(os.tmpdir(), `mosiac-passkey-test-${Date.now()}`);
+const testDir = path.join(os.tmpdir(), `mosaic-passkey-test-${Date.now()}`);
 fs.mkdirSync(testDir, { recursive: true });
 process.env.HAVEN_DATA_DIR = testDir;
 
@@ -131,8 +131,8 @@ async function registerAndStore(label) {
 
 describe('Passkey Module', () => {
   before(() => {
-    process.env.MOSIAC_RP_ID = 'localhost';
-    process.env.MOSIAC_ORIGIN = 'http://localhost:3000';
+    process.env.MOSAIC_RP_ID = 'localhost';
+    process.env.MOSAIC_ORIGIN = 'http://localhost:3000';
     database.initDatabase();
   });
 
@@ -156,7 +156,7 @@ describe('Passkey Module', () => {
       const { options } = result;
       assert.ok(options.challenge, 'options.challenge must be present');
       assert.ok(options.rp, 'options.rp must be present');
-      assert.strictEqual(options.rp.name, 'Mosiac');
+      assert.strictEqual(options.rp.name, 'Mosaic');
       assert.strictEqual(options.rp.id, 'localhost');
       assert.ok(options.user, 'options.user must be present');
       assert.ok(options.user.id, 'options.user.id must be present');
@@ -542,7 +542,7 @@ describe('Passkey Module', () => {
 
     it('should parse identity from a cookie', () => {
       const encoded = encodeURIComponent(sessionToken);
-      const req = { headers: { cookie: `mosiac_session=${encoded}` } };
+      const req = { headers: { cookie: `mosaic_session=${encoded}` } };
       const res = {};
       let nextCalled = false;
 
@@ -581,7 +581,7 @@ describe('Passkey Module', () => {
       const encoded = encodeURIComponent(sessionToken);
       const req = {
         headers: {
-          cookie: `some_other=value; mosiac_session=${encoded}; flavor=chocolate`,
+          cookie: `some_other=value; mosaic_session=${encoded}; flavor=chocolate`,
         },
       };
       const res = {};

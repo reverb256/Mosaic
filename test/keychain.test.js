@@ -119,7 +119,7 @@ describe('Keychain Module', () => {
       const mnemonic = keychain.generateMnemonic();
       const kp = keychain.mnemonicToKeypair(mnemonic);
 
-      const msg = 'Mosiac keychain test message';
+      const msg = 'Mosaic keychain test message';
       const sig = identity.sign(msg, kp.privkey);
       assert.ok(identity.verify(msg, sig, kp.pubkey));
 
@@ -384,7 +384,7 @@ describe('Keychain Module', () => {
 
   describe('encoding helpers', () => {
     it('toBase64URL / fromBase64URL should round-trip', () => {
-      const original = Buffer.from('Hello Mosiac!');
+      const original = Buffer.from('Hello Mosaic!');
       const encoded = keychain.toBase64URL(original);
       const decoded = keychain.fromBase64URL(encoded);
       assert.ok(decoded.equals(original));

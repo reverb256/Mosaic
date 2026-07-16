@@ -197,7 +197,7 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_messages_channel_id
       ON messages(channel_id, id DESC);
 
-    -- Mosiac: Identity tables (added alongside Haven's existing tables)
+    -- Mosaic: Identity tables (added alongside Haven's existing tables)
     CREATE TABLE IF NOT EXISTS identities (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       pubkey        TEXT    NOT NULL UNIQUE,
@@ -1102,7 +1102,7 @@ function initDatabase() {
     db.exec("ALTER TABLE roles ADD COLUMN icon TEXT DEFAULT NULL");
   }
 
-  // ── Mosiac Phase 5: Event Log ──────────────────────────────
+  // ── Mosaic Phase 5: Event Log ──────────────────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS event_log (
       pubkey      TEXT    NOT NULL,
@@ -1119,7 +1119,7 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_event_log_pubkey_ts ON event_log(pubkey, timestamp DESC);
   `);
 
-  // ── Mosiac Phase 6: P2P peer connections ───────────────────
+  // ── Mosaic Phase 6: P2P peer connections ───────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS peer_connections (
       id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1185,7 +1185,7 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action);
   `);
 
-  // ── Mosiac: Moderation Label System tables ────────────────
+  // ── Mosaic: Moderation Label System tables ────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS moderation_labels (
       cid         TEXT    PRIMARY KEY,
@@ -1227,7 +1227,7 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_mod_appeals_label ON moderation_appeals(label_cid);
   `);
 
-  // ── Mosiac Phase 2-4: Profiles, Feeds, Connections tables ──
+  // ── Mosaic Phase 2-4: Profiles, Feeds, Connections tables ──
   db.exec(`
     CREATE TABLE IF NOT EXISTS profiles (
       pubkey      TEXT    PRIMARY KEY REFERENCES identities(pubkey),
@@ -1290,7 +1290,7 @@ function close() {
 }
 
 /**
- * Returns the same database handle for Mosiac identity operations.
+ * Returns the same database handle for Mosaic identity operations.
  * Identity tables coexist alongside Haven's existing tables.
  */
 function getIdentityDb() {
@@ -1411,7 +1411,7 @@ function deleteSession(tokenHash) {
   db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
 }
 
-// ── Mosiac Phase 5: Event Log CRUD ──────────────────────────
+// ── Mosaic Phase 5: Event Log CRUD ──────────────────────────
 
 function getLatestSeq(pubkey) {
   const row = db.prepare('SELECT MAX(seq) as seq FROM event_log WHERE pubkey = ?').get(pubkey);
@@ -1458,7 +1458,7 @@ function pruneEvents(beforeTimestamp) {
   return result.changes;
 }
 
-// ── Mosiac Phase 6: Peer Connection CRUD ────────────────────
+// ── Mosaic Phase 6: Peer Connection CRUD ────────────────────
 
 function savePeerConnection({ peerPubkey, peerUrl, discoveredVia, label }) {
   db.prepare(`
@@ -1498,14 +1498,14 @@ module.exports = {
   updatePasskeyCounter, deletePasskey,
   addContact, getContact, listContacts, deleteContact,
   createSession, getSession, deleteSession,
-  // Mosiac Phase 5: Event Log CRUD
+  // Mosaic Phase 5: Event Log CRUD
   getLatestSeq,
   getLatestHash,
   getEvents,
   appendEvent,
   getEventsSince,
   pruneEvents,
-  // Mosiac Phase 6: Peer Connection CRUD
+  // Mosaic Phase 6: Peer Connection CRUD
   savePeerConnection,
   getPeerConnection,
   listPeerConnections,

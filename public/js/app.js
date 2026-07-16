@@ -256,10 +256,10 @@ class HavenApp {
     // Fetch runtime config to check for delegated services
     let chatServer = null;
     try {
-      const res = await fetch('/mosiac/config');
+      const res = await fetch('/mosaic/config');
       const cfg = await res.json();
       chatServer = cfg.chat_server;
-      if (chatServer) console.log(`[mosiac] chat delegated to ${chatServer}`);
+      if (chatServer) console.log(`[mosaic] chat delegated to ${chatServer}`);
     } catch {}
 
     this.socket = io(chatServer || undefined, {

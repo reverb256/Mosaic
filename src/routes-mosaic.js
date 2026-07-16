@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Mosiac Routes — non-auth endpoints that don't fit in auth.js.
+ * Mosaic Routes — non-auth endpoints that don't fit in auth.js.
  * Auth endpoints (WebAuthn, identity CRUD) now live in src/auth.js
  * under /api/auth/passkey/* and /api/auth/identity/*.
  */
@@ -13,7 +13,7 @@ const qr = require('./qr');
 const { getDb } = require('./database');
 
 /* ─── Health ─── */
-router.get('/health', (req, res) => res.json({ ok: true, mosiac: '0.1.0' }));
+router.get('/health', (req, res) => res.json({ ok: true, mosaic: '0.1.0' }));
 
 /* ─── Runtime Config ─── */
 router.get('/config', (req, res) => {
@@ -84,7 +84,7 @@ router.post('/verify', (req, res) => {
 /* ─── Moderation: Labels ────────────────────────────────────── */
 
 /**
- * POST /mosiac/label/apply — Apply a label to a URI.
+ * POST /mosaic/label/apply — Apply a label to a URI.
  * Body: { uri, value, labeler_pubkey, note, expires_at, signature }
  */
 router.post('/label/apply', (req, res) => {
@@ -104,7 +104,7 @@ router.post('/label/apply', (req, res) => {
 });
 
 /**
- * POST /mosiac/label/negate — Negate a previously applied label.
+ * POST /mosaic/label/negate — Negate a previously applied label.
  * Body: { label_cid, labeler_pubkey, signature }
  */
 router.post('/label/negate', (req, res) => {
@@ -121,7 +121,7 @@ router.post('/label/negate', (req, res) => {
 });
 
 /**
- * GET /mosiac/label/list — Get labels for a URI (query: ?uri=).
+ * GET /mosaic/label/list — Get labels for a URI (query: ?uri=).
  * Optional query params: ?uri=<uri>&active=true
  */
 router.get('/label/list', (req, res) => {
@@ -142,7 +142,7 @@ router.get('/label/list', (req, res) => {
 /* ─── Moderation: Reports ──────────────────────────────────── */
 
 /**
- * POST /mosiac/report/create — Submit a moderation report.
+ * POST /mosaic/report/create — Submit a moderation report.
  * Body: { uri, reason_type, reason }
  */
 router.post('/report/create', (req, res) => {
@@ -151,7 +151,7 @@ router.post('/report/create', (req, res) => {
     if (!uri || !reason_type) {
       return res.status(400).json({ error: 'Missing required fields: uri, reason_type' });
     }
-    const reportedBy = req.headers['x-mosiac-pubkey'] || 'anonymous';
+    const reportedBy = req.headers['x-mosaic-pubkey'] || 'anonymous';
     const { createReport } = require('./labels');
     const result = createReport(uri, reason_type, reason, reportedBy);
     res.status(201).json(result);
@@ -159,11 +159,11 @@ router.post('/report/create', (req, res) => {
 });
 
 /**
- * GET /mosiac/report/list — List reports by the current user.
+ * GET /mosaic/report/list — List reports by the current user.
  */
 router.get('/report/list', (req, res) => {
   try {
-    const reportedBy = req.headers['x-mosiac-pubkey'] || 'anonymous';
+    const reportedBy = req.headers['x-mosaic-pubkey'] || 'anonymous';
     const db = getDb();
     const reports = db.prepare(
       'SELECT * FROM moderation_reports WHERE reported_by = ? ORDER BY created_at DESC'
@@ -175,7 +175,7 @@ router.get('/report/list', (req, res) => {
 /* ─── Moderation: Appeals ──────────────────────────────────── */
 
 /**
- * POST /mosiac/appeal/create — Appeal a label.
+ * POST /mosaic/appeal/create — Appeal a label.
  * Body: { label_cid, reason, evidence }
  */
 router.post('/appeal/create', (req, res) => {
@@ -184,7 +184,7 @@ router.post('/appeal/create', (req, res) => {
     if (!label_cid || !reason) {
       return res.status(400).json({ error: 'Missing required fields: label_cid, reason' });
     }
-    const pubkey = req.headers['x-mosiac-pubkey'] || 'anonymous';
+    const pubkey = req.headers['x-mosaic-pubkey'] || 'anonymous';
     const { createAppeal } = require('./labels');
     const result = createAppeal(label_cid, pubkey, reason, evidence);
     res.status(201).json(result);
@@ -192,11 +192,11 @@ router.post('/appeal/create', (req, res) => {
 });
 
 /**
- * GET /mosiac/appeal/list — List appeals by the current user.
+ * GET /mosaic/appeal/list — List appeals by the current user.
  */
 router.get('/appeal/list', (req, res) => {
   try {
-    const pubkey = req.headers['x-mosiac-pubkey'] || 'anonymous';
+    const pubkey = req.headers['x-mosaic-pubkey'] || 'anonymous';
     const db = getDb();
     const appeals = db.prepare(
       'SELECT * FROM moderation_appeals WHERE pubkey = ? ORDER BY created_at DESC'

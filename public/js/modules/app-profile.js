@@ -1,5 +1,5 @@
 /**
- * Mosiac Profile Module — Profile editor/viewer with split-pane HTML/CSS editing
+ * Mosaic Profile Module — Profile editor/viewer with split-pane HTML/CSS editing
  * and sandboxed preview.
  *
  * This module can be loaded independently or alongside other app-*.js modules.
@@ -7,17 +7,17 @@
  *
  * Usage:
  *   // Initialize with container and current pubkey
- *   const profile = new MosiacProfile('#profile-container', currentPubkey);
+ *   const profile = new MosaicProfile('#profile-container', currentPubkey);
  *   await profile.loadProfile(targetPubkey);
  */
 
 // ─── Base URL ──────────────────────────────────────────────────────────────
 
-const MOSIAC_API = '';
+const MOSAIC_API = '';
 
 // ─── State ─────────────────────────────────────────────────────────────────
 
-class MosiacProfile {
+class MosaicProfile {
   constructor(containerSelector, currentPubkey) {
     this.container = document.querySelector(containerSelector);
     this.currentPubkey = currentPubkey || null;
@@ -29,7 +29,7 @@ class MosiacProfile {
   // ─── API Helpers ─────────────────────────────────────────────────────────
 
   async _fetch(path, options = {}) {
-    const res = await fetch(`${MOSIAC_API}/mosiac${path}`, {
+    const res = await fetch(`${MOSAIC_API}/mosaic${path}`, {
       headers: { 'Content-Type': 'application/json', ...options.headers },
       ...options,
     });
@@ -41,7 +41,7 @@ class MosiacProfile {
   }
 
   _getAuthHeaders() {
-    // Same token-based auth as other Mosiac modules
+    // Same token-based auth as other Mosaic modules
     const token = document.cookie.split('; ')
       .find(r => r.startsWith('token='))
       ?.split('=')[1];
@@ -74,7 +74,7 @@ class MosiacProfile {
     const isOwn = this.currentPubkey === this.viewingPubkey;
 
     this.container.innerHTML = `
-      <div class="mosiac-profile">
+      <div class="mosaic-profile">
         <div class="profile-header-bar">
           <div class="profile-identity">
             <span class="profile-name">${this._escapeHTML(manifest.display_name || 'Anonymous')}</span>
@@ -119,7 +119,7 @@ class MosiacProfile {
     const manifest = this.profile.manifest || this.profile;
 
     this.container.innerHTML = `
-      <div class="mosiac-profile-editor">
+      <div class="mosaic-profile-editor">
         <h3>Edit Profile</h3>
         <div class="editor-field">
           <label>Display Name</label>
@@ -136,8 +136,8 @@ class MosiacProfile {
         <div class="editor-field">
           <label>Theme</label>
           <select id="profile-editor-theme">
-            <option value="mosiac-dark" ${(manifest.theme||'mosiac-dark') === 'mosiac-dark' ? 'selected' : ''}>Mosiac Dark</option>
-            <option value="mosiac-light" ${manifest.theme === 'mosiac-light' ? 'selected' : ''}>Mosiac Light</option>
+            <option value="mosaic-dark" ${(manifest.theme||'mosaic-dark') === 'mosaic-dark' ? 'selected' : ''}>Mosaic Dark</option>
+            <option value="mosaic-light" ${manifest.theme === 'mosaic-light' ? 'selected' : ''}>Mosaic Light</option>
             <option value="custom" ${manifest.theme === 'custom' ? 'selected' : ''}>Custom</option>
           </select>
         </div>
@@ -285,6 +285,6 @@ ${linksHtml}</div>
 
 (function() {
   if (typeof window !== 'undefined') {
-    window.MosiacProfile = MosiacProfile;
+    window.MosaicProfile = MosaicProfile;
   }
 })();

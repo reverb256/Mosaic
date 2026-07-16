@@ -1,13 +1,13 @@
 ---
 last-reviewed: 2026-07-14
 status: active
-target: mosiac.maplespike.ca
+target: mosaic.maplespike.ca
 operator-policy: NEVER deploy to zephyr; only the other nodes (per user directive 2026-07-14)
 ---
 
-# Mosiac — Deploy on the local k3s cluster
+# Mosaic — Deploy on the local k3s cluster
 
-> **Goal:** Mosiac (forked Haven, AGPL-3.0, Express + Socket.io + WebRTC) exposed
+> **Goal:** Mosaic (forked Haven, AGPL-3.0, Express + Socket.io + WebRTC) exposed
 > at `https://mosaic.maplespike.ca` for human + invitee use, persistent on our
 > own infra. Image goes via `nexus:5000` (the canonical MapleSpike registry
 > per `quill/docs/decisions/0004-split-hostname-routing.md`); traffic goes
@@ -16,7 +16,7 @@ operator-policy: NEVER deploy to zephyr; only the other nodes (per user directiv
 
 ## Why this path (not CF Pages, not Workers, not Render/Railway/Fly)
 
-`mosiac/server.js` is a long-lived Node.js process that:
+`mosaic/server.js` is a long-lived Node.js process that:
 
 | Need | Why CF Pages doesn't fit | Why CF Workers/Containers beta doesn't fit (yet) | Why this path fits |
 |---|---|---|---|
@@ -25,7 +25,7 @@ operator-policy: NEVER deploy to zephyr; only the other nodes (per user directiv
 | Self-signed cert generation + `apple-app-site-association` + per-install custom .env (admin sets `SERVER_NAME`, `JWT_SECRET`, VAPID keys) | n/a | /data needs the certs and .env to live | k3s volume mount → image `docker-entrypoint.sh` reads/writes through |
 | Admin-tier tools (upload, sticker management, contact form, ICE/STUN config, group limits, GIPHY proxy) | n/a | n/a | All run server-side; no CF Worker implementations exist |
 
-CF Pages for the brand portal works because the portal is pure static. Mosiac
+CF Pages for the brand portal works because the portal is pure static. Mosaic
 isn't, so we ship it to the cluster. Operator picked K8s cluster path over
 Render/Railway/Fly on 2026-07-14: keeping all of `*.maplespike.ca` traffic on
 Canadian infrastructure (the same reason we picked CF Tunnel over a public
@@ -43,15 +43,15 @@ manifest snippet.
 ## Step 1 — Build + push image (one-time, then on each release)
 
 ```bash
-cd mosiac
-docker build -t nexus:5000/mosiac:dev .
-docker push nexus:5000/mosiac:dev
+cd mosaic
+docker build -t nexus:5000/mosaic:dev .
+docker push nexus:5000/mosaic:dev
 ```
 
-The Dockerfile already exists at `mosiac/Dockerfile`; it produces a
+The Dockerfile already exists at `mosaic/Dockerfile`; it produces a
 `node:22-alpine` image with `openssl` + `su-exec` for cert generation and
 volume permission fixups. The image exposes `:3000` (TURN/STUN also `:3001`
-but Mosiac uses `3000` for both chat+API). It expects `/data` mounted (the
+but Mosaic uses `3000` for both chat+API). It expects `/data` mounted (the
 StatefulSet's `volumeClaimTemplates` will provide it).
 
 ### Step 1.5 — Create the `nexus-registry-secret` imagePullSecret (one-time)
@@ -82,63 +82,63 @@ image reference to a public one AND drop the
 ## Step 2 — Namespace + PVC (NFS / local-path / whatever your StorageClass is)
 
 If you're using the `maplespike` namespace already (e.g. you have `quill-api`
-running there), drop Mosiac in there too to share the cloudflared tunnel
+running there), drop Mosaic in there too to share the cloudflared tunnel
 configmap. Otherwise:
 
 ```bash
-kubectl create ns mosiac   # or reuse the maplespike ns
+kubectl create ns mosaic   # or reuse the maplespike ns
 ```
 
 Then the PVC:
 
 ```yaml
-# mosiac/manifests/00-pvc.yaml
+# mosaic/manifests/00-pvc.yaml
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: mosiac-data
+  name: mosaic-data
   namespace: maplespike
 spec:
   accessModes: ["ReadWriteOnce"]
   storageClassName: local-path      # k3s default; swap to nfs/rook/etc if you have one
   resources:
     requests:
-      storage: 10Gi                 # start at 10Gi; resize via `kubectl edit pvc mosiac-data -n maplespike`
+      storage: 10Gi                 # start at 10Gi; resize via `kubectl edit pvc mosaic-data -n maplespike`
 ```
 
 ```bash
-kubectl apply -f mosiac/manifests/00-pvc.yaml
+kubectl apply -f mosaic/manifests/00-pvc.yaml
 ```
 
 ## Step 3 — Service (ClusterIP, internal-only)
 
 ```yaml
-# mosiac/manifests/01-svc.yaml
+# mosaic/manifests/01-svc.yaml
 apiVersion: v1
 kind: Service
 metadata:
-  name: mosiac-svc
+  name: mosaic-svc
   namespace: maplespike
   labels:
-    app: mosiac
+    app: mosaic
 spec:
   type: ClusterIP
   selector:
-    app: mosiac
+    app: mosaic
   ports:
     - port: 3000
       targetPort: 3000
       name: http
       protocol: TCP
-    - port: 3001                  # ⚠️ informational only — cloudflared does NOT proxy UDP. Mosiac's
+    - port: 3001                  # ⚠️ informational only — cloudflared does NOT proxy UDP. Mosaic's
                                   # STUN/TURN on UDP/3001 is unreachable from the public internet via
                                   # this tunnel. If voice calls from off-LAN clients need STUN, either
                                   # (a) set up a separate UDP-capable tunnel
                                   # (`cloudflared tunnel --protocol quic`) for `turn.maplespike.ca`,
-                                  # (b) point Mosiac at a public STUN server
+                                  # (b) point Mosaic at a public STUN server
                                   # (`STUN_URLS=stun:stun.cloudflare.com:3478,...` env var), or
                                   # (c) run a TURN relay with TCP fallback. For local-LAN-only calls,
-                                  # no action needed — Mosiac's STUN bypass via direct ICE works.
+                                  # no action needed — Mosaic's STUN bypass via direct ICE works.
       targetPort: 3001
       name: turn
       protocol: UDP
@@ -147,28 +147,28 @@ spec:
 ## Step 4 — StatefulSet (with `nodeAffinity` excluding `zephyr`)
 
 ```yaml
-# mosiac/manifests/02-statefulset.yaml
+# mosaic/manifests/02-statefulset.yaml
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: mosiac
+  name: mosaic
   namespace: maplespike
   labels:
-    app: mosiac
+    app: mosaic
 spec:
-  serviceName: mosiac-svc
-  replicas: 1                       # Single instance — Mosiac uses local SQLite; HA needs a different DB
+  serviceName: mosaic-svc
+  replicas: 1                       # Single instance — Mosaic uses local SQLite; HA needs a different DB
   selector:
     matchLabels:
-      app: mosiac
+      app: mosaic
   template:
     metadata:
       labels:
-        app: mosiac
+        app: mosaic
     spec:
       # Per operator policy (2026-07-14): "we NEVER deploy to zephyr".
       # The NotIn operator is the most defensive — if zephyr reappears with
-      # a different label assignment, this still keeps Mosiac off it.
+      # a different label assignment, this still keeps Mosaic off it.
       imagePullSecrets:
         - name: nexus-registry-secret       # created in Step 1.5; drop line if registry is public
       affinity:
@@ -180,8 +180,8 @@ spec:
                     operator: NotIn
                     values: ["zephyr"]
       containers:
-        - name: mosiac
-          image: nexus:5000/mosiac:dev
+        - name: mosaic
+          image: nexus:5000/mosaic:dev
           imagePullPolicy: IfNotPresent     # stable tag vs :dev / :latest — switch to Always if you tag with `:dev` and want each restart to grab the latest build
           ports:
             - containerPort: 3000
@@ -196,7 +196,7 @@ spec:
               value: "production"
             - name: HAVEN_DATA_DIR
               value: "/data"
-            # FORCE_HTTP=true so Mosiac's docker-entrypoint does NOT
+            # FORCE_HTTP=true so Mosaic's docker-entrypoint does NOT
             # self-generate a certificate — Cloudflare Tunnel terminates
             # TLS at the edge and forwards plain HTTP to the pod. Saving
             # us from cert-rotation drama every 90 days.
@@ -231,18 +231,18 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: mosiac-data
+            claimName: mosaic-data
 ```
 
 ```bash
-kubectl apply -f mosiac/manifests/02-statefulset.yaml
-kubectl rollout status statefulset/mosiac -n maplespike --timeout=120s
+kubectl apply -f mosaic/manifests/02-statefulset.yaml
+kubectl rollout status statefulset/mosaic -n maplespike --timeout=120s
 ```
 
-The StatefulSet (not Deployment) gives us a stable `mosiac-0.mosiac-svc`
+The StatefulSet (not Deployment) gives us a stable `mosaic-0.mosaic-svc`
 hostname inside the namespace, which makes the cloudflared ingress simpler —
-point it at `http://mosiac-0.mosiac-svc.maplespike:3000` (or just
-`http://mosiac-svc:3000` thanks to the Service).
+point it at `http://mosaic-0.mosaic-svc.maplespike:3000` (or just
+`http://mosaic-svc:3000` thanks to the Service).
 
 ## Step 5 — Patch `cloudflared-config` ConfigMap
 
@@ -259,7 +259,7 @@ The new row (inserted before the `service: http_status:404` line):
 
 ```yaml
   - hostname: mosaic.maplespike.ca
-    service: http://mosiac-svc:3000
+    service: http://mosaic-svc:3000
 ```
 
 Then restart `cloudflared` so it loads the new ingress:
@@ -306,8 +306,8 @@ End-to-end probes (must all pass before declaring victory):
 
 ```bash
 # Cluster-side: pod is up, health endpoint answers
-kubectl -n maplespike get pods -l app=mosiac
-kubectl -n maplespike exec -it mosiac-0 -- curl -s http://localhost:3000/api/health | jq .
+kubectl -n maplespike get pods -l app=mosaic
+kubectl -n maplespike exec -it mosaic-0 -- curl -s http://localhost:3000/api/health | jq .
 # → { "status": "online", "name": "...", "icon": null, "fingerprint": null }
 
 # Tunnel-side: cloudflared picked up the new ingress
@@ -325,7 +325,7 @@ curl -sS -o /dev/null -w 'mosaic health → HTTP %{http_code}\n' https://mosaic.
 ```
 
 If `202 response codes /api/health` works but the browser shows a
-`helmet` CSP violation: `helmet()` in `mosiac/server.js` defaults to a
+`helmet` CSP violation: `helmet()` in `mosaic/server.js` defaults to a
 strict policy with no remote origins; Cloudflare Tunnel terminates TLS at
 the edge and forwards plain HTTP, so `script-src` etc. won't allow
 self-hosted admin-panel scripts unless relaxed. See Step 9.
@@ -349,7 +349,7 @@ Hot redeploys (rebuilt image, same version): ~30s.
 
 ## Step 9 — CSP / per-tenant relaxation
 
-`mosiac/server.js` hardcodes a helmet CSP that allows:
+`mosaic/server.js` hardcodes a helmet CSP that allows:
 
 - `script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' blob: https://www.youtube.com https://w.soundcloud.com https://unpkg.com`
 - `connect-src 'self' ws: wss: https:`   ← already loose, so the Cloudflare Insights beacon, Sentry-style webhook relay, etc., work as expected.
@@ -360,17 +360,17 @@ from a `cdn.maplespike.ca` origin, update both the CSP directive in
 
 ## Step 10 — Backup + restore
 
-Mosiac has its own backup endpoint (admin-only): `GET /api/admin/backup` —
+Mosaic has its own backup endpoint (admin-only): `GET /api/admin/backup` —
 streams a zip with channels/roles/users/settings/messages/uploads
 (selectable). Schedule a CronJob in the cluster to pull backups daily.
 
-### Step 10.1 — Create the `mosiac-admin-token` Secret (one-time)
+### Step 10.1 — Create the `mosaic-admin-token` Secret (one-time)
 
 The backup CronJob below reads the admin token from
-`/var/run/secrets/mosiac/admin-token`. Obtain + create it BEFORE applying
+`/var/run/secrets/mosaic/admin-token`. Obtain + create it BEFORE applying
 the CronJob:
 
-1. After Mosiac is up at `https://mosaic.maplespike.ca` (post Step 5–6),
+1. After Mosaic is up at `https://mosaic.maplespike.ca` (post Step 5–6),
    open the URL in a browser and **register the first account with username
    `admin`** (the `ADMIN_USERNAME` env var can be overridden via
    `SERVER_NAME` admin setting; default is `admin`). This becomes the
@@ -382,23 +382,23 @@ the CronJob:
 3. Create the K8s Secret:
    ```bash
    TOKEN=$(echo -n '<paste the API key or JWT here>')
-   kubectl -n maplespike create secret generic mosiac-admin-token \
+   kubectl -n maplespike create secret generic mosaic-admin-token \
      --from-literal=admin-token="$TOKEN"
    ```
    The CronJob below mounts this Secret at
-   `/var/run/secrets/mosiac/admin-token` and reads it with `set -eu`
+   `/var/run/secrets/mosaic/admin-token` and reads it with `set -eu`
    (fail-fast on a missing token is intentional — better than running with
-   an empty Bearer header which Mosiac would silently 401 every second
+   an empty Bearer header which Mosaic would silently 401 every second
    until humans notice).
 
 ### Step 10.2 — Apply the daily backup CronJob
 
 ```yaml
-# backups/mosiac-backup-cron.yaml
+# backups/mosaic-backup-cron.yaml
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: mosiac-backup-daily
+  name: mosaic-backup-daily
   namespace: maplespike
 spec:
   schedule: "0 4 * * *"
@@ -414,28 +414,28 @@ spec:
                 - -c
                 - |
                   set -eu
-                  TOKEN="$(cat /var/run/secrets/mosiac/admin-token)"
+                  TOKEN="$(cat /var/run/secrets/mosaic/admin-token)"
                   mkdir -p /backup
                   curl -fsS -H "Authorization: Bearer ${TOKEN}" \
-                       -o /backup/mosiac-$(date +%F).zip \
-                       "http://mosiac-svc:3000/api/admin/backup?include=channels,users,settings,messages,files"
+                       -o /backup/mosaic-$(date +%F).zip \
+                       "http://mosaic-svc:3000/api/admin/backup?include=channels,users,settings,messages,files"
               volumeMounts:
                 - name: backup
                   mountPath: /backup
-                - name: mosiac-admin-token
-                  mountPath: /var/run/secrets/mosiac
+                - name: mosaic-admin-token
+                  mountPath: /var/run/secrets/mosaic
                   readOnly: true
           restartPolicy: OnFailure
           volumes:
             - name: backup
               persistentVolumeClaim:
-                claimName: mosiac-backups
-            - name: mosiac-admin-token
+                claimName: mosaic-backups
+            - name: mosaic-admin-token
               secret:
-                secretName: mosiac-admin-token    # K8s Secret to create first: `kubectl create secret generic mosiac-admin-token --from-literal=admin-token=... -n maplespike`. The token comes from Mosiac's `settings.server_settings` 'admin_password_reset_enabled' / initial admin registration; treat as sensitive.
+                secretName: mosaic-admin-token    # K8s Secret to create first: `kubectl create secret generic mosaic-admin-token --from-literal=admin-token=... -n maplespike`. The token comes from Mosaic's `settings.server_settings` 'admin_password_reset_enabled' / initial admin registration; treat as sensitive.
 ```
 
-(Pair with a separate `mosiac-backups` PVC; rotate 30d using a cron-driven
+(Pair with a separate `mosaic-backups` PVC; rotate 30d using a cron-driven
 cleanup script.)
 
 ## Operator reference — what to check first when something breaks
@@ -444,11 +444,11 @@ cleanup script.)
 |---------|--------------|-------------|
 | Browser shows `530` from Cloudflare edge | `cloudflared` pod can't reach the Service | `kubectl -n maplespike logs deploy/cloudflared --tail=50` — look for `connection refused` or `dial tcp i/o timeout` |
 | Browser shows `521` from Cloudflare edge | `cloudflared` pod is not running | `kubectl -n maplespike get pod -l app=cloudflared` |
-| Browser shows `502` from Cloudflare edge | `cloudflared` reached the Service but the pod was killed / readiness probe failed | `kubectl -n maplespike get pod -l app=mosiac` |
+| Browser shows `502` from Cloudflare edge | `cloudflared` reached the Service but the pod was killed / readiness probe failed | `kubectl -n maplespike get pod -l app=mosaic` |
 | Browser shows the brand site or 404 | DNS is pointing at the tunnel but the tunnel ingress doesn't have the new row yet OR DNS isn't wired at all | `kubectl -n maplespike get cm cloudflared-config -o yaml | grep mosaic` and `dig +short mosaic.maplespike.ca CNAME` |
 | `/api/health` returns 200 inside the pod but 530 outside | Cloudflare cert not yet provisioned for the new hostname | wait 60s after DNS attach; `curl -vI https://mosaic.maplespike.ca/` should show `server: cloudflare` and a Cloudflare-issued cert |
-| Pod won't start, `CrashLoopBackOff` | `/data` mount permission or volume not yet bound | `kubectl describe pod mosiac-0 -n maplespike` — look at the `Events:` block |
-| Pod scheduled onto `zephyr` (policy violation) | `nodeAffinity` not applied yet | `kubectl describe pod mosiac-0 -n maplespike | grep Node-Selectors` — should show `kubernetes.io/hostname NotIn [zephyr]` |
+| Pod won't start, `CrashLoopBackOff` | `/data` mount permission or volume not yet bound | `kubectl describe pod mosaic-0 -n maplespike` — look at the `Events:` block |
+| Pod scheduled onto `zephyr` (policy violation) | `nodeAffinity` not applied yet | `kubectl describe pod mosaic-0 -n maplespike | grep Node-Selectors` — should show `kubernetes.io/hostname NotIn [zephyr]` |
 
 ---
 

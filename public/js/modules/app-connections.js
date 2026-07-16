@@ -1,9 +1,9 @@
 /**
- * Mosiac Connections Module — Follow/unfollow buttons, follower/following
+ * Mosaic Connections Module — Follow/unfollow buttons, follower/following
  * lists, and block management UI.
  *
  * Usage:
- *   const conn = new MosiacConnections('#connections-container', currentPubkey);
+ *   const conn = new MosaicConnections('#connections-container', currentPubkey);
  *   await conn.loadConnections(targetPubkey);
  *
  * Provides follow/unfollow/block UI and displays followers/following lists.
@@ -11,9 +11,9 @@
 
 // ─── Base URL ──────────────────────────────────────────────────────────────
 
-const MOSIAC_API_CONN = '';
+const MOSAIC_API_CONN = '';
 
-class MosiacConnections {
+class MosaicConnections {
   constructor(containerSelector, currentPubkey) {
     this.container = document.querySelector(containerSelector);
     this.currentPubkey = currentPubkey || null;
@@ -29,7 +29,7 @@ class MosiacConnections {
   // ─── API Helpers ─────────────────────────────────────────────────────────
 
   async _fetch(path, options = {}) {
-    const res = await fetch(`${MOSIAC_API_CONN}/mosiac${path}`, {
+    const res = await fetch(`${MOSAIC_API_CONN}/mosaic${path}`, {
       headers: { 'Content-Type': 'application/json', ...options.headers },
       ...options,
     });
@@ -152,7 +152,7 @@ class MosiacConnections {
     const isOwn = this.currentPubkey === this.viewingPubkey;
     const isOther = this.currentPubkey && this.currentPubkey !== this.viewingPubkey;
 
-    let html = '<div class="mosiac-connections">';
+    let html = '<div class="mosaic-connections">';
 
     // Action buttons (viewing someone else's profile)
     if (isOther) {
@@ -331,6 +331,6 @@ class MosiacConnections {
 
 (function() {
   if (typeof window !== 'undefined') {
-    window.MosiacConnections = MosiacConnections;
+    window.MosaicConnections = MosaicConnections;
   }
 })();

@@ -511,7 +511,7 @@ function validateMnemonicDetailed(mnemonic) {
 const ENCRYPTION_ALGO = 'aes-256-gcm';
 const IV_LENGTH = 12; // 96-bit IV (recommended for GCM)
 const PBKDF2_ITERATIONS = 100000;
-const ENC_SALT = 'mosiac-key-encryption-v1';
+const ENC_SALT = 'mosaic-key-encryption-v1';
 
 /**
  * Derive a 256-bit AES key from a passphrase.

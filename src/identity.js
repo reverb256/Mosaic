@@ -3,7 +3,7 @@
 /**
  * Identity Module — Ed25519 key management with NaCl.
  *
- * Every Mosiac user gets an Ed25519 key pair as their root identity.
+ * Every Mosaic user gets an Ed25519 key pair as their root identity.
  * The public key is the user's globally unique address/identity.
  * The private key never leaves the device (stored in SQLite via better-sqlite3).
  *
@@ -169,18 +169,18 @@ function fingerprint(pubkey) {
 
 /**
  * Generate a QR-friendly URI for sharing a public key.
- * Format: mosiac://<pubkey>?fn=<fingerprint>
+ * Format: mosaic://<pubkey>?fn=<fingerprint>
  *
  * @param {string} pubkey - Base64URL-encoded public key
  * @returns {string}
  */
 function pubkeyURI(pubkey) {
   const fp = fingerprint(pubkey);
-  return `mosiac://${pubkey}?fn=${fp}`;
+  return `mosaic://${pubkey}?fn=${fp}`;
 }
 
 /**
- * Parse a mosiac:// URI back into the pubkey.
+ * Parse a mosaic:// URI back into the pubkey.
  *
  * @param {string} uri
  * @returns {{ pubkey: string, fingerprint: string } | null}
@@ -188,7 +188,7 @@ function pubkeyURI(pubkey) {
 function parsePubkeyURI(uri) {
   try {
     const u = new URL(uri);
-    if (u.protocol !== 'mosiac:') return null;
+    if (u.protocol !== 'mosaic:') return null;
     const pubkey = u.hostname || u.pathname.replace(/^\//, '');
     if (!pubkey) return null;
     const fp = u.searchParams.get('fn') || '';
@@ -201,7 +201,7 @@ function parsePubkeyURI(uri) {
 // ─── DID key export (atproto-compatible) ────────────────────
 
 /**
- * Encode a Mosiac native pubkey as an atproto-compatible did:key string.
+ * Encode a Mosaic native pubkey as an atproto-compatible did:key string.
  *
  * did:key uses multicodec + multibase (base58btc). The Ed25519 raw public
  * key bytes are prefixed with the Ed25519 varint (0x01 0xed), then encoded

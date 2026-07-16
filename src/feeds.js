@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Mosiac Feed Module — Feed post creation, query, and reactions.
+ * Mosaic Feed Module — Feed post creation, query, and reactions.
  *
  * Post schema (signed event envelope):
  * {
