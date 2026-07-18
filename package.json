@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "mosiac",
   "version": "3.29.0",
   "description": "Mosaic - sovereign identity + communications platform",
@@ -12,7 +12,7 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
-    "adm-zip": "^0.5.16",
+    "adm-zip": "^0.6.0",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^12.10.0",
     "dotenv": "^16.4.7",
