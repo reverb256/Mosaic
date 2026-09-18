@@ -34,6 +34,12 @@ Mosaic tracks [`ancsemi/Haven`](https://github.com/ancsemi/Haven) continuously v
 
 ## Notes
 
+- Automation credentials: the workflow pushes use the repo secret `SYNC_PAT`
+  (classic PAT with `repo` + `workflow` scopes — required because sync merges
+  carry upstream workflow files, which the default `GITHUB_TOKEN` cannot
+  update). Rotate the secret when the PAT rotates. The `gh` CLI OAuth token
+  does NOT have `workflow` scope — local pushes that touch
+  `.github/workflows/` must use the PAT.
 - Known pre-existing test debt: `test/identity.test.js` DB + HTTP suites fail on
   `main` (they expect a `database.createIdentity`-style API that was never
   implemented). The smoke check therefore gates on module load, not the full
