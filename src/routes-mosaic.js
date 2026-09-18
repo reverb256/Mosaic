@@ -16,6 +16,15 @@ const { getIdentityDb } = require('./database');
 /* ─── Health ─── */
 router.get('/health', (req, res) => res.json({ ok: true, mosaic: '0.1.0' }));
 
+/* ─── Runtime config (modular runtime: FEATURES + delegated services) ─── */
+router.get('/config', (req, res) => {
+  res.json({
+    features: (process.env.FEATURES || 'all').split(',').map(s => s.trim()),
+    chat_server: process.env.CHAT_SERVER_URL || null,
+    identity_server: process.env.IDENTITY_SERVER_URL || null,
+  });
+});
+
 /* ─── Identity ─── */
 router.get('/identity', (req, res) => {
   try {
