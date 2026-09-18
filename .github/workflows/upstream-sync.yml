@@ -7,9 +7,14 @@ name: Upstream Sync (Haven)
 #   - if upstream moved: it attempts a merge on a scratch branch
 #       * clean merge + module smoke passes  -> fast-forwards main and
 #         closes any stale upstream-sync issue
-#       * conflicts / failed smoke           -> opens or updates an
+#       * conflicts / failed smoke / failed push -> opens or updates an
 #         `upstream-sync` issue with the details (never touches main)
 #   - dry_run=true (manual) reports what WOULD happen, changes nothing
+#
+# Pushes use the SYNC_PAT repo secret (classic PAT with repo+workflow
+# scopes) because the default GITHUB_TOKEN cannot reliably update
+# workflow files carried in from upstream. Rotate the secret when the
+# PAT rotates.
 #
 # The merge is always a merge commit so upstream history stays reachable
 # for the next sync (never squash/rebase upstream into the fork).
@@ -34,7 +39,7 @@ concurrency:
 
 env:
   UPSTREAM_URL: https://github.com/ancsemi/Haven.git
-  GH_TOKEN: ${{ github.token }}
+  GH_TOKEN: ${{ secrets.SYNC_PAT }}
 
 jobs:
   sync:
@@ -45,6 +50,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ secrets.SYNC_PAT }}
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -108,14 +114,12 @@ jobs:
         if: steps.merge.outputs.clean == 'true' && steps.smoke.outcome == 'success'
         run: |
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            echo "dry_run: would push ${{ steps.merge.outputs.merged_sha }} to main" 
-            echo "dry_run_requested=true" >> "$GITHUB_OUTPUT"
+            echo "dry_run: would push ${{ steps.merge.outputs.merged_sha }} to main"
             exit 0
           fi
           git push origin sync/upstream:main
           echo "landed=true" >> "$GITHUB_OUTPUT"
           echo "synced main to ${{ steps.merge.outputs.merged_sha }}" >> "$GITHUB_STEP_SUMMARY"
-          # close any previously-open sync issue — drift is resolved
           for N in $(gh issue list -R "$GITHUB_REPOSITORY" --label upstream-sync --state open --json number --jq '.[].number'); do
             gh issue close "$N" -R "$GITHUB_REPOSITORY" -c "Auto-resolved: upstream merged cleanly (${{ steps.merge.outputs.merged_sha }})."
           done
@@ -146,4 +150,15 @@ jobs:
             gh issue comment "$EXISTING" -R "$GITHUB_REPOSITORY" -b "$BODY"
           else
             gh issue create -R "$GITHUB_REPOSITORY" --label upstream-sync --title "$TITLE" --body "$BODY" --assignee reverb256
+          fi
+
+      - name: Report automation failure
+        if: failure() && steps.drift.outputs.behind != '0'
+        run: |
+          BODY=$(printf 'The upstream-sync automation failed during its run (drift was %s commits).\n\nLog: %s' "${{ steps.drift.outputs.behind }}" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")
+          EXISTING=$(gh issue list -R "$GITHUB_REPOSITORY" --label upstream-sync --state open --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" -R "$GITHUB_REPOSITORY" -b "$BODY"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --label upstream-sync --title "Upstream sync automation failure" --body "$BODY" --assignee reverb256
           fi
