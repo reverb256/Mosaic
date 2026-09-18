@@ -1,0 +1,149 @@
+name: Upstream Sync (Haven)
+
+# Keeps reverb256/Mosaic continuously in sync with ancsemi/Haven.
+#
+# Behavior:
+#   - daily (and on demand) it fetches upstream/main and measures drift
+#   - if upstream moved: it attempts a merge on a scratch branch
+#       * clean merge + module smoke passes  -> fast-forwards main and
+#         closes any stale upstream-sync issue
+#       * conflicts / failed smoke           -> opens or updates an
+#         `upstream-sync` issue with the details (never touches main)
+#   - dry_run=true (manual) reports what WOULD happen, changes nothing
+#
+# The merge is always a merge commit so upstream history stays reachable
+# for the next sync (never squash/rebase upstream into the fork).
+
+on:
+  schedule:
+    - cron: '17 12 * * *'   # daily 12:17 UTC (07:17 America/Chicago)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Report only; do not push or file issues'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: true
+
+env:
+  UPSTREAM_URL: https://github.com/ancsemi/Haven.git
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Configure git + fetch upstream
+        run: |
+          git config user.name "upstream-sync"
+          git config user.email "upstream-sync@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
+          git fetch upstream main --quiet
+          echo "upstream head: $(git rev-parse --short upstream/main)"
+          echo "local head:    $(git rev-parse --short HEAD)"
+
+      - name: Measure drift
+        id: drift
+        run: |
+          BEHIND=$(git rev-list --count HEAD..upstream/main)
+          AHEAD=$(git rev-list --count upstream/main..HEAD)
+          echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
+          echo "ahead=$AHEAD" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Upstream drift"
+            echo ""
+            echo "- behind upstream/main: **$BEHIND** commits"
+            echo "- local-only commits: $AHEAD"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attempt merge on scratch branch
+        id: merge
+        if: steps.drift.outputs.behind != '0'
+        run: |
+          git checkout -B sync/upstream
+          if git merge --no-edit upstream/main; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+            echo "merged_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U | sort -u > /tmp/conflicts.txt
+            git merge --abort
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            echo "conflict files:"; cat /tmp/conflicts.txt
+          fi
+
+      - name: Module smoke on merged tree
+        id: smoke
+        if: steps.merge.outputs.clean == 'true'
+        run: |
+          npm ci --no-audit --no-fund 2>&1 | tail -2
+          npm install-scripts approve better-sqlite3 2>/dev/null || true
+          JWT_SECRET=ci-smoke-secret timeout 60 node -e "
+            require('./src/auth');
+            require('./src/routes-mosiac');
+            require('./src/database');
+            console.log('MODULES-LOAD-OK');
+            process.exit(0);
+          "
+
+      - name: Land the sync
+        id: land
+        if: steps.merge.outputs.clean == 'true' && steps.smoke.outcome == 'success'
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            echo "dry_run: would push ${{ steps.merge.outputs.merged_sha }} to main" 
+            echo "dry_run_requested=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git push origin sync/upstream:main
+          echo "landed=true" >> "$GITHUB_OUTPUT"
+          echo "synced main to ${{ steps.merge.outputs.merged_sha }}" >> "$GITHUB_STEP_SUMMARY"
+          # close any previously-open sync issue — drift is resolved
+          for N in $(gh issue list -R "$GITHUB_REPOSITORY" --label upstream-sync --state open --json number --jq '.[].number'); do
+            gh issue close "$N" -R "$GITHUB_REPOSITORY" -c "Auto-resolved: upstream merged cleanly (${{ steps.merge.outputs.merged_sha }})."
+          done
+
+      - name: File or update sync-blocked issue
+        id: report
+        if: |
+          steps.drift.outputs.behind != '0' &&
+          (steps.merge.outputs.clean == 'false' || steps.smoke.outcome == 'failure')
+        run: |
+          UP=$(git rev-parse --short upstream/main)
+          BEHIND="${{ steps.drift.outputs.behind }}"
+          if [ "${{ steps.merge.outputs.clean }}" = "false" ]; then
+            DETAIL="Merge conflicts in: $(paste -sd', ' /tmp/conflicts.txt 2>/dev/null || echo 'unknown')"
+            TITLE="Upstream sync blocked: merge conflicts with Haven ($UP)"
+          else
+            DETAIL="Module smoke failed on the clean merge — check the workflow log."
+            TITLE="Upstream sync blocked: smoke check failed ($UP)"
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            echo "[dry_run] would file issue: $TITLE — $DETAIL"
+            echo "$DETAIL" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          BODY=$(printf 'Upstream is %s commits ahead (%s).\n\n%s\n\nRun: %s\n\nResolve: merge `upstream/main` locally, reconcile per `docs/UPSTREAM-SYNC.md`, push to main, then close this issue.' "$BEHIND" "$UP" "$DETAIL" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")
+          EXISTING=$(gh issue list -R "$GITHUB_REPOSITORY" --label upstream-sync --state open --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" -R "$GITHUB_REPOSITORY" -b "$BODY"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --label upstream-sync --title "$TITLE" --body "$BODY" --assignee reverb256
+          fi
