@@ -103,7 +103,7 @@ jobs:
           npm install-scripts approve better-sqlite3 2>/dev/null || true
           JWT_SECRET=ci-smoke-secret timeout 60 node -e "
             require('./src/auth');
-            require('./src/routes-mosiac');
+            require('./src/routes-mosaic');
             require('./src/database');
             console.log('MODULES-LOAD-OK');
             process.exit(0);

@@ -1,8 +1,8 @@
-# Mosiac Fork Plan
+# Mosaic Fork Plan
 
-**From Haven (Discord-alike) → Mosiac (Discord + MySpace + Facebook + Matrix)**
+**From Haven (Discord-alike) → Mosaic (Discord + MySpace + Facebook + Matrix)**
 
-Mosiac is a fork of [Haven](https://github.com/ancsemi/Haven) (AGPL-3.0) that adds sovereign identity,
+Mosaic is a fork of [Haven](https://github.com/ancsemi/Haven) (AGPL-3.0) that adds sovereign identity,
 customizable profiles, activity feeds, and P2P federation on top of Haven's realtime chat/voice/screenshare
 foundation. No domain required. No KYC. No Big Tech.
 
@@ -12,7 +12,7 @@ foundation. No domain required. No KYC. No Big Tech.
 
 ```
 ┌─────────────────────────────────────────┐
-│  Mosiac (new layers)                     │
+│  Mosaic (new layers)                     │
 │  ├─ Identity (Ed25519 + Passkey + QR)    │
 │  ├─ Profiles (sandboxed HTML/CSS/JS)     │
 │  ├─ Feeds / Bulletins                    │
@@ -95,7 +95,7 @@ Customizable per-user profile pages alongside the chat UI.
 | `src/profiles-sandbox.js` | CSP sandbox configuration for user-supplied HTML/CSS/JS |
 | `public/js/modules/app-profile.js` | Client-side profile editor and viewer |
 | `public/js/modules/app-profile-widgets.js` | Widget system (music player, about, recent posts, friends) |
-| `themes/mosiac-default/` | Default Mosiac profile theme |
+| `themes/mosaic-default/` | Default Mosaic profile theme |
 
 ### Files to modify
 
@@ -116,7 +116,7 @@ Customizable per-user profile pages alongside the chat UI.
   "bio": "building sovereign social",
   "avatar": "ipfs://Qm...",
   "background": "ipfs://Qm...",
-  "theme": "mosiac-dark",
+  "theme": "mosaic-dark",
   "template": "html",  // or "sandboxed_html"
   "content": "<div>my custom profile HTML</div>",
   "widgets": [
@@ -213,7 +213,7 @@ All user actions produce signed events, laying groundwork for P2P gossip.
 
 ## Phase 6: Federation (P2P Gossip)
 
-Gossip protocol between Mosiac nodes.
+Gossip protocol between Mosaic nodes.
 
 ### Files to add
 
@@ -265,8 +265,8 @@ Phase 6:
 
 Already running: `ghcr.io/ancsemi/haven:3.1.1` on nexus, `haven` namespace.
 
-Mosiac will ship as:
-- `ghcr.io/reverb256/mosiac:<tag>` (or nexus registry mirror)
+Mosaic will ship as:
+- `ghcr.io/reverb256/mosaic:<tag>` (or nexus registry mirror)
 - Single OCI container, same pattern as Haven
 - Persistent volumes: `/data` for keys, db, media
 - No domain needed — FORCE_HTTP=true, expose via NodePort or ClusterIP + Tailscale funnel
@@ -276,16 +276,16 @@ Mosiac will ship as:
 ## Git Strategy
 
 - `main` branch tracks upstream `ancsemi/Haven` (git pull to merge upstream fixes)
-- `mosiac` branch is our divergence point
-- Feature branches off `mosiac`: `mosiac/phase-1-identity`, `mosiac/phase-2-profiles`, etc.
-- Upstream changes merged into `main`, then cherry-pick or rebase `mosiac` onto `main`
+- `mosaic` branch is our divergence point
+- Feature branches off `mosaic`: `mosaic/phase-1-identity`, `mosaic/phase-2-profiles`, etc.
+- Upstream changes merged into `main`, then cherry-pick or rebase `mosaic` onto `main`
 
 ---
 
 ## Current Status
 
-- [x] Repo cloned and rebranded to Mosiac (package.json, Dockerfile, paths.js)
-- [x] `mosiac` branch created
+- [x] Repo cloned and rebranded to Mosaic (package.json, Dockerfile, paths.js)
+- [x] `mosaic` branch created
 - [ ] Phase 1: Identity layer
 - [ ] Phase 2: Profiles
 - [ ] Phase 3: Feeds & posts

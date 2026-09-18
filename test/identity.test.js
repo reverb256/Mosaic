@@ -53,7 +53,7 @@ describe('Identity Module', () => {
   describe('sign() and verify()', () => {
     it('should sign and verify a string message', () => {
       const kp = identity.generateKeyPair();
-      const msg = 'Hello, Mosiac!';
+      const msg = 'Hello, Mosaic!';
       const sig = identity.sign(msg, kp.privkey);
 
       assert.ok(sig.length >= 86); // 64 bytes → ~88 chars Base64URL
@@ -112,7 +112,7 @@ describe('Identity Module', () => {
     it('should generate and parse URIs', () => {
       const kp = identity.generateKeyPair();
       const uri = identity.pubkeyURI(kp.pubkey);
-      assert.ok(uri.startsWith('mosiac://'));
+      assert.ok(uri.startsWith('mosaic://'));
 
       const parsed = identity.parsePubkeyURI(uri);
       assert.ok(parsed);
@@ -121,7 +121,7 @@ describe('Identity Module', () => {
 
     it('should return null for invalid URIs', () => {
       assert.strictEqual(identity.parsePubkeyURI('https://example.com'), null);
-      assert.strictEqual(identity.parsePubkeyURI('mosiac://'), null); // empty pubkey
+      assert.strictEqual(identity.parsePubkeyURI('mosaic://'), null); // empty pubkey
     });
   });
 });
@@ -134,7 +134,7 @@ describe('Database Module', () => {
   let dbPath;
 
   before(() => {
-    dbPath = path.join(os.tmpdir(), `mosiac-test-${Date.now()}.db`);
+    dbPath = path.join(os.tmpdir(), `mosaic-test-${Date.now()}.db`);
     database.init(dbPath);
   });
 
@@ -285,7 +285,7 @@ const qr = require('../src/qr');
 
 describe('QR Module', () => {
   describe('parseQR()', () => {
-    it('should parse a mosiac:// URI', () => {
+    it('should parse a mosaic:// URI', () => {
       const kp = identity.generateKeyPair();
       const uri = identity.pubkeyURI(kp.pubkey);
       const parsed = qr.parseQR(uri);
@@ -335,12 +335,12 @@ describe('Server', () => {
 
   before(async () => {
     // Use a unique DB for server tests — clean up any leftover default DB
-    const tmpDir = path.join(os.tmpdir(), `mosiac-server-test-${Date.now()}`);
-    testDbPath = path.join(tmpDir, 'mosiac.db');
+    const tmpDir = path.join(os.tmpdir(), `mosaic-server-test-${Date.now()}`);
+    testDbPath = path.join(tmpDir, 'mosaic.db');
     fs.mkdirSync(tmpDir, { recursive: true });
-    process.env.MOSIAC_DATA_DIR = tmpDir;
-    process.env.MOSIAC_RP_ID = 'localhost';
-    process.env.MOSIAC_ORIGIN = `http://localhost:${PORT}`;
+    process.env.MOSAIC_DATA_DIR = tmpDir;
+    process.env.MOSAIC_RP_ID = 'localhost';
+    process.env.MOSAIC_ORIGIN = `http://localhost:${PORT}`;
     process.env.PORT = String(PORT);
 
     // Close the DB from prior test to avoid conflicts
@@ -405,7 +405,7 @@ describe('Server', () => {
     assert.ok(res.body.identity.pubkey);
     assert.ok(res.body.identity.pubkeyHex);
     assert.ok(res.body.identity.fingerprint);
-    assert.ok(res.body.identity.uri.startsWith('mosiac://'));
+    assert.ok(res.body.identity.uri.startsWith('mosaic://'));
   });
 
   it('GET /api/identity returns list', async () => {

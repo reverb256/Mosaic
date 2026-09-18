@@ -1,9 +1,9 @@
-# ── Mosiac Dockerfile ────────────────────────────────────
+# ── Mosaic Dockerfile ────────────────────────────────────
 # Lightweight Node.js image with SSL cert auto-generation.
 # Data (database, .env, certs, uploads) is stored in /data
 # so it survives container rebuilds.
 #
-# Build:   docker build -t mosiac .
+# Build:   docker build -t mosaic .
 # Run:     docker compose up -d
 # ─────────────────────────────────────────────────────────
 

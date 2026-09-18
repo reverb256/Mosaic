@@ -130,7 +130,7 @@ const {
 const { startTunnel, stopTunnel, getTunnelStatus, registerProcessCleanup } = require('./src/tunnel');
 const { startDdns, getDdnsStatus, triggerDdnsNow } = require('./src/ddns');
 const { initFcm, setFcmAdminEnabled } = require('./src/fcm');
-const mosiacRoutes = require('./src/routes-mosiac');
+const mosaicRoutes = require('./src/routes-mosaic');
 
 const app = express();
 const BOT_AUDIO_DIR = path.join(UPLOADS_DIR, 'bot-audio');
@@ -787,12 +787,12 @@ const has = (f) => activeFeatures.includes('all') || activeFeatures.includes(f);
 if (has('chat')) {
   // Chat is the default — Haven's full stack. No additional mount needed
   // since authRoutes and socket handlers are always loaded.
-  console.log(`  [mosiac] chat enabled`);
+  console.log(`  [mosaic] chat enabled`);
 }
 
 if (has('identity') || has('profiles') || has('feeds')) {
-  console.log(`  [mosiac] identity/profiles/feeds routes at /mosiac/*`);
-  app.use('/mosiac', mosiacRoutes);
+  console.log(`  [mosaic] identity/profiles/feeds routes at /mosaic/*`);
+  app.use('/mosaic', mosaicRoutes);
 }
 
 // ── Rich presence: account linking (Steam / Spotify) ─────

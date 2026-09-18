@@ -28,7 +28,7 @@ Mosaic tracks [`ancsemi/Haven`](https://github.com/ancsemi/Haven) continuously v
 5. Verify:
    ```bash
    npm ci
-   JWT_SECRET=test timeout 60 node -e "require('./src/auth'); require('./src/routes-mosiac'); require('./src/database'); console.log('OK'); process.exit(0)"
+   JWT_SECRET=test timeout 60 node -e "require('./src/auth'); require('./src/routes-mosaic'); require('./src/database'); console.log('OK'); process.exit(0)"
    ```
 6. Push to `main`, then close the `upstream-sync` issue.
 

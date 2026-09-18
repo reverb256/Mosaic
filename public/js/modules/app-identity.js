@@ -1,5 +1,5 @@
 /**
- * Mosiac Identity Layer — Frontend Module
+ * Mosaic Identity Layer — Frontend Module
  *
  * Handles:
  *   - WebAuthn registration ceremony (passkey creation)
@@ -12,7 +12,7 @@
 
 // ─── Base URL ──────────────────────────────────────────────────────────────
 
-const API = '/mosiac';
+const API = '/mosaic';
 
 // ─── DOM refs ──────────────────────────────────────────────────────────────
 
@@ -94,7 +94,7 @@ async function beginRegistration() {
     // Display the generated identity info
     $('reg-pubkey').textContent = data.pubkey;
     $('reg-fingerprint').textContent = data.pubkeyHex.slice(0, 16) + '…';
-    $('reg-uri').textContent = `mosiac://${data.pubkey}`;
+    $('reg-uri').textContent = `mosaic://${data.pubkey}`;
 
     // Store state for passkey registration
     registrationState = data;
@@ -215,7 +215,7 @@ async function beginLogin() {
     const result = await verifyRes.json();
 
     // Store session token
-    document.cookie = `mosiac_session=${result.sessionToken}; path=/; max-age=604800; SameSite=Strict`;
+    document.cookie = `mosaic_session=${result.sessionToken}; path=/; max-age=604800; SameSite=Strict`;
 
     await loadDashboard();
   } catch (err) {
@@ -417,7 +417,7 @@ async function showIdentities() {
 
 async function logout() {
   await fetch(`${API}/auth/logout`, { method: 'POST' });
-  document.cookie = 'mosiac_session=; path=/; max-age=0';
+  document.cookie = 'mosaic_session=; path=/; max-age=0';
   showView('splash');
 }
 

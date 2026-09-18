@@ -29,10 +29,10 @@ function getDataDir() {
   let base;
   if (process.platform === 'win32') {
     // %APPDATA% → C:\Users\<user>\AppData\Roaming
-    base = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Mosiac');
+    base = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Mosaic');
   } else {
     // Linux / macOS → ~/.haven
-    base = path.join(os.homedir(), '.mosiac');
+    base = path.join(os.homedir(), '.mosaic');
   }
 
   fs.mkdirSync(base, { recursive: true });

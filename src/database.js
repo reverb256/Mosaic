@@ -260,7 +260,7 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_messages_channel_id
       ON messages(channel_id, id DESC);
 
-    -- Mosiac: Identity tables (added alongside Haven's existing tables)
+    -- Mosaic: Identity tables (added alongside Haven's existing tables)
     CREATE TABLE IF NOT EXISTS identities (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       pubkey        TEXT    NOT NULL UNIQUE,
