@@ -1,14 +1,156 @@
 export default {
 
+_migrateChannelCodeState(oldCode, newCode) {
+  if (!oldCode || !newCode || oldCode === newCode) return;
+  const migrateObjectKey = store => {
+    if (!store || !Object.prototype.hasOwnProperty.call(store, oldCode)) return false;
+    store[newCode] = store[oldCode];
+    delete store[oldCode];
+    return true;
+  };
+  migrateObjectKey(this.unreadCounts);
+  migrateObjectKey(this.voiceCounts);
+  migrateObjectKey(this.voiceChannelUsers);
+  migrateObjectKey(this._pinnedCountByChannel);
+  migrateObjectKey(this._unreadPinIdByChannel);
+  if (migrateObjectKey(this._threadMentions)) this._persistThreadMentions?.();
+
+  for (const property of [
+    'currentChannel',
+    '_lastVoiceUsersChannel',
+    '_pendingChannelHistoryCode',
+    '_pinsPipChannelCode',
+    '_organizeParentCode'
+  ]) {
+    if (this[property] === oldCode) this[property] = newCode;
+  }
+  if (this.voice?.currentChannel === oldCode) this.voice.currentChannel = newCode;
+  if (this.voice?._softLeftChannel === oldCode) this.voice._softLeftChannel = newCode;
+  if (this.voice?._joiningChannelCode === oldCode) this.voice._joiningChannelCode = newCode;
+  for (const channel of this.channels || []) {
+    if (channel.afk_sub_code === oldCode) channel.afk_sub_code = newCode;
+  }
+  const createSubModal = document.getElementById('create-sub-modal');
+  if (createSubModal?._parentCode === oldCode) createSubModal._parentCode = newCode;
+
+  try {
+    if (localStorage.getItem('haven_voice_channel') === oldCode) {
+      localStorage.setItem('haven_voice_channel', newCode);
+    }
+  } catch {}
+  for (const key of ['haven_muted_channels', 'haven_hidden_channels']) {
+    try {
+      const values = JSON.parse(localStorage.getItem(key) || '[]');
+      if (!Array.isArray(values) || !values.includes(oldCode)) continue;
+      const migrated = values.map(code => code === oldCode ? newCode : code);
+      localStorage.setItem(key, JSON.stringify([...new Set(migrated)]));
+    } catch {}
+  }
+  try {
+    const moveStorageKey = (oldKey, newKey) => {
+      const value = localStorage.getItem(oldKey);
+      if (value === null) return;
+      localStorage.setItem(newKey, value);
+      localStorage.removeItem(oldKey);
+    };
+    for (const prefix of [
+      'haven_seen_pin_max_',
+      'haven_tag_sorts_',
+      'haven_cat_order_',
+      'haven_cat_sort_',
+      'haven_subs_collapsed_'
+    ]) moveStorageKey(`${prefix}${oldCode}`, `${prefix}${newCode}`);
+
+    const subtagPrefix = `haven_subtag_collapsed_${oldCode}_`;
+    const subtagKeys = [];
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (key?.startsWith(subtagPrefix)) subtagKeys.push(key);
+    }
+    for (const key of subtagKeys) {
+      moveStorageKey(key, `haven_subtag_collapsed_${newCode}_${key.slice(subtagPrefix.length)}`);
+    }
+  } catch { /* localStorage may be unavailable */ }
+},
+
+_collectChannelCodeRotations(channels) {
+  const rotations = new Map();
+  const persistedCodes = this._readChannelCodeMap();
+  for (const channel of channels) {
+    const oldCode = persistedCodes[channel.id];
+    if (typeof oldCode === 'string' && oldCode !== channel.code) {
+      rotations.set(oldCode, { channelId: channel.id, oldCode, newCode: channel.code });
+    }
+  }
+  for (const previous of this.channels || []) {
+    const updated = channels.find(channel => channel.id === previous.id);
+    if (updated && updated.code !== previous.code) {
+      rotations.set(previous.code, {
+        channelId: previous.id,
+        oldCode: previous.code,
+        newCode: updated.code
+      });
+    }
+  }
+  return [...rotations.values()];
+},
+
+_readChannelCodeMap() {
+  const ownerId = this.user?.id;
+  if (ownerId == null) return {};
+  try {
+    const persisted = JSON.parse(localStorage.getItem('haven_channel_codes_by_id') || 'null');
+    if (String(persisted?.ownerId) !== String(ownerId) || !persisted?.codes || typeof persisted.codes !== 'object' || Array.isArray(persisted.codes)) {
+      return {};
+    }
+    return persisted.codes;
+  } catch {
+    return {};
+  }
+},
+
+_persistChannelCodeMap(channels) {
+  const ownerId = this.user?.id;
+  if (ownerId == null) return;
+  const codes = {};
+  for (const channel of channels || []) {
+    if (channel?.id != null && channel.code) codes[channel.id] = channel.code;
+  }
+  try {
+    localStorage.setItem('haven_channel_codes_by_id', JSON.stringify({
+      ownerId: String(ownerId),
+      codes
+    }));
+  } catch { /* localStorage may be unavailable */ }
+},
+
+_updatePersistedChannelCode(channelId, code) {
+  if (channelId == null || !code) return;
+  const codes = this._readChannelCodeMap();
+  codes[channelId] = code;
+  this._persistChannelCodeMap(Object.entries(codes).map(([id, channelCode]) => ({
+    id,
+    code: channelCode
+  })));
+},
+
+_clearChannelCodeMap() {
+  try {
+    localStorage.removeItem('haven_channel_codes_by_id');
+  } catch { /* localStorage may be unavailable */ }
+},
+
 // ── Socket Event Listeners ────────────────────────────
 
 _setupSocketListeners() {
+  this._setupFerrySocket();
   // Authoritative user info pushed by server on every connect
   this.socket.on('session-info', (data) => {
     this.user = { ...this.user, ...data };
     this.user.roles = data.roles || [];
     this.user.effectiveLevel = data.effectiveLevel || 0;
     this.user.permissions = data.permissions || [];
+    this.user.globalPermissions = data.globalPermissions || [];
     if (this.voice && data.id) this.voice.localUserId = data.id;
     if (data.status) {
       this.userStatus = data.status;
@@ -30,20 +172,26 @@ _setupSocketListeners() {
         });
       }
     }
+    // Sync border (pfp overlay) from server, authoritative like avatar shape
+    if (data.border !== undefined) {
+      this.user.border = data.border || null;
+    }
+    // Sync the border fit (op log) so the editor restores it and pfps render it
+    if (data.borderTransform !== undefined) {
+      this.user.borderTransform = Array.isArray(data.borderTransform) ? data.borderTransform : null;
+    }
+    // Sync the animation policy (trigger/disabled) so the editor seeds it and pfps honor it
+    if (data.animateProfile !== undefined) {
+      this.user.animateProfile = data.animateProfile === 'disabled' ? 'disabled' : 'trigger';
+    }
     localStorage.setItem('haven_user', JSON.stringify(this.user));
-    // (#5394) Merge server-stored nicknames. Server is authoritative for any
-    // key it knows about; localStorage keeps anything the server doesn't have yet.
+    // (#5394) Server-stored nicknames are the record. localStorage is only a
+    // cache for the first paint before this event lands. The old merge also
+    // pushed any localStorage-only nickname back up on every connect, so a
+    // nickname cleared from one device came back from any other device that
+    // still had it cached, and could never be removed for good. (#5560)
     if (data.nicknames && typeof data.nicknames === 'object') {
-      const serverNicks = data.nicknames;
-      const localNicks = this._nicknames || {};
-      // Migrate: push localStorage-only nicknames to the server once.
-      const toSync = {};
-      for (const [id, nick] of Object.entries(localNicks)) {
-        if (nick && !serverNicks[id]) toSync[id] = nick;
-      }
-      if (Object.keys(toSync).length) this.socket.emit('set-nicknames-bulk', { nicknames: toSync });
-      // Server wins on conflict.
-      this._nicknames = { ...localNicks, ...serverNicks };
+      this._nicknames = { ...data.nicknames };
       localStorage.setItem('haven_nicknames', JSON.stringify(this._nicknames));
     }
     // Init E2E encryption AFTER socket is fully connected & server handlers registered
@@ -62,30 +210,43 @@ _setupSocketListeners() {
     if (loginEl) loginEl.textContent = `@${this.user.username}`;
     // Update avatar preview in settings if present
     this._updateAvatarPreview();
+    this._updateBorderPreview();
     // Show admin/mod controls based on role level
     const canModerate = this.user.isAdmin || this.user.effectiveLevel >= 25;
-    const canCreateChannel = this.user.isAdmin || this._hasPerm('create_channel');
+    const canCreateChannel = this.user.isAdmin || this._hasGlobalPerm('create_channel');
     document.getElementById('admin-controls').style.display = canCreateChannel ? 'block' : 'none';
-    if (this.user.isAdmin) {
-      document.getElementById('admin-mod-panel').style.display = 'block';
-    } else {
-      document.getElementById('admin-mod-panel').style.display = (canModerate || this._hasPerm('manage_emojis') || this._hasPerm('manage_stickers') || this._hasPerm('manage_soundboard') || this._hasPerm('view_audit_log')) ? 'block' : 'none';
-    }
+    document.getElementById('admin-mod-panel').style.display = (canModerate || this._hasAnyAdminSettingsAccess()) ? 'block' : 'none';
     document.getElementById('sidebar-members-btn').style.display = (this.user.isAdmin || canModerate || this._hasPerm('view_all_members') || this._hasPerm('view_channel_members')) ? '' : 'none';
   });
 
-  // Roles updated (from admin assigning/revoking)
+  // Roles updated (from admin assigning/revoking, or editing a role we hold)
   this.socket.on('roles-updated', (data) => {
+    this._refreshMentionableRoles?.();
+    // The server also fires this with NO payload as a plain "the server's role
+    // list changed" nudge (role edited, roles reset, admin role display
+    // changed) for anyone with the Role Management modal open. There's no
+    // per-user permission set to apply then. Bail instead of throwing on
+    // `data.roles` — that TypeError also aborted every roles-updated listener
+    // registered after this one, including the modal's own _loadRoles refresh.
+    if (!data) return;
+    // Your own roles/permissions just changed — cached search results may now
+    // include messages you can no longer access. Force-invalidate the panel
+    // (the channel list may be unchanged, so the signature check won't catch
+    // this). Payload-less server-wide nudges bail above and don't trigger it.
+    this._searchMarkStale?.();
     this.user.roles = data.roles || [];
     this.user.effectiveLevel = data.effectiveLevel || 0;
     this.user.permissions = data.permissions || [];
+    this.user.globalPermissions = data.globalPermissions || [];
     localStorage.setItem('haven_user', JSON.stringify(this.user));
     // Refresh UI to reflect new permissions
     const canModerate = this.user.isAdmin || this.user.effectiveLevel >= 25;
-    const canCreateChannel = this.user.isAdmin || this._hasPerm('create_channel');
+    const canCreateChannel = this.user.isAdmin || this._hasGlobalPerm('create_channel');
+    const canCreateInvites = this.user.isAdmin || this._hasGlobalPerm('manage_server') || this._hasGlobalPerm('invite_users');
     document.getElementById('admin-controls').style.display = canCreateChannel ? 'block' : 'none';
-    document.getElementById('admin-mod-panel').style.display = (canModerate || this._hasPerm('manage_emojis') || this._hasPerm('manage_stickers') || this._hasPerm('manage_soundboard') || this._hasPerm('view_audit_log')) ? 'block' : 'none';
+    document.getElementById('admin-mod-panel').style.display = (canModerate || this._hasAnyAdminSettingsAccess()) ? 'block' : 'none';
     document.getElementById('sidebar-members-btn').style.display = (this.user.isAdmin || canModerate || this._hasPerm('view_all_members') || this._hasPerm('view_channel_members')) ? '' : 'none';
+    document.getElementById('sidebar-invite-panel').style.display = canCreateInvites ? 'block' : 'none';
     this._showToast(t('toasts.roles_updated'), 'info');
   });
 
@@ -111,7 +272,7 @@ _setupSocketListeners() {
   this.socket.on('connect', () => {
     this._setLed('connection-led', 'on');
     this._setLed('status-server-led', 'on');
-    document.getElementById('status-server-text').textContent = 'Connected';
+    document.getElementById('status-server-text').textContent = t('app.status.connected');
     this._lastConnectTime = Date.now();
     this._authErrorStreak = 0;
     this._startPingMonitor();
@@ -123,10 +284,22 @@ _setupSocketListeners() {
       clearTimeout(this._voiceDisconnectTimer);
       this._voiceDisconnectTimer = null;
     }
+    if (this._savedVoiceRejoinTimer) {
+      clearTimeout(this._savedVoiceRejoinTimer);
+      this._savedVoiceRejoinTimer = null;
+    }
+    // A reconnect usually means the machine slept or the network dropped, which
+    // is the most likely moment for the media token to have expired underneath
+    // us. Cheap to redo and it keeps remote images from silently breaking.
+    this._refreshMediaToken?.();
+
     // Re-join channel after reconnect (server lost our room membership)
     this.socket.emit('visibility-change', { visible: !document.hidden });
+    this.voice?.deferChannelGone?.(6000);
     this.socket.emit('get-channels');
     this.socket.emit('get-server-settings');
+    // Role names for @Role mentions: rendering and the @ picker. (#5579)
+    this._refreshMentionableRoles?.();
 
     // (#5399 follow-up) Reconcile per-channel mute prefs with the server
     // once per session so the server can honor them when fanning out
@@ -152,6 +325,7 @@ _setupSocketListeners() {
         if (resp.status === 401 || resp.status === 404) {
           // Token is stale or user row gone — same outcome as a socket
           // 'Invalid token' / 'Session expired'. Kick to login.
+          this._clearChannelCodeMap();
           localStorage.removeItem('haven_token');
           localStorage.removeItem('haven_user');
           localStorage.removeItem('haven_sync_key');
@@ -190,12 +364,15 @@ _setupSocketListeners() {
       this._historyAfter = null;
       this.socket.emit('get-messages', { code: this.currentChannel });
       this.socket.emit('get-channel-members', { code: this.currentChannel });
-      // Request fresh voice list for this channel
-      this.socket.emit('request-voice-users', { code: this.currentChannel });
+      // Request fresh voice list for the channel currently in view.
+      this.socket.emit('request-voice-users', {
+        code: this.currentChannel,
+        iAmInVoice: !!(this.voice && this.voice.inVoice && this.voice.currentChannel === this.currentChannel)
+      });
     }
     // Re-join voice if we were in voice before reconnect
     if (this.voice && this.voice.inVoice && this.voice.currentChannel) {
-      this.socket.emit('voice-rejoin', { code: this.voice.currentChannel });
+      this.socket.emit('voice-rejoin', { code: this.voice.currentChannel, ...this.voice.getNativeScreenClientInfo() });
       if (this.voice.isMuted) this.socket.emit('voice-mute-state', { code: this.voice.currentChannel, muted: true });
       if (this.voice.isDeafened) this.socket.emit('voice-deafen-state', { code: this.voice.currentChannel, deafened: true });
       // (#5427) When the socket flaps (common on the web client behind certain
@@ -237,10 +414,13 @@ _setupSocketListeners() {
         const savedVoiceChannel = localStorage.getItem('haven_voice_channel');
         if (savedVoiceChannel && /^[a-f0-9]{8}$/i.test(savedVoiceChannel)) {
           // Auto-rejoin saved voice channel after delay (wait for channels to load)
-          setTimeout(async () => {
+          this._savedVoiceRejoinTimer = setTimeout(async () => {
+            this._savedVoiceRejoinTimer = null;
             if (this.voice && !this.voice.inVoice) {
-              console.log('[Voice] Auto-rejoining saved voice channel:', savedVoiceChannel);
-              const ok = await this.voice.join(savedVoiceChannel);
+              let currentSavedChannel = savedVoiceChannel;
+              try { currentSavedChannel = localStorage.getItem('haven_voice_channel') || savedVoiceChannel; } catch {}
+              console.log('[Voice] Auto-rejoining saved voice channel:', currentSavedChannel);
+              const ok = await this.voice.join(currentSavedChannel);
               if (ok) {
                 this._updateVoiceButtons(true);
                 this._updateVoiceStatus(true);
@@ -256,10 +436,11 @@ _setupSocketListeners() {
       this.socket.emit('set-status', this._pendingStatus);
       this._pendingStatus = null;
     }
-    // Show recovery-codes feature notice once per user (dismissible)
-    if (!localStorage.getItem('haven_recovery_notice_v1')) {
-      setTimeout(() => this._showRecoveryNotice(), 2500);
-    }
+    // Ask the server whether to surface the recovery-codes notice. It decides:
+    // skipped when the account already has recovery codes, or the user ticked
+    // "never show again" (both checked server-side). Reply is handled by the
+    // 'recovery-notice-state' listener registered in _setupSocketListeners.
+    this.socket.emit('get-recovery-notice-state');
   });
   document.addEventListener('visibilitychange', () => {
     this.socket?.emit('visibility-change', { visible: !document.hidden });
@@ -270,6 +451,9 @@ _setupSocketListeners() {
     // wake until you switch channels twice). (#post-sleep-channel-desync)
     if (document.hidden) {
       this._hiddenAt = Date.now();
+      // (#5463) Mark the current wake-detector window as tainted — see the
+      // background-throttling note on _wakeCheckInterval below.
+      this._tabHiddenSinceWakeCheck = true;
       return;
     }
     const hiddenForMs = this._hiddenAt ? (Date.now() - this._hiddenAt) : 0;
@@ -283,7 +467,16 @@ _setupSocketListeners() {
       // does the full resync (enter-channel, get-messages, members,
       // voice users, voice-rejoin) rather than relying on the partial
       // refresh below.
-      if (hiddenForMs > 30000 && this.socket) {
+      //
+      // (#5444) Never do that while a live voice session is running,
+      // though. Cycling the socket makes the server grace-evict the voice
+      // slot and re-add it a moment later, which is heard by everyone in
+      // the call as a leave sound followed by a join sound — for nothing
+      // more than the user tabbing away for half a minute and coming
+      // back. In that case fall through to the in-place refresh below.
+      const voiceLive = !!(this.voice && this.voice.inVoice &&
+        ((this.voice.liveVoicePeerCount?.() || 0) > 0 || this.voice.localStream));
+      if (hiddenForMs > 30000 && this.socket && !voiceLive) {
         try { this.socket.disconnect(); } catch {}
         try { this.socket.connect(); } catch {}
         return;
@@ -338,7 +531,16 @@ _setupSocketListeners() {
         // Pull a fresh online-users + voice roster so the right-side panels
         // aren't stuck on whatever stale snapshot was rendered before sleep.
         this.socket.emit('request-online-users', { code: this.currentChannel });
-        this.socket.emit('request-voice-users', { code: this.currentChannel });
+        this.socket.emit('request-voice-users', {
+          code: this.currentChannel,
+          iAmInVoice: !!(this.voice && this.voice.inVoice && this.voice.currentChannel === this.currentChannel)
+        });
+      }
+      // (#5444) We deliberately kept the socket alive above if voice was
+      // live, so rebind the voice slot here instead. This is a no-op on
+      // the server when we're already bound on this socket.
+      if (voiceLive && this.voice?.currentChannel && this.socket?.connected) {
+        this.socket.emit('voice-rejoin', { code: this.voice.currentChannel, ...this.voice.getNativeScreenClientInfo() });
       }
       // Re-fetch channels in case list changed while backgrounded
       this.socket?.emit('get-channels');
@@ -385,12 +587,37 @@ _setupSocketListeners() {
   // the next tick fires immediately with a huge gap from the previous
   // tick. If that gap exceeds the threshold, we know the process was
   // suspended and the socket is almost certainly a zombie.
+  //
+  // (#5463 / #5444) BUT: timer drift is ALSO what a backgrounded tab looks
+  // like. Once a tab has been hidden and silent for ~5 minutes, Chromium
+  // applies "intensive throttling" and fires setInterval at most once per
+  // MINUTE. That produced a 60 s drift on every tick, which tripped this
+  // detector, which hard-cycled the socket, which grace-evicted the user
+  // from voice on the server — a self-inflicted disconnect/reconnect loop
+  // running exactly every 60 seconds, forever, for as long as the tab sat
+  // in the background. It only ever hit web users because Haven Desktop
+  // sets `backgroundThrottling: false` on its windows, and it only ever
+  // hit idle tabs because a foreground tab is never throttled.
+  //
+  // So: only trust drift while the tab is actually visible. A hidden tab
+  // has its own recovery path already — the visibilitychange handler above
+  // forces a full resync when it comes back after >30 s hidden — and a
+  // socket that genuinely died while hidden is handled by socket.io's own
+  // reconnection. The PC-lock case this detector exists for is unaffected,
+  // because Win+L does NOT mark the page hidden.
   this._lastWakeCheck = Date.now();
+  this._tabHiddenSinceWakeCheck = document.hidden;
   if (this._wakeCheckInterval) clearInterval(this._wakeCheckInterval);
   this._wakeCheckInterval = setInterval(() => {
     const now = Date.now();
     const drift = now - this._lastWakeCheck;
     this._lastWakeCheck = now;
+    // Discard any interval that the tab spent hidden for even part of its
+    // length — the drift is throttling, not a suspend, and we can't tell
+    // the two apart from the timestamp alone.
+    const wasHidden = document.hidden || this._tabHiddenSinceWakeCheck;
+    this._tabHiddenSinceWakeCheck = document.hidden;
+    if (wasHidden) return;
     // Threshold: 30 s. Normal tick is 5 s, so even with heavy GC pauses
     // or main-thread blocking we won't false-positive at 30 s.
     if (drift > 30000) {
@@ -403,35 +630,67 @@ _setupSocketListeners() {
   // unlocks the PC and clicks back into the Haven window, focus fires even
   // if visibilitychange didn't. We debounce against the wake detector so
   // we don't double-cycle the socket within a few seconds.
+  //
+  // CRITICAL: title-bar drag / double-click maximize also fires `focus`,
+  // often during a multi-second main-thread stall while the stream video
+  // element relayouts. A single missed pong used to hard-cycle the socket
+  // (`focus-zombie`), which is exactly the "first resize drops me from
+  // voice roster but I can still talk" bug — server grace-evicts the old
+  // socketId, UI flips to Join Voice, WebRTC peers keep carrying audio.
+  window.addEventListener('resize', () => {
+    this._recentWindowResizeAt = Date.now();
+  });
   window.addEventListener('focus', () => {
     const sinceLastResync = Date.now() - (this._lastForcedResync || 0);
     if (sinceLastResync < 5000) return;
+    // Ignore focus storms that accompany a window resize/maximize.
+    if (this._recentWindowResizeAt && (Date.now() - this._recentWindowResizeAt) < 2500) {
+      return;
+    }
     // Cheap liveness probe: emit a ping-check and force-resync if no pong
-    // arrives within 4 s. Avoids needlessly cycling the socket on a quick
-    // window-switch where the connection is actually fine.
+    // arrives. Avoids needlessly cycling the socket on a quick window-switch
+    // where the connection is actually fine.
     if (!this.socket?.connected) {
       this._forceFullResync('focus-disconnected');
       return;
     }
+    // In an active voice session, never hard-disconnect on one missed pong.
+    // Stream decode + layout on maximize routinely blocks the renderer long
+    // enough for a 4s timer to fire even though the socket is healthy.
+    const voiceLive = !!(this.voice && (this.voice.inVoice || this.voice.liveVoicePeerCount?.() > 0));
     const probeStart = Date.now();
     let acked = false;
     const ackHandler = () => { acked = true; };
     this.socket.once('pong-check', ackHandler);
-    try { this.socket.emit('ping-check'); } catch {}
+    // Route through _pingSend so this probe's send time is queued too. It is a
+    // real round trip and should show up as one; emitting 'ping-check' directly
+    // here is what desynced the queue-less reading.
+    try { this._pingSend(); } catch {}
+    const probeMs = voiceLive ? 10000 : 6000;
     setTimeout(() => {
       this.socket?.off('pong-check', ackHandler);
-      if (!acked) {
-        console.log(`[wake-detect] no pong in 4s on focus (probe ${Date.now()-probeStart}ms), zombie socket — forcing resync`);
-        this._forceFullResync('focus-zombie');
+      if (acked) return;
+      if (voiceLive) {
+        // Light recovery only — rebind voice + refresh rosters. Do NOT
+        // disconnect; that is what knocks us out of the server voice map
+        // while leaving WebRTC audio running.
+        console.warn(`[wake-detect] no pong in ${probeMs}ms on focus while in voice (probe ${Date.now()-probeStart}ms) — light resync, not disconnect`);
+        this._lightVoiceResync('focus-zombie-in-voice');
+        return;
       }
-    }, 4000);
+      console.log(`[wake-detect] no pong in ${probeMs}ms on focus (probe ${Date.now()-probeStart}ms), zombie socket — forcing resync`);
+      this._forceFullResync('focus-zombie');
+    }, probeMs);
   });
 
   this.socket.on('disconnect', () => {
     this._setLed('connection-led', 'danger pulse');
     this._setLed('status-server-led', 'danger pulse');
-    document.getElementById('status-server-text').textContent = 'Disconnected';
+    document.getElementById('status-server-text').textContent = t('app.status.disconnected');
     document.getElementById('status-ping').textContent = '--';
+    // Drop outstanding probes — pairing one with a pong from after the
+    // reconnect would report the length of the outage as latency.
+    this._pingQueue = [];
     // (#self-absent-voice-panel — Desktop "lost myself in voice" follow-up)
     // Previously we _softLeave()'d the voice session immediately on every
     // disconnect. Socket.io aggressively reconnects within a few hundred ms
@@ -445,12 +704,25 @@ _setupSocketListeners() {
     // Defer the teardown by 2 s; if we reconnect first (the common case),
     // skip the soft-leave entirely. The reconnect handler will issue
     // `voice-rejoin` which rebinds our voice slot to the new socketId.
+    //
+    // If WebRTC peers are still connected, NEVER soft-leave — that destroys
+    // working audio/streams while the user can still talk, and the server
+    // grace timer + missed voice-rejoin is what makes everyone else see
+    // "they left" even though media is live. Keep the session and wait for
+    // socket reconnect to rebind.
     if (this.voice && this.voice.inVoice) {
       if (this._voiceDisconnectTimer) clearTimeout(this._voiceDisconnectTimer);
       this._voiceDisconnectTimer = setTimeout(() => {
         this._voiceDisconnectTimer = null;
         if (this.socket?.connected) return; // reconnected in time
         if (!(this.voice && this.voice.inVoice)) return;
+        const peersLive = (this.voice.liveVoicePeerCount?.() || 0) > 0;
+        const micLive = !!(this.voice.localStream &&
+          this.voice.localStream.getTracks().some(t => t.readyState === 'live'));
+        if (peersLive || micLive) {
+          console.warn('[Voice] socket still down after 2s but WebRTC media is live — keeping session (no soft-leave)');
+          return;
+        }
         console.warn('[Voice] socket still down after 2s — soft-leaving voice');
         this.voice._softLeave();
         this._updateVoiceButtons(false);
@@ -468,6 +740,7 @@ _setupSocketListeners() {
     // They are NEVER transient, so we redirect to /login on the first one
     // instead of stranding the user on an empty channel list. (#5375)
     if (err.message === 'Invalid token' || err.message === 'Authentication required' || err.message === 'Session expired') {
+      this._clearChannelCodeMap();
       localStorage.removeItem('haven_token');
       localStorage.removeItem('haven_user');
       localStorage.removeItem('haven_sync_key');
@@ -476,7 +749,7 @@ _setupSocketListeners() {
     }
     this._setLed('connection-led', 'danger');
     this._setLed('status-server-led', 'danger');
-    document.getElementById('status-server-text').textContent = 'Error';
+    document.getElementById('status-server-text').textContent = t('app.status.error');
   });
 
   // Password was changed on this or another session — force re-login
@@ -487,6 +760,18 @@ _setupSocketListeners() {
         this._justChangedPassword = false;
         return;
       }
+      this._clearChannelCodeMap();
+      localStorage.removeItem('haven_token');
+      localStorage.removeItem('haven_user');
+      window.location.href = '/';
+    } else if (data && data.reason === 'sessions_revoked') {
+      // We are the session that asked for this, so we already hold the fresh
+      // token and stay put. Every other device gets sent back to the login page.
+      if (this._justRevokedSessions) {
+        this._justRevokedSessions = false;
+        return;
+      }
+      this._clearChannelCodeMap();
       localStorage.removeItem('haven_token');
       localStorage.removeItem('haven_user');
       window.location.href = '/';
@@ -496,25 +781,42 @@ _setupSocketListeners() {
         this._justEnabledTotp = false;
         return;
       }
+      this._clearChannelCodeMap();
       localStorage.removeItem('haven_token');
       localStorage.removeItem('haven_user');
       window.location.href = '/';
     }
   });
 
+  this.socket.on('sessions-list', (data) => {
+    this._renderSessionsList?.(data && data.sessions ? data.sessions : []);
+  });
+
   this.socket.on('channels-list', (channels) => {
     // (#5391) Cancel the channels-not-arriving watchdog
     this._channelsListGotResponse = true;
+    // A change in the user's channel/role set can make cached search results
+    // show messages they no longer have access to. Invalidate the panel off
+    // this already-broadcast event — no new server plumbing. (search-overhaul)
+    this._searchInvalidate?.(channels);
+    // Fresh authoritative state — an optimistic Channel Functions toggle that
+    // was still awaiting a verdict has just been accepted, so drop its undo.
+    this._cfnPendingToggle = null;
     if (this._channelsWatchdog) {
       clearTimeout(this._channelsWatchdog);
       this._channelsWatchdog = null;
     }
-    // Detect if currentChannel's code was rotated while disconnected (stale code).
-    // Capture the channel's ID from the old list before overwriting it.
-    let rotatedChannelId = null;
-    if (this.currentChannel && !channels.find(c => c.code === this.currentChannel)) {
-      const oldEntry = this.channels.find(c => c.code === this.currentChannel);
-      if (oldEntry) rotatedChannelId = oldEntry.id;
+    const rotations = this._collectChannelCodeRotations(channels);
+    const activeRotation = rotations.find(rotation => rotation.oldCode === this.currentChannel) || null;
+    let savedVoiceCode = null;
+    try { savedVoiceCode = localStorage.getItem('haven_voice_channel'); } catch {}
+    const voiceRotation = rotations.find(rotation =>
+      rotation.oldCode === this.voice?.currentChannel ||
+      rotation.oldCode === this.voice?._softLeftChannel ||
+      rotation.oldCode === savedVoiceCode
+    ) || null;
+    for (const rotation of rotations) {
+      this._migrateChannelCodeState(rotation.oldCode, rotation.newCode);
     }
 
     // Preserve any DM channels that were added client-side (via dm-opened
@@ -522,11 +824,24 @@ _setupSocketListeners() {
     // overwriting would wipe DM entries and break E2E decryption until the
     // user reopens the DM.
     const existingDMs = (this.channels || []).filter(c => c.is_dm);
-    this.channels = channels;
+    this.channels = [...channels];
     for (const dm of existingDMs) {
       if (!this.channels.find(c => c.code === dm.code)) {
         this.channels.push(dm);
       }
+    }
+    this._persistChannelCodeMap(channels);
+    const deferredCode = this.voice?._deferredChannelGone?.code;
+    const deferredRotation = rotations.find(rotation => rotation.oldCode === deferredCode);
+    const deferredChannel = channels.find(channel =>
+      channel.code === deferredCode && channel.voice_enabled !== 0
+    );
+    this.voice?.resolveDeferredChannelGone?.(deferredRotation?.newCode || deferredChannel?.code || null);
+    if (voiceRotation && this.voice?.inVoice && this.voice.currentChannel === voiceRotation.newCode) {
+      this.socket.emit('voice-rejoin', { code: voiceRotation.newCode, ...this.voice.getNativeScreenClientInfo() });
+      if (this.voice.isMuted) this.socket.emit('voice-mute-state', { code: voiceRotation.newCode, muted: true });
+      if (this.voice.isDeafened) this.socket.emit('voice-deafen-state', { code: voiceRotation.newCode, deafened: true });
+      this.voice._healPeerConnectionsAfterChannelRotation?.(voiceRotation.oldCode);
     }
     // Seed client-side unreadCounts from server-reported values so the
     // desktop badge, tab title, and DM section badge stay in sync.
@@ -589,7 +904,7 @@ _setupSocketListeners() {
       } else {
         // Do not auto-join by deep link. Message/channel links are for members
         // who already have channel access.
-        this._showToast?.(t('toasts.channel_link_unavailable') || 'Channel not available on this server', 'error');
+        this._showToast?.(t('toasts.channel_link_unavailable'), 'error');
       }
       window.history.replaceState({}, '', window.location.pathname);
     }
@@ -601,17 +916,17 @@ _setupSocketListeners() {
         const msgInputArea = document.getElementById('message-input-area');
         const _textOff = curCh.text_enabled === 0;
         const _mediaOff = curCh.media_enabled === 0;
-        const _isReadOnly = curCh.read_only === 1 && !this.user?.isAdmin && !this._hasPerm('read_only_override');
+        // Per-channel, same reasoning as the composer gate in app-channels.js (#5468)
+        const _isReadOnly = curCh.read_only === 1 && !this.user?.isAdmin && !curCh.canOverrideReadOnly;
         if (msgInputArea) msgInputArea.style.display = (_isReadOnly || (_textOff && _mediaOff)) ? 'none' : '';
       }
     }
 
     // If the channel code rotated while we were disconnected, re-enter with the
     // new code so messages, reactions, and presence start working again.
-    if (rotatedChannelId !== null) {
-      const updated = channels.find(c => c.id === rotatedChannelId);
+    if (activeRotation) {
+      const updated = channels.find(c => c.id === activeRotation.channelId);
       if (updated) {
-        this.currentChannel = updated.code;
         const codeDisplay = document.getElementById('channel-code-display');
         if (codeDisplay) codeDisplay.textContent = updated.display_code || updated.code;
         this.socket.emit('enter-channel', { code: this.currentChannel });
@@ -645,6 +960,30 @@ _setupSocketListeners() {
     this._renderChannels();
     this._showToast(t('toasts.channel_created', { name: channel.name, code: channel.code }), 'success');
     this.switchChannel(channel.code);
+  });
+
+  this.socket.on('channel-role-gate-updated', (data) => {
+    const ch = this.channels.find(c => c.code === data.code);
+    if (!ch) return;
+    ch.role_gate = data.roleGate ? JSON.stringify(data.roleGate) : null;
+    if (this._ctxMenuChannel === data.code) this._updateChannelFunctionsPanel?.(ch);
+  });
+
+  // Your own role-menu choice landed (from a click or a reaction); paint every
+  // button for that role, in this channel and any other menu that lists it.
+  this.socket.on('self-role-updated', (data) => {
+    if (!data) return;
+    this._markSelfRole(data.roleId, !!data.held);
+  });
+
+  // A role menu was edited: swap in the new buttons wherever that message is
+  // on screen. The click handling is delegated, so fresh HTML just works (#5644).
+  this.socket.on('role-menu-updated', (data) => {
+    if (!data || !data.messageId) return;
+    document.querySelectorAll(`.role-menu-widget[data-msg-id="${data.messageId}"]`).forEach(w => {
+      const html = this._renderRoleMenu(data.messageId, data.roleMenu);
+      if (html) w.outerHTML = html; else w.remove();
+    });
   });
 
   this.socket.on('channel-joined', (channel) => {
@@ -699,6 +1038,11 @@ _setupSocketListeners() {
       }
     }
 
+    if (this._forumLoadingMore && this._forumActive) {
+      this._forumLoadingMore = false;
+      this._forumAppendOlder(data.messages);
+      return;
+    }
     if (this._historyBefore) {
       // Pagination request — prepend older messages
       this._historyBefore = null;
@@ -709,7 +1053,8 @@ _setupSocketListeners() {
       }
       if (data.messages.length < 80) this._noMoreHistory = true;
       this._oldestMsgId = data.messages[0].id;
-      this._prependMessages(data.messages);
+      if (this._isForumFeed?.()) this._appendOlderForum(data.messages);
+      else this._prependMessages(data.messages);
       // Release lock AFTER DOM manipulation so scroll-triggered re-requests
       // don't fire while _prependMessages is adjusting scroll position.
       this._loadingHistory = false;
@@ -776,6 +1121,13 @@ _setupSocketListeners() {
       if (this._suppressCoupleCheck) return;
       const st = msgContainer.scrollTop;
       const dist = msgContainer.scrollHeight - msgContainer.clientHeight - st;
+      if (this._isForumFeed?.()) {
+        // Newest first: nothing to couple to at the bottom, and no jump button.
+        this._coupledToBottom = false;
+        if (jumpBtn) jumpBtn.classList.remove('visible');
+        lastScrollTop = st;
+        return;
+      }
       if (dist < 200 && this._noMoreFuture !== false) {
         // Only couple if the DOM contains the actual latest messages.
         // When newer messages have been trimmed, the scroll "bottom" is
@@ -795,18 +1147,18 @@ _setupSocketListeners() {
 
     // Jump-to-bottom click handler
     if (jumpBtn) {
-      jumpBtn.addEventListener('click', () => {
-        this._scrollToBottom(true);
-        this._coupledToBottom = true;
-        jumpBtn.classList.remove('visible');
-      });
+      jumpBtn.addEventListener('click', () => this._jumpToLatest());
     }
 
     this._historyDebounce = 0; // timestamp of last history request
     msgContainer.addEventListener('scroll', () => {
       if (this._suppressCoupleCheck) return;
       const now = Date.now();
-      if (msgContainer.scrollTop < 200 && !this._noMoreHistory && !this._loadingHistory && this._oldestMsgId && this.currentChannel && now - this._historyDebounce > 300) {
+      // A forum feed runs newest first, so its older topics load from the bottom.
+      const forumFeed = !!this._isForumFeed?.();
+      const distEnd = msgContainer.scrollHeight - msgContainer.clientHeight - msgContainer.scrollTop;
+      const atOlderEdge = forumFeed ? distEnd < 200 : msgContainer.scrollTop < 200;
+      if (atOlderEdge && !this._forumActive && !this._noMoreHistory && !this._loadingHistory && this._oldestMsgId && this.currentChannel && now - this._historyDebounce > 300) {
         this._loadingHistory = true;
         this._historyBefore = this._oldestMsgId;
         this._historyDebounce = now;
@@ -821,7 +1173,7 @@ _setupSocketListeners() {
       // Forward pagination: load newer messages when near the bottom and
       // the DOM window doesn't extend to the latest messages.
       const distBottom = msgContainer.scrollHeight - msgContainer.clientHeight - msgContainer.scrollTop;
-      if (distBottom < 200 && !this._noMoreFuture && !this._loadingFuture && this._newestMsgId && this.currentChannel && now - this._historyDebounce > 300) {
+      if (!forumFeed && distBottom < 200 && !this._noMoreFuture && !this._loadingFuture && this._newestMsgId && this.currentChannel && now - this._historyDebounce > 300) {
         this._loadingFuture = true;
         this._historyAfter = this._newestMsgId;
         this._historyDebounce = now;
@@ -911,7 +1263,7 @@ _setupSocketListeners() {
           const _isAnnouncement = _notifCh && _notifCh.notification_type === 'announcement';
           const _isReplyToMe = data.message.replyContext && data.message.replyContext.user_id === this.user.id;
           const _isDm = _notifCh && _notifCh.is_dm;
-          const _isMention = mentionRegex.test(data.message.content) || everyoneRegex.test(data.message.content);
+          const _isMention = mentionRegex.test(data.message.content) || everyoneRegex.test(data.message.content) || this._mentionsMyRole?.(data.message.content);
           const _notifOpts = _isMention ? { isMention: true } : _isReplyToMe ? { isReply: true } : _isDm ? { isDm: true } : null;
           if (_isMention) {
             this.notifications.play('mention', { isMention: true });
@@ -974,7 +1326,7 @@ _setupSocketListeners() {
         const _isAnnouncement2 = _notifCh2 && _notifCh2.notification_type === 'announcement';
         const _isReplyToMe2 = data.message.replyContext && data.message.replyContext.user_id === this.user.id;
         const _isDm2 = _notifCh2 && _notifCh2.is_dm;
-        const _isMention2 = mentionRegex.test(data.message.content) || everyoneRegex2.test(data.message.content);
+        const _isMention2 = mentionRegex.test(data.message.content) || everyoneRegex2.test(data.message.content) || this._mentionsMyRole?.(data.message.content);
         const _notifOpts2 = _isMention2 ? { isMention: true } : _isReplyToMe2 ? { isReply: true } : _isDm2 ? { isDm: true } : null;
         if (_isMention2) {
           this.notifications.play('mention', { isMention: true });
@@ -1007,6 +1359,12 @@ _setupSocketListeners() {
   });
 
   this.socket.on('online-users', (data) => {
+    // Every list is kept by channel (the socket sits in every room it
+    // belongs to), so a DM PiP can read its own partner's presence instead
+    // of the list for whatever channel is on screen (#5574).
+    if (!this._onlineByChannel) this._onlineByChannel = new Map();
+    this._onlineByChannel.set(data.channelCode, data.users || []);
+    if (this._activeDMPip && data.channelCode === this._activeDMPip) this._refreshDMPipHeader?.();
     if (data.channelCode === this.currentChannel) {
       // In 'all' mode the list includes offline members too; only count truly online users
       const trueOnlineCount = data.visibilityMode === 'all'
@@ -1024,9 +1382,15 @@ _setupSocketListeners() {
   });
 
   this.socket.on('voice-users-update', (data) => {
-    // (#5347 follow-up) Re-render the voice participant list whenever the
-    // user is either viewing the channel OR currently in voice on it.
+    // Right-side VOICE panel shows who's in voice for the channel you are
+    // currently *viewing* (not whichever VC you happen to be connected to).
+    // Left-sidebar badges still track every channel via the maps below.
     const isViewing = data.channelCode === this.currentChannel;
+    // Repair the local flags from the live peer connections before reading
+    // them. Without this, a stale `inVoice === false` makes the filter below
+    // delete us from our own voice panel — the "everyone sees me in voice
+    // except me" report — and nothing ever undoes it.
+    try { this.voice?.reassertSessionIfLive(); } catch {}
     const isInVoice = !!(this.voice && this.voice.inVoice && this.voice.currentChannel === data.channelCode);
     // (#5347 v3.16.1) Defensively filter ourselves out of the user list
     // when we're NOT in voice on this channel. Guards against an in-flight
@@ -1075,11 +1439,30 @@ _setupSocketListeners() {
       if ((now - (this._lastVoiceSelfHealAt || 0)) > 3000 && this.socket?.connected) {
         this._lastVoiceSelfHealAt = now;
         console.warn('[Voice] Self missing from roster — emitting voice-rejoin');
-        this.socket.emit('voice-rejoin', { code: data.channelCode });
+        this.socket.emit('voice-rejoin', { code: data.channelCode, ...this.voice.getNativeScreenClientInfo() });
       }
     }
-    if ((isViewing || isInVoice) && localStorage.getItem('haven_hide_voice_panel') !== 'true') {
-      this._renderVoiceUsers(users, data.channelCode);
+    if (isViewing && localStorage.getItem('haven_hide_voice_panel') !== 'true') {
+      // Anti-flicker: while viewing a channel we're in voice on, ignore
+      // transient empty snapshots from prune/rejoin races. Keep the last
+      // good list and re-poll — otherwise the panel strobes
+      // empty ↔ everyone. Legitimate "everyone left" still lands once the
+      // follow-up poll returns a stable empty/self-only roster.
+      const sameChannelList = this._lastVoiceUsersChannel === data.channelCode;
+      const hadPeople = sameChannelList && Array.isArray(this._lastVoiceUsers) && this._lastVoiceUsers.length > 0;
+      if (users.length === 0 && isInVoice && hadPeople) {
+        console.warn('[Voice] Ignoring empty roster snapshot while inVoice (keeping last list)', {
+          channel: data.channelCode,
+          lastCount: this._lastVoiceUsers.length
+        });
+        const now = Date.now();
+        if ((now - (this._lastEmptyRosterPollAt || 0)) > 2000 && this.socket?.connected) {
+          this._lastEmptyRosterPollAt = now;
+          this.socket.emit('request-voice-users', { code: data.channelCode, iAmInVoice: true });
+        }
+      } else {
+        this._renderVoiceUsers(users, data.channelCode);
+      }
     }
     // (#5347 v3.15.4) Keep the left sidebar in sync with the right panel.
     // Previously the right panel was driven by voice-users-update and the
@@ -1087,11 +1470,21 @@ _setupSocketListeners() {
     // event arrived stale or out of order (the user saw both users on the
     // right but only themselves on the left). Both stores are now updated
     // from this single authoritative event so they cannot disagree.
+    //
+    // Exception: when we're in voice on this channel and the snapshot is
+    // transiently empty, don't wipe the sidebar either — same race as the
+    // panel guard above.
     const usersForSidebar = users.map(u => ({
       id: u.id, username: u.username,
-      isMuted: !!u.isMuted, isDeafened: !!u.isDeafened
+      isMuted: !!u.isMuted, isDeafened: !!u.isDeafened,
+      isBot: !!u.isBot, isListening: !!u.isListening
     }));
-    if (usersForSidebar.length > 0) {
+    const skipEmptyWipe = usersForSidebar.length === 0 && isInVoice &&
+      Array.isArray(this.voiceChannelUsers?.[data.channelCode]) &&
+      this.voiceChannelUsers[data.channelCode].length > 0;
+    if (skipEmptyWipe) {
+      // keep existing sidebar maps
+    } else if (usersForSidebar.length > 0) {
       this.voiceCounts[data.channelCode] = usersForSidebar.length;
       this.voiceChannelUsers[data.channelCode] = usersForSidebar;
     } else {
@@ -1157,12 +1550,24 @@ _setupSocketListeners() {
     if (data.channelCode === this.currentChannel) {
       this._appendSystemMessage(t('header.messages.user_joined', { name: this._getNickname(data.user.id, data.user.username) }));
       this.notifications.play('join');
-      // Show configurable welcome message if set
-      const welcomeTemplate = this.serverSettings?.welcome_message;
-      if (welcomeTemplate) {
-        const welcomeText = welcomeTemplate.replace(/\{user\}/gi, this._getNickname(data.user.id, data.user.username));
-        this._appendWelcomeMessage(welcomeText);
-      }
+      // Welcome messages are no longer drawn here. They're now posted once, as a
+      // persisted message, when a member first registers (see the 'welcome-message'
+      // handler below + server auth.js), so they stay in history for everyone
+      // instead of flashing live only for whoever was watching this channel.
+    }
+  });
+
+  // Persisted new-member welcome message — appended live for anyone currently
+  // viewing the channel. It's also saved server-side, so it renders in history
+  // on reload (unlike the old ephemeral welcome, which was never saved).
+  this.socket.on('welcome-message', (data) => {
+    if (!data || !data.message || data.channelCode !== this.currentChannel) return;
+    // Only append live when the newest messages are actually in view; if the
+    // user is scrolled up in trimmed history it will load in order on scroll.
+    // The message is persisted either way, so nothing is lost.
+    if (this._noMoreFuture !== false) {
+      this._appendMessage(data.message);
+      if (Number.isInteger(data.message.id) && data.message.id > 0) this._newestMsgId = data.message.id;
     }
   });
 
@@ -1189,7 +1594,7 @@ _setupSocketListeners() {
     if (!data || !data.code) return;
     if (this.currentChannel === data.code) {
       try { this.switchChannel(data.code); } catch (e) { console.warn('[auto-clear] re-switch failed:', e); }
-      this._showToast('🧹 Channel messages were auto-cleared', 'info');
+      this._showToast(t('toasts.channel_auto_cleared'), 'info');
     }
   });
 
@@ -1209,6 +1614,9 @@ _setupSocketListeners() {
   });
 
   this.socket.on('error-msg', (msg) => {
+    // A refused channel-functions toggle arrives here and nowhere else, so
+    // this is the only chance to put the row back where it was.
+    this._revertPendingChannelToggle();
     this._showToast(msg, 'error');
   });
 
@@ -1217,10 +1625,12 @@ _setupSocketListeners() {
   });
 
   this.socket.on('pong-check', () => {
-    if (this._pingStart) {
-      const latency = Date.now() - this._pingStart;
-      document.getElementById('status-ping').textContent = latency;
-    }
+    // Pair with the oldest outstanding probe (see _pingSend). If the queue is
+    // empty this pong belongs to a probe sent before a reconnect — ignore it
+    // rather than inventing a number.
+    const sentAt = this._pingQueue && this._pingQueue.shift();
+    if (sentAt == null) return;
+    document.getElementById('status-ping').textContent = Date.now() - sentAt;
   });
 
   // ── Reactions ──────────────────────────────────────
@@ -1264,6 +1674,8 @@ _setupSocketListeners() {
     const container = document.getElementById('thread-messages');
     if (!container) return;
     container.innerHTML = '';
+    // A forum topic shows its whole first post above the replies (#5659).
+    this._forumThreadRenderTopic?.();
     if (data.messages) {
       data.messages.forEach(msg => this._appendThreadMessage(msg));
     }
@@ -1280,7 +1692,7 @@ _setupSocketListeners() {
       const _meEsc = (this.user.username || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const mentionRegex = _meEsc ? new RegExp(`@${_meEsc}(?!\\w)`, 'i') : null;
       const everyoneRegex = /(?<![\w@])@(everyone|here)\b/i;
-      const _isMention = (mentionRegex && mentionRegex.test(msg.content || '')) || everyoneRegex.test(msg.content || '');
+      const _isMention = (mentionRegex && mentionRegex.test(msg.content || '')) || everyoneRegex.test(msg.content || '') || this._mentionsMyRole?.(msg.content || '');
       const _isReplyToMe = msg.replyContext && msg.replyContext.user_id === this.user.id;
       if ((_isMention || _isReplyToMe) && !_isMuted) {
         this._recordThreadMention(data.channelCode, data.parentId, msg);
@@ -1308,6 +1720,41 @@ _setupSocketListeners() {
   this.socket.on('thread-updated', (data) => {
     if (data.channelCode !== this.currentChannel) return;
     this._updateThreadPreview(data.parentId, data.thread);
+    if (!this._forumActive) this._bumpForumTopic?.(data.parentId);
+  });
+
+  // Forum unread dots are per account, so another device opening a topic or
+  // pressing Mark all read clears them here as well (#5641).
+  this.socket.on('thread-read', (data) => {
+    if (!data || data.channelCode !== this.currentChannel) return;
+    this._forumMarkTopicRead?.(data.parentId);
+  });
+  this.socket.on('forum-read', (data) => {
+    if (!data || data.channelCode !== this.currentChannel) return;
+    this._forumMarkAllRead?.(data.channelCode);
+  });
+
+  // Forum topics: retitled or retagged, and the channel's tag list changed.
+  this.socket.on('topic-updated', (data) => {
+    if (data.channelCode !== this.currentChannel) return;
+    this._forumApplyTopicUpdate?.(data);
+  });
+  this.socket.on('forum-tags-updated', (data) => {
+    const ch = this.channels && this.channels.find(c => c.code === data.code);
+    if (ch) ch.forum_tags = JSON.stringify(data.tags || []);
+    if (data.code === this.currentChannel && this._forumActive) this._forumReload?.();
+  });
+  // A message you scheduled has just gone out (#5638).
+  this.socket.on('scheduled-message-sent', (data) => {
+    if (!data) return;
+    this._showToast(t('modals.schedule.sent', { channel: data.channelName || '' }), 'info');
+    if (document.getElementById('schedule-modal')?.style.display === 'flex') this._loadScheduledList?.();
+  });
+  // An admin set the layout everyone opens this forum in (#5656).
+  this.socket.on('forum-layout-updated', (data) => {
+    const ch = this.channels && this.channels.find(c => c.code === data.code);
+    if (ch) ch.forum_layout = data.layout ? JSON.stringify(data.layout) : null;
+    if (data.code === this.currentChannel && this._forumActive) this._forumReload?.();
   });
 
   // ── Polls ─────────────────────────────────────────
@@ -1337,16 +1784,34 @@ _setupSocketListeners() {
     this._updateMusicQueueState(data);
   });
 
+  this.socket.on('bot-audio-play', (data) => {
+    this.voice?.playBotAudio(data);
+  });
+  this.socket.on('bot-audio-stop', (data) => {
+    if (!data || !this.voice || this.voice.currentChannel !== data.channelCode) return;
+    this.voice.stopBotAudio(data.playbackId);
+  });
+
   // ── Voice kicked ────────────────────────────────
+  // NOTE: voice.js also listens for `voice-kicked` and calls leave() +
+  // onVoiceKicked (which toasts). Wait a tick so that handler runs first;
+  // only tear down + toast here if the session is somehow still live
+  // (channel-mismatch edge case). Avoids double leave / double toast.
   this.socket.on('voice-kicked', (data) => {
-    // Server forcibly removed us from voice — tear down locally
-    if (this.voice && this.voice.inVoice) {
-      this.voice.leave();
+    if (!data) return;
+    setTimeout(() => {
+      const stillIn = !!(this.voice && this.voice.inVoice);
+      if (stillIn) {
+        try { this.voice.leave(); } catch {}
+        this._showToast(
+          t('toasts.kicked_from_voice', { by: data.kickedBy || data.reason || t('toasts.a_moderator') }),
+          'error'
+        );
+      }
       this._updateVoiceButtons(false);
       this._updateVoiceStatus(false);
       this._updateVoiceBar();
-      this._showToast(t('toasts.kicked_from_voice', { by: data.kickedBy || t('toasts.a_moderator') }), 'error');
-    }
+    }, 0);
   });
 
   // ── Stream viewer tracking ───────────────────────
@@ -1416,74 +1881,66 @@ _setupSocketListeners() {
   // ── Channel code rotated (dynamic codes) ────────
   this.socket.on('channel-code-rotated', (data) => {
     const ch = this.channels.find(c => c.id === data.channelId);
-    if (ch) {
-      const wasViewing = this.currentChannel === data.oldCode;
-      const wasInVoiceHere = !!(this.voice && this.voice.currentChannel === data.oldCode);
-      ch.code = data.newCode;
-      // Update display_code too (admins see real code, non-admins see masked)
-      if (ch.display_code && ch.display_code !== '••••••••') ch.display_code = data.newCode;
-      // Update currentChannel BEFORE re-rendering so the active highlight is correct
-      if (wasViewing) {
-        this.currentChannel = data.newCode;
-      }
-      // CRITICAL (#5347): if we're in voice on the rotated channel, the
-      // voice manager is still holding the OLD code as its currentChannel.
-      // Without updating it, every voice-rejoin / request-voice-users /
-      // voice-mute-state / etc. sent from this client uses the old code,
-      // the server can't find it (the DB row's code column was just
-      // updated), and we get the infinite "server says voice channel is
-      // gone" loop. Migrate every voice-side code reference too.
-      if (this.voice) {
-        if (wasInVoiceHere) {
-          this.voice.currentChannel = data.newCode;
-          console.log(`[Voice] channel code rotated mid-call: ${data.oldCode} -> ${data.newCode}`);
-        }
-        if (this.voice._softLeftChannel === data.oldCode) {
-          this.voice._softLeftChannel = data.newCode;
-        }
-      }
-      this._renderChannels();
-      // If currently viewing this channel, update the header code display
-      if (this.currentChannel === data.newCode) {
-        const codeDisplay = document.getElementById('channel-code-display');
-        if (codeDisplay) codeDisplay.textContent = ch.display_code || data.newCode;
-      }
-      // If the code changed while we were actively viewing this channel,
-      // any in-flight old-code history/presence replies are now ignored by
-      // the exact channelCode guards in the listeners below. Re-issue the
-      // active-channel fetches immediately under the new code so the chat
-      // pane and member sidebar don't sit blank until the user manually
-      // switches away and back.
-      if (wasViewing) {
-        this._oldestMsgId = null;
-        this._noMoreHistory = false;
-        this._loadingHistory = false;
-        this._historyBefore = null;
-        this._newestMsgId = null;
-        this._noMoreFuture = true;
-        this._loadingFuture = false;
-        this._historyAfter = null;
+    if (!ch) return;
+    const wasViewing = this.currentChannel === data.oldCode;
+    const wasInVoiceHere = !!(this.voice && this.voice.currentChannel === data.oldCode);
+    this._migrateChannelCodeState(data.oldCode, data.newCode);
+    this._updatePersistedChannelCode(data.channelId, data.newCode);
+    ch.code = data.newCode;
+    // Update display_code too (admins see real code, non-admins see masked)
+    if (ch.display_code && ch.display_code !== '••••••••') ch.display_code = data.newCode;
+    // CRITICAL (#5347): if we're in voice on the rotated channel, the
+    // voice manager is still holding the OLD code as its currentChannel.
+    // Without updating it, every voice-rejoin / request-voice-users /
+    // voice-mute-state / etc. sent from this client uses the old code,
+    // the server can't find it (the DB row's code column was just
+    // updated), and we get the infinite "server says voice channel is
+    // gone" loop. Migrate every voice-side code reference too.
+    if (wasInVoiceHere) {
+      console.log(`[Voice] channel code rotated mid-call: ${data.oldCode} -> ${data.newCode}`);
+      this.voice._healPeerConnectionsAfterChannelRotation?.(data.oldCode);
+    }
+    this._renderChannels();
+    // If currently viewing this channel, update the header code display
+    if (this.currentChannel === data.newCode) {
+      const codeDisplay = document.getElementById('channel-code-display');
+      if (codeDisplay) codeDisplay.textContent = ch.display_code || data.newCode;
+    }
+    // If the code changed while we were actively viewing this channel,
+    // any in-flight old-code history/presence replies are now ignored by
+    // the exact channelCode guards in the listeners below. Re-issue the
+    // active-channel fetches immediately under the new code so the chat
+    // pane and member sidebar don't sit blank until the user manually
+    // switches away and back.
+    if (wasViewing) {
+      this._oldestMsgId = null;
+      this._noMoreHistory = false;
+      this._loadingHistory = false;
+      this._historyBefore = null;
+      this._newestMsgId = null;
+      this._noMoreFuture = true;
+      this._loadingFuture = false;
+      this._historyAfter = null;
 
-        this.socket.emit('enter-channel', { code: data.newCode });
-        this.socket.emit('get-messages', { code: data.newCode });
-        this.socket.emit('get-channel-members', { code: data.newCode });
-        this.socket.emit('request-online-users', { code: data.newCode });
-        this.socket.emit('request-voice-users', { code: data.newCode });
+      this.socket.emit('enter-channel', { code: data.newCode });
+      this.socket.emit('get-messages', { code: data.newCode });
+      this.socket.emit('get-channel-members', { code: data.newCode });
+      this.socket.emit('request-online-users', { code: data.newCode });
+      this.socket.emit('request-voice-users', { code: data.newCode });
 
-        if (this._switchChannelSafetyTimer) clearTimeout(this._switchChannelSafetyTimer);
-        this._pendingChannelHistoryCode = data.newCode;
-        this._switchChannelSafetyTimer = setTimeout(() => {
-          if (this._pendingChannelHistoryCode === data.newCode && this.currentChannel === data.newCode) {
-            console.warn(`[channel-code-rotated] no message-history for ${data.newCode} within 5s - forcing resync`);
-            this._forceFullResync?.('channel-code-rotated-timeout');
-          }
-        }, 5000);
-      } else if (wasInVoiceHere) {
-        this.socket.emit('request-voice-users', { code: data.newCode });
-      }
-      if (this.user.isAdmin) {
-        this._showToast(t('toasts.channel_code_rotated', { name: ch.name }), 'info');
-      }
+      if (this._switchChannelSafetyTimer) clearTimeout(this._switchChannelSafetyTimer);
+      this._pendingChannelHistoryCode = data.newCode;
+      this._switchChannelSafetyTimer = setTimeout(() => {
+        if (this._pendingChannelHistoryCode === data.newCode && this.currentChannel === data.newCode) {
+          console.warn(`[channel-code-rotated] no message-history for ${data.newCode} within 5s - forcing resync`);
+          this._forceFullResync?.('channel-code-rotated-timeout');
+        }
+      }, 5000);
+    } else if (wasInVoiceHere) {
+      this.socket.emit('request-voice-users', { code: data.newCode });
+    }
+    if (this.user.isAdmin) {
+      this._showToast(t('toasts.channel_code_rotated', { name: ch.name }), 'info');
     }
   });
 
@@ -1546,29 +2003,29 @@ _setupSocketListeners() {
 
   this.socket.on('bio-updated', (data) => {
     this.user.bio = data.bio || '';
-    this._showToast('Bio updated', 'success');
+    this._showToast(t('toasts.bio_updated'), 'success');
   });
 
   // ── Username rename ──────────────────────────────
   this.socket.on('renamed', (data) => {
     this.token = data.token;
-    this.user = data.user;
+    this.user = {...this.user, ...data.user};
     if (this.voice && data.user.id) this.voice.localUserId = data.user.id;
     localStorage.setItem('haven_token', data.token);
-    localStorage.setItem('haven_user', JSON.stringify(data.user));
+    localStorage.setItem('haven_user', JSON.stringify(this.user));
     document.getElementById('current-user').textContent = data.user.displayName || data.user.username;
     const loginEl = document.getElementById('login-name');
     if (loginEl) loginEl.textContent = `@${data.user.username}`;
-    this._showToast(`Display name changed to "${data.user.displayName || data.user.username}"`, 'success');
+    this._showToast(t('toasts.display_name_changed', { name: data.user.displayName || data.user.username }), 'success');
     // Refresh admin UI in case admin status changed
     this.user.permissions = data.user.permissions || this.user.permissions || [];
-    const canCreate = data.user.isAdmin || this._hasPerm('create_channel');
+    this.user.globalPermissions = data.user.globalPermissions || this.user.globalPermissions || [];
+    const canCreate = data.user.isAdmin || this._hasGlobalPerm('create_channel');
     document.getElementById('admin-controls').style.display = canCreate ? 'block' : 'none';
-    if (data.user.isAdmin) {
-      document.getElementById('admin-mod-panel').style.display = 'block';
-    } else {
-      document.getElementById('admin-mod-panel').style.display = 'none';
-    }
+    // Same gate as login and roles-updated, so a moderator who changes their
+    // display name keeps the Admin tab instead of losing it until reload.
+    const canModerate = data.user.isAdmin || (this.user.effectiveLevel || 0) >= 25;
+    document.getElementById('admin-mod-panel').style.display = (canModerate || this._hasAnyAdminSettingsAccess()) ? 'block' : 'none';
   });
 
   this.socket.on('user-renamed', (data) => {
@@ -1616,6 +2073,9 @@ _setupSocketListeners() {
           displayContent = t('header.messages.decrypt_failed');
         }
       }
+      // A forum card shows a title and a snippet rather than the message
+      // body, so it is rebuilt from the new text instead of patched in place.
+      if (this._forumActive && this._forumApplyContentEdit?.(data.messageId, displayContent)) return;
       msgEls.forEach((msgEl) => {
         const contentEl = msgEl.querySelector('.message-content, .thread-msg-content');
         if (!contentEl) return;
@@ -1625,7 +2085,7 @@ _setupSocketListeners() {
         if (!editedTag) {
           editedTag = document.createElement('span');
           editedTag.className = 'edited-tag';
-          editedTag.title = t('header.messages.edited_at', { date: new Date(data.editedAt).toLocaleString() });
+          editedTag.title = t('header.messages.edited_at', { date: this._fmtDateTime(data.editedAt) });
           editedTag.textContent = t('header.messages.edited');
           contentEl.appendChild(editedTag);
         }
@@ -1636,7 +2096,7 @@ _setupSocketListeners() {
   // ── Bulk purge: admin replaced all of a user's messages with placeholder text ──
   this.socket.on('user-messages-purged', (data) => {
     if (!data || !data.channelCode) return;
-    const placeholder = data.placeholder || 'User banned.';
+    const placeholder = data.placeholder || t('modals.admin_action.purge_message_placeholder');
     if (data.channelCode === this.currentChannel) {
       const userMsgs = document.querySelectorAll(`[data-user-id="${data.userId}"]`);
       userMsgs.forEach(msgEl => {
@@ -1667,6 +2127,31 @@ _setupSocketListeners() {
         msgEl.remove();
       });
     }
+    // Drop the row from the search panel too, regardless of which channel is
+    // open — results are cross-channel and this only fires on a confirmed
+    // delete, so removal stays truthful. (search-overhaul phase 3)
+    this._searchRemoveResult?.(data.channelCode, data.messageId);
+  });
+
+  // ── Low disk warning (admins only, #5505) ────────
+  // The server only sends this to admins, and only when the state changes, so
+  // there is nothing to filter here beyond reflecting whatever it last said.
+  // Toast on the way in so it is noticed once; the banner is what persists.
+  this.socket.on('disk-status', (data) => {
+    const banner = document.getElementById('disk-low-banner');
+    if (!banner || !data) return;
+    if (!data.low) {
+      banner.style.display = 'none';
+      return;
+    }
+    const label = t('banners.disk_low');
+    const detail = data.freeMb === null
+      ? label
+      : t('banners.disk_low_detail', { free: data.freeMb, reserve: data.reserveMb });
+    banner.querySelector('.disk-low-text').textContent = label;
+    banner.title = detail;
+    banner.style.display = 'inline-flex';
+    this._showToast(detail, 'error');
   });
 
   // ── Bot soundboard trigger ───────────────────────
@@ -1710,15 +2195,19 @@ _setupSocketListeners() {
         // Add pin tag to header
         const header = msgEl.querySelector('.message-header');
         if (header && !header.querySelector('.pinned-tag')) {
-          header.insertAdjacentHTML('beforeend', '<span class="pinned-tag" title="Pinned message">📌</span>');
+          header.insertAdjacentHTML('beforeend', `<span class="pinned-tag" title="${t('app.messages.pinned')}">📌</span>`);
         }
         // Update toolbar: swap pin → unpin
         const pinBtn = msgEl.querySelector('[data-action="pin"]');
-        if (pinBtn) { pinBtn.dataset.action = 'unpin'; pinBtn.title = 'Unpin'; }
+        if (pinBtn) { pinBtn.dataset.action = 'unpin'; pinBtn.title = t('msg_toolbar.unpin'); }
       }
       this._appendSystemMessage(`📌 ${t('header.messages.pinned_by', { name: data.pinnedBy })}`);
       this._markPinUnread?.(data.messageId);
       this._bumpPinIndicator?.(1);
+      // A pinned topic heads the forum list and its menu should offer Unpin,
+      // so the cached topic follows and the cards are rebuilt (#5650).
+      const topic = this._forumTopics && this._forumTopics.get(data.messageId);
+      if (topic) { topic.pinned = 1; if (this._forumActive) this._forumReload(); }
 
       // If the Pins PiP is open, silently re-fetch the updated pin list so the
       // new pin appears without requiring the user to reopen anything.
@@ -1740,8 +2229,10 @@ _setupSocketListeners() {
         if (tag) tag.remove();
         // Update toolbar: swap unpin → pin
         const unpinBtn = msgEl.querySelector('[data-action="unpin"]');
-        if (unpinBtn) { unpinBtn.dataset.action = 'pin'; unpinBtn.title = 'Pin'; }
+        if (unpinBtn) { unpinBtn.dataset.action = 'pin'; unpinBtn.title = t('msg_toolbar.pin'); }
       }
+      const topic = this._forumTopics && this._forumTopics.get(data.messageId);
+      if (topic) { topic.pinned = 0; if (this._forumActive) this._forumReload(); }
       // Remove from pinned sidebar panel if it's open
       const pinnedItem = document.querySelector(`#pinned-panel .pinned-item[data-msg-id="${data.messageId}"]`);
       if (pinnedItem) {
@@ -1784,6 +2275,14 @@ _setupSocketListeners() {
     }
   });
 
+  // ── Channel thread list (#5506) ──
+  this.socket.on('channel-threads', (data) => {
+    if (!data || data.channelCode !== this.currentChannel) return;
+    this._threadListData = Array.isArray(data.threads) ? data.threads : [];
+    const search = document.getElementById('threads-list-search');
+    this._renderThreadList?.(search ? search.value : '');
+  });
+
   // ── Channel Media Gallery (#5350) ──
   this.socket.on('channel-media', (data) => {
     if (!data || data.channelCode !== this.currentChannel) return;
@@ -1798,19 +2297,27 @@ _setupSocketListeners() {
         msgEl.dataset.archived = '1';
         const header = msgEl.querySelector('.message-header');
         if (header && !header.querySelector('.archived-tag')) {
-          header.insertAdjacentHTML('beforeend', '<span class="archived-tag" title="Protected from cleanup">🛡️</span>');
+          header.insertAdjacentHTML('beforeend', `<span class="archived-tag" title="${t('app.messages.protected')}">🛡️</span>`);
         }
         // For compact messages, add tag to content
         const content = msgEl.querySelector('.message-content');
         if (msgEl.classList.contains('message-compact') && content && !content.querySelector('.archived-tag')) {
-          content.insertAdjacentHTML('afterbegin', '<span class="archived-tag" title="Protected from cleanup">🛡️</span>');
+          content.insertAdjacentHTML('afterbegin', `<span class="archived-tag" title="${t('app.messages.protected')}">🛡️</span>`);
+        }
+        // A forum topic card shows the shield with its tags (#5622).
+        const forumTags = msgEl.classList.contains('forum-topic') ? msgEl.querySelector('.forum-topic-tags') : null;
+        if (forumTags && !forumTags.querySelector('.archived-tag')) {
+          forumTags.insertAdjacentHTML('afterbegin', `<span class="forum-tag forum-tag-protected archived-tag" title="${t('app.messages.protected')}">🛡️</span>`);
         }
         // Update toolbar: swap archive → unarchive
         const archBtn = msgEl.querySelector('[data-action="archive"]');
-        if (archBtn) { archBtn.dataset.action = 'unarchive'; archBtn.title = 'Unprotect'; }
+        if (archBtn) { archBtn.dataset.action = 'unarchive'; archBtn.title = t('app.messages.unprotect_btn'); }
       }
       this._appendSystemMessage(`🛡️ ${t('header.messages.protected_by', { name: data.archivedBy })}`);
     }
+    // Keep the cached topic in step so a re-rendered card keeps its shield.
+    const topic = this._forumTopics && this._forumTopics.get(data.messageId);
+    if (topic) topic.is_archived = 1;
   });
 
   this.socket.on('message-unarchived', (data) => {
@@ -1826,10 +2333,12 @@ _setupSocketListeners() {
         if (contentTag) contentTag.remove();
         // Update toolbar: swap unarchive → archive
         const unarchBtn = msgEl.querySelector('[data-action="unarchive"]');
-        if (unarchBtn) { unarchBtn.dataset.action = 'archive'; unarchBtn.title = 'Protect from cleanup'; }
+        if (unarchBtn) { unarchBtn.dataset.action = 'archive'; unarchBtn.title = t('app.messages.protect_btn'); }
       }
       this._appendSystemMessage(`🛡️ ${t('header.messages.message_unprotected')}`);
     }
+    const topic = this._forumTopics && this._forumTopics.get(data.messageId);
+    if (topic) topic.is_archived = 0;
   });
 
   // ── Admin moderation events ────────────────────────
@@ -1844,6 +2353,7 @@ _setupSocketListeners() {
   this.socket.on('banned', (data) => {
     this._showToast(data.reason ? t('toasts.banned_from_server_reason', { reason: data.reason }) : t('toasts.banned_from_server'), 'error');
     setTimeout(() => {
+      this._clearChannelCodeMap();
       localStorage.removeItem('haven_token');
       localStorage.removeItem('haven_user');
       window.location.href = '/';
@@ -1854,8 +2364,25 @@ _setupSocketListeners() {
     this._showToast(data.reason ? t('toasts.muted_reason', { duration: data.duration, reason: data.reason }) : t('toasts.muted', { duration: data.duration }), 'error');
   });
 
+  this.socket.on('unmuted', () => {
+    this._showToast(t('toasts.unmuted'), 'success');
+  });
+
   this.socket.on('ban-list', (data) => {
     this._renderBanList(data);
+  });
+
+  // (#5457) A banned user submitted an appeal. Nudge online admins and, if the
+  // Banned Users modal is open, refresh it so the appeal shows immediately.
+  this.socket.on('ban-appeal-received', (data) => {
+    if (!this.user?.isAdmin) return;
+    this._showToast(t('toasts.ban_appeal_received', {
+      username: data?.username || t('toasts.banned_user'),
+    }), 'info');
+    const bansModal = document.getElementById('bans-modal');
+    if (bansModal && bansModal.style.display !== 'none') {
+      this.socket.emit('get-bans');
+    }
   });
 
   this.socket.on('ip-ban-list', (data) => {
@@ -1875,15 +2402,38 @@ _setupSocketListeners() {
   });
 
   // ── Server settings ────────────────────────────────
-  this.socket.on('server-settings', (settings) => {
+  this.socket.on('server-settings', (settings, envInfo) => {
     this.serverSettings = settings;
+    // Which of these settings also have a value waiting in the environment,
+    // so the panel can say which one is actually in effect. (#5489)
+    this.serverEnvSettings = envInfo || {};
+    // No GIF provider on this server: the button would only open an empty
+    // picker, so it goes (#5654).
+    document.documentElement.toggleAttribute('data-no-gif', settings && settings.gif_search_available === 'false');
+    // TEMPORARY (#5649): a one-time notice to admins that channel access moved
+    // from roles to the channel's Required roles. Remove after the 4.8.x cycle.
+    if (settings && settings.role_gate_notice === '1' && !this._roleGateNoticeShown &&
+        (this.user?.isAdmin || this._hasPerm?.('manage_roles') || this._hasPerm?.('manage_server'))) {
+      this._roleGateNoticeShown = true;
+      const modal = document.getElementById('role-gate-notice-modal');
+      if (modal) {
+        modal.style.display = 'flex';
+        document.getElementById('role-gate-notice-ok')?.addEventListener('click', () => {
+          modal.style.display = 'none';
+          this.socket.emit('update-server-setting', { key: 'role_gate_notice', value: '0' });
+        }, { once: true });
+      }
+    }
     this._applyServerSettings();
+    this._renderChannelTemplates();
     this._maybeShowSetupWizard();
   });
 
   this.socket.on('server-setting-changed', (data) => {
     this.serverSettings[data.key] = data.value;
     this._applyServerSettings();
+    if (data.key === 'channel_templates') this._renderChannelTemplates();
+    if (data.key === 'hide_disabled_channel_badges') this._renderChannels?.();
   });
 
   // ── Webhooks list ──────────────────────────────────
@@ -1907,19 +2457,94 @@ _setupSocketListeners() {
   // ── User preferences (persistent theme etc.) ───────
   this.socket.on('preferences', (prefs) => {
     this._userPrefs = prefs || {};
+    // The top-bar Android banner waits for this record before it shows (#5594).
+    this._syncAndroidBanner?.();
+    // Effects come back from the server like the theme does; restore them
+    // first so applyThemeFromServer() applies the saved pick, not the default.
+    if (prefs.effects && typeof syncEffectsFromServer === 'function') syncEffectsFromServer(prefs.effects);
     if (prefs.theme) {
       // User has a saved personal theme preference — apply it
-      applyThemeFromServer(prefs.theme);
+      applyThemeFromServer(prefs.theme, true, true);
     } else if (this.serverSettings.default_theme) {
       // No personal preference — apply the server's default theme
       applyThemeFromServer(this.serverSettings.default_theme);
+    } else if (prefs.effects && typeof applyEffects === 'function') {
+      // No theme pass to carry them, so the restored effects apply here.
+      applyEffects(_getStoredEffectMode());
     }
     // Sync hide-own-score toggle to the server's stored value so reopening
     // settings on a fresh device shows the correct state.
+    if (prefs.hide_nsfw != null) {
+      try { localStorage.setItem('haven_hide_nsfw', prefs.hide_nsfw); } catch {}
+      const nsfwToggle = document.getElementById('hide-nsfw-channels');
+      if (nsfwToggle) nsfwToggle.checked = prefs.hide_nsfw === 'true';
+    }
     if (prefs.hide_score_badge != null) {
       try { localStorage.setItem('haven_hide_own_score', prefs.hide_score_badge); } catch {}
       const ownToggle = document.getElementById('hide-own-score');
       if (ownToggle) ownToggle.checked = prefs.hide_score_badge === 'true';
+    }
+    // Activity toggles live entirely server-side (other clients must honour
+    // them), so the UI can only be correct once prefs land.
+    this._syncActivityUI?.();
+    // Reflect any saved timezone/format in the settings row now that prefs are
+    // known. The first-run modal itself is gated separately via the welcome
+    // popup sequencer (_shouldShowTzPrompt).
+    this._updateTimezoneSummary?.();
+  });
+
+  // Server's verdict on the recovery-codes notice (see the connect handler's
+  // get-recovery-notice-state emit). Only shows when the account has no
+  // recovery codes and the user hasn't ticked "never show again".
+  this.socket.on('recovery-notice-state', ({ show } = {}) => {
+    if (show) setTimeout(() => this._showRecoveryNotice(), 2500);
+  });
+
+  // ── Rich presence: linked accounts ─────────────────
+  this.socket.on('connections', (data) => {
+    const prev = new Set((this._connections?.connections || []).map(c => c.provider));
+    this._connections = data || { connections: [], available: {} };
+    this._renderConnections?.();
+    // The quick toggles in the status picker read as on only when a provider
+    // is linked, so linking or unlinking one has to refresh them.
+    this._syncStatusPickerActivity?.();
+    // The link may have completed in a different browser window entirely, so
+    // this push is often the first the app hears of it — announce anything
+    // newly linked rather than letting the row change silently.
+    for (const c of (this._connections.connections || [])) {
+      if (!prev.has(c.provider)) {
+        const label = c.provider.charAt(0).toUpperCase() + c.provider.slice(1);
+        this._showToast(t('users.connections.link_success', { provider: label }), 'success');
+      }
+    }
+  });
+
+  // ── Listening presence: webhook token state ───
+  // token is a string when the feature is on, null when off. The full URL is
+  // built client-side from this origin so the server never handles it.
+  this.socket.on('listening-state', (data) => {
+    this._applyListeningState?.(data?.token || null);
+  });
+
+  // Server issued a short-lived link token — hand off to the provider in a
+  // SEPARATE window.
+  //
+  // This used to navigate the current page. In the desktop app that meant the
+  // Haven window itself became Steam's sign-in page, and once the flow
+  // finished somewhere else (Steam's QR sign-in hands off to the default
+  // browser) the app was stranded on a provider page with no way back.
+  //
+  // The popup owns the whole round-trip and closes itself at the end; the app
+  // window never moves. If the link succeeds, the server pushes a 'connections'
+  // update to every socket this user has open, so the UI refreshes regardless
+  // of which browser actually completed the flow.
+  this.socket.on('connect-token', (data) => {
+    if (!data || !data.provider || !data.token) return;
+    const url = `/connect/${encodeURIComponent(data.provider)}?token=${encodeURIComponent(data.token)}`;
+    const win = window.open(url, 'haven-connect', 'width=820,height=760,menubar=no,toolbar=no');
+    if (!win) {
+      // Popup blocked — tell the user rather than silently doing nothing.
+      this._showToast(t('users.connections.allow_popups'), 'error');
     }
   });
 
@@ -1943,54 +2568,35 @@ _setupSocketListeners() {
   });
 
   // ── Search results ─────────────────────────────────
+  // Global FTS search is server-paged; results belong to the shared public
+  // context (DMs are searched locally). total/page drive the pager. The
+  // panel/pager/cache live in app-search.js. (search-overhaul phase 2)
   this.socket.on('search-results', (data) => {
-    const panel = document.getElementById('search-results-panel');
-    const list = document.getElementById('search-results-list');
-    const count = document.getElementById('search-results-count');
-    if (data.isDM) {
-      count.textContent = t('header.search_results_other', { count: 0, query: this._escapeHtml(data.query) });
-      list.innerHTML = `<p class="muted-text" style="padding:12px">Search is not available in DMs because messages are end-to-end encrypted.</p>`;
-      panel.style.display = 'block';
-      return;
-    }
-
-    // Build header with active filters
-    let filterInfo = '';
-    if (data.filters) {
-      const tags = [];
-      if (data.filters.from) tags.push(`<span class="search-filter-tag">from:${this._escapeHtml(data.filters.from)}</span>`);
-      if (data.filters.in) tags.push(`<span class="search-filter-tag">in:#${this._escapeHtml(data.filters.in)}</span>`);
-      if (data.filters.has) tags.push(`<span class="search-filter-tag">has:${this._escapeHtml(data.filters.has)}</span>`);
-      if (tags.length) filterInfo = `<div class="search-filter-tags">${tags.join(' ')}</div>`;
-    }
-
-    count.innerHTML = t(data.results.length === 1 ? 'header.search_results_one' : 'header.search_results_other', { count: data.results.length, query: this._escapeHtml(data.query) }) + filterInfo;
-
-    // Strip filters from query for highlight
-    const highlightQuery = data.query.replace(/\b(?:from|in|has):\S+/gi, '').trim();
-
-    list.innerHTML = data.results.length === 0
-      ? `<p class="muted-text" style="padding:12px">${t('header.search_no_results')}</p>`
-      : data.results.map(r => `
-        <div class="search-result-item" data-msg-id="${r.id}">
-          <span class="search-result-author" style="color:${this._getUserColor(r.username)}">${this._escapeHtml(this._getNickname(r.user_id, r.username))}</span>
-          <span class="search-result-time">${this._formatTime(r.created_at)}</span>
-          <div class="search-result-content">${highlightQuery ? this._highlightSearch(this._escapeHtml(r.content), highlightQuery) : this._escapeHtml(r.content)}</div>
-        </div>
-      `).join('');
-    panel.style.display = 'block';
-
-    // Click to scroll to message
-    list.querySelectorAll('.search-result-item').forEach(item => {
-      item.addEventListener('click', () => {
-        const msgId = parseInt(item.dataset.msgId, 10);
-        // Close the search panel so the user can see the result
-        panel.style.display = 'none';
-        document.getElementById('search-container').style.display = 'none';
-        document.getElementById('search-input').value = '';
-        this._jumpToMessage(msgId);
-      });
+    // Drop stale responses: only the latest issued query's token counts, so a
+    // slow earlier query can't overwrite newer results. (search-overhaul)
+    if (data.token != null && data.token !== this._searchSeq) return;
+    this._searchReceiveResults('__public__', {
+      results: data.results || [],
+      total: data.total || 0,
+      page: data.page || 1,
+      query: data.query,
+      filters: data.filters || null,
+      isDM: !!data.isDM,
     });
+  });
+
+  // The server refused a search because this account hit the per-account rate
+  // limit. Clear the spinner and toast, but leave the existing results in
+  // place. Token-gated so a stale refusal can't kill a fresher spinner.
+  this.socket.on('search-throttled', (data) => {
+    if (data && data.token != null && data.token !== this._searchSeq) return;
+    this._searchOnThrottled();
+  });
+
+  // Active tokenizer's minimum query length (trigram 3, word tokenizers 2), so
+  // the input gate matches what the server can actually match. (phase 2)
+  this.socket.on('search-config', (d) => {
+    this._searchMinChars = (d && d.minChars) || 2;
   });
 
   // ── High Scores ──────────────────────────────────
@@ -2071,8 +2677,19 @@ _forceFullResync(reason) {
   const now = Date.now();
   if (now - (this._lastForcedResync || 0) < 3000) return;
   this._lastForcedResync = now;
-  console.log(`[force-resync] reason=${reason}, socket.connected=${!!this.socket?.connected}`);
+  const inVoiceLive = !!(this.voice && this.voice.inVoice &&
+    ((this.voice.liveVoicePeerCount?.() || 0) > 0 || this.voice.localStream));
+  console.log(`[force-resync] reason=${reason}, socket.connected=${!!this.socket?.connected}, inVoiceLive=${inVoiceLive}`);
   if (!this.socket) return;
+
+  // Hard-cycling the socket while WebRTC is healthy is what produces the
+  // "left voice on the roster / lost the stream / can still talk" desync
+  // on window maximize. Prefer a light resync whenever media is live.
+  if (inVoiceLive && this.socket.connected) {
+    this._lightVoiceResync(reason);
+    return;
+  }
+
   try { this.socket.disconnect(); } catch {}
   try { this.socket.connect(); } catch {}
   // Defensive: if for some reason 'connect' doesn't fire within 6 s,
@@ -2089,9 +2706,42 @@ _forceFullResync(reason) {
         try { this.socket.emit('get-channel-members', { code: this.currentChannel }); } catch {}
         try { this.socket.emit('request-online-users', { code: this.currentChannel }); } catch {}
         try { this.socket.emit('request-voice-users', { code: this.currentChannel }); } catch {}
+        if (this.voice?.inVoice && this.voice.currentChannel) {
+          try { this.socket.emit('voice-rejoin', { code: this.voice.currentChannel, ...this.voice.getNativeScreenClientInfo() }); } catch {}
+        }
       }
     }
   }, 6000);
+},
+
+// Refresh channel/voice state without tearing down the socket (and therefore
+// without risking a server-side voice grace-eviction while WebRTC is fine).
+_lightVoiceResync(reason) {
+  console.log(`[light-resync] reason=${reason}`);
+  if (!this.socket?.connected) {
+    try { this.socket?.connect(); } catch {}
+    return;
+  }
+  try {
+    if (this.currentChannel) {
+      this.socket.emit('enter-channel', { code: this.currentChannel });
+      this.socket.emit('request-online-users', { code: this.currentChannel });
+      this.socket.emit('request-voice-users', {
+        code: this.currentChannel,
+        iAmInVoice: !!(this.voice && this.voice.inVoice && this.voice.currentChannel === this.currentChannel)
+      });
+    }
+    if (this.voice?.inVoice && this.voice.currentChannel) {
+      // voice-rejoin is now a no-op on the server when already bound on this
+      // socket (skipRenegotiate). Still safe — used only to refresh roster.
+      this.socket.emit('voice-rejoin', { code: this.voice.currentChannel, ...this.voice.getNativeScreenClientInfo() });
+      // UI may have been flipped to "Join Voice" by a partial desync — restore.
+      try { this._reconcileVoiceUi?.(); } catch {}
+      try { this.voice.reassertScreenStreams?.(); } catch {}
+    }
+  } catch (e) {
+    console.warn('[light-resync] failed:', e);
+  }
 },
 
 };

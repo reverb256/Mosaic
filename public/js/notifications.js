@@ -9,9 +9,13 @@ class NotificationManager {
     this.audioCtx = null;
     this.enabled = this._loadPref('haven_notif_enabled', false);
     this.mentionsEnabled = this._loadPref('haven_notif_mentions_enabled', true);
+    this.roleMentionsEnabled = this._loadPref('haven_notif_role_mentions_enabled', true); // @Role pings (#5579)
     this.repliesEnabled = this._loadPref('haven_notif_replies_enabled', true);
     this.dmEnabled = this._loadPref('haven_notif_dm_enabled', true);
     this.voiceActionCuesEnabled = this._loadPref('haven_notif_voice_action_cues_enabled', true);
+    // Opt-in rate limit for visible notification pop-ups (default 0 = off).
+    this.popupCooldownMs = this._loadPref('haven_notif_popup_cooldown_ms', 0);
+    this._lastPopupAt = 0;
     this.volume = this._loadPref('haven_notif_volume', 0.5);
     this.mentionVolume = this._loadPref('haven_notif_mention_volume', 0.8);
     this.replyVolume = this._loadPref('haven_notif_reply_volume', 0.8);
@@ -149,8 +153,9 @@ class NotificationManager {
     else if (opts && opts.isReply && this.repliesEnabled) { /* allowed */ }
     else if (opts && opts.isDm && this.dmEnabled) { /* allowed */ }
     // Regular message & announcement sounds are gated by the master toggle;
-    // everything else (sent, join, leave) always plays
-    else if ((event === 'message' || event === 'announcement') && !this.enabled) return;
+    // everything else (sent, join, leave) always plays. A settings preview
+    // skips the gate: picking a sound should let you hear it either way.
+    else if ((event === 'message' || event === 'announcement') && !this.enabled && !(opts && opts.preview)) return;
 
     const sound = this.sounds[event];
     if (!sound || sound === 'none') return;
@@ -210,6 +215,31 @@ class NotificationManager {
   setVoiceActionCuesEnabled(val) {
     this.voiceActionCuesEnabled = !!val;
     this._savePref('haven_notif_voice_action_cues_enabled', this.voiceActionCuesEnabled);
+  }
+
+  // 0 shows every pop-up, -1 shows none (sounds and badges are separate), any
+  // other value is the shortest gap between two pop-ups in ms (#5619).
+  setPopupCooldownMs(val) {
+    const n = parseInt(val, 10);
+    this.popupCooldownMs = n === -1 ? -1 : Math.max(0, n || 0);
+    this._savePref('haven_notif_popup_cooldown_ms', this.popupCooldownMs);
+  }
+
+  /**
+   * Rate-limit gate for VISIBLE notification pop-ups (Desktop OS banners and
+   * browser Notifications). Returns true if a pop-up may show right now, or
+   * false if we're still inside the user's chosen cooldown window. Off (0)
+   * always allows. Sounds and unread badges do NOT pass through this — only the
+   * visible pop-up is throttled, so a burst of activity (or a flaky connection
+   * that keeps reconnecting) can't spam the taskbar.
+   */
+  popupAllowed() {
+    if (this.popupCooldownMs === -1) return false;
+    if (!this.popupCooldownMs) return true;
+    const now = Date.now();
+    if (now - this._lastPopupAt < this.popupCooldownMs) return false;
+    this._lastPopupAt = now;
+    return true;
   }
 
   setVolume(val) {

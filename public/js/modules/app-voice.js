@@ -18,7 +18,7 @@ async _joinVoice() {
   // the multi-toast / multi-join behaviour. The auto-rejoin code in the
   // 'connect' handler will re-join voice automatically once we're back.
   if (this.socket && this.socket.connected === false) {
-    this._showToast('Disconnected — try again once reconnected', 'error');
+    this._showToast(t('voice.disconnected'), 'error');
     return;
   }
   // Block voice join in text-only channels
@@ -28,7 +28,7 @@ async _joinVoice() {
     return;
   }
   if (!this.user?.isAdmin && !this.user?.isGuest && !this._hasPerm('use_voice')) {
-    this._showToast('You do not have permission to use voice', 'error');
+    this._showToast(t('voice.no_permission'), 'error');
     return;
   }
   this._joiningVoice = true;
@@ -120,9 +120,10 @@ _leaveVoice() {
   if (leftCode) {
     delete this.voiceCounts[leftCode];
     delete this.voiceChannelUsers[leftCode];
-    // If the right panel is currently showing this channel's voice users,
-    // empty it immediately so the user sees the leave reflected on click.
-    if (this.currentChannel === leftCode) {
+    // Clear the right VOICE panel whenever it was bound to the channel we
+    // just left — including the case where we're reading a different text
+    // channel (DM etc.) while the panel was still showing the VC roster.
+    if (this.currentChannel === leftCode || this._lastVoiceUsersChannel === leftCode) {
       this._renderVoiceUsers([], leftCode);
     }
     this._updateChannelVoiceIndicators();
@@ -192,6 +193,98 @@ _toggleDeafen() {
   this._updateVoiceBar();
 },
 
+// ── Voice UI reconciler ──────────────────────────────────
+//
+// The voice UI is written imperatively by _updateVoiceButtons/_updateVoiceStatus/
+// _updateVoiceBar from several unrelated call sites, and nothing ever recomputes
+// it. If it is torn down while the session is actually alive — which is what
+// produced "Haven shows Join Voice but I can still hear and talk to everyone" —
+// the only way back is for the user to click Join Voice, which is a needless
+// renegotiation of a session that never broke.
+//
+// Note that _updateVoiceButtons(false) also empties #screen-share-grid outright,
+// which is why the stream vanished with no entry in the hidden-streams bar: the
+// tiles were destroyed, not hidden. The audio elements live in #audio-container
+// and are untouched, which is exactly why the stream's sound kept playing.
+//
+// This runs on a timer and on focus/resize and repairs whichever side is stale.
+// IMPORTANT: this is UI-only. It must NEVER emit voice-rejoin / voice-leave.
+// A previous revision did, and on window maximize that tore down live peers
+// via voice-existing-users (no skipRenegotiate) — the "instant disconnect
+// on first resize while streaming" bug.
+_reconcileVoiceUi() {
+  if (!this.voice) return;
+
+  // Fix the bookkeeping first if the media session says we're still in voice.
+  const repaired = this.voice.reassertSessionIfLive();
+
+  const peersLive = (this.voice.liveVoicePeerCount?.() || 0) > 0;
+  const micLive = !!(this.voice.localStream &&
+    this.voice.localStream.getTracks().some(t => t.readyState === 'live'));
+  const flagsInVoice = !!(this.voice.inVoice && this.voice.currentChannel);
+  // Media truth wins. Never paint "Join Voice" while peers/mic are live.
+  const sessionInVoice = flagsInVoice || peersLive || micLive;
+
+  const joinBtn = document.getElementById('voice-join-btn');
+  const joinVisible = !!joinBtn && joinBtn.style.display !== 'none';
+  // Hidden on purpose (welcome screen, voice off, no permission) is not a
+  // desync, so compare against what the channel allows (#5598).
+  const joinExpected = this._voiceJoinAvailable();
+  const bar = document.getElementById('voice-bar');
+  const barShowsVoice = !!bar && bar.style.display !== 'none' && bar.style.display !== '';
+
+  // Already consistent.
+  if (!repaired && sessionInVoice && !joinVisible && barShowsVoice) return;
+  if (!repaired && !sessionInVoice && joinVisible === joinExpected && !barShowsVoice) return;
+
+  // Only repair UPWARD when media is live. Never tear UI down on a flaky
+  // layout read during maximize — that wiped stream tiles.
+  if (!sessionInVoice) {
+    // Genuinely idle — leave UI alone unless it still shows connected chrome.
+    if (!barShowsVoice && joinVisible === joinExpected) return;
+    // Bar still says connected but media is dead: clear chrome.
+    if (barShowsVoice || joinVisible !== joinExpected) {
+      console.warn('[Voice] UI shows voice but media is dead — clearing chrome');
+      this._updateVoiceButtons(false);
+      this._updateVoiceStatus(false);
+      this._updateVoiceBar();
+    }
+    return;
+  }
+
+  console.warn('[Voice] UI/session desync — repairing UI upward', {
+    flagsInVoice, peersLive, micLive, joinVisible, barShowsVoice, repaired
+  });
+
+  this._updateVoiceButtons(true);
+  this._updateVoiceStatus(true);
+  this._updateVoiceBar();
+  this._syncMuteDeafenButtons();
+
+  // Restore stream tiles if a prior false-leave wiped them. No signalling.
+  try {
+    const restored = this.voice.reassertScreenStreams?.();
+    if (restored) console.warn('[Voice] Restored', restored, 'stream tile(s) after UI desync');
+  } catch {}
+},
+
+_startVoiceUiReconciler() {
+  if (this._voiceUiReconcilerBound) return;
+  this._voiceUiReconcilerBound = true;
+  // Debounce resize heavily: maximize fires a burst of events. We only
+  // need to fix chrome after the layout settles — never mid-drag.
+  let resizeTimer = null;
+  const run = () => { try { this._reconcileVoiceUi(); } catch (e) { console.warn('[Voice] reconcile failed:', e); } };
+  const runDebounced = () => {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(run, 300);
+  };
+  window.addEventListener('focus', runDebounced);
+  window.addEventListener('resize', runDebounced);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) runDebounced(); });
+  this._voiceUiReconcilerTimer = setInterval(run, 5000);
+},
+
 /** Update all mute/deafen button instances (sidebar + header) to reflect current state */
 _syncMuteDeafenButtons() {
   const isMuted = this.voice.isMuted;
@@ -200,20 +293,31 @@ _syncMuteDeafenButtons() {
     const btn = document.getElementById(id);
     if (!btn) return;
     btn.textContent = '🎙️';
-    btn.title = isMuted ? 'Unmute' : 'Mute';
+    btn.title = t(isMuted ? 'voice.unmute' : 'voice.mute');
     btn.classList.toggle('muted', isMuted);
   });
   ['voice-deafen-btn', 'voice-deafen-btn-header'].forEach(id => {
     const btn = document.getElementById(id);
     if (!btn) return;
     btn.textContent = isDeafened ? '🔇' : '🔊';
-    btn.title = isDeafened ? 'Undeafen' : 'Deafen';
+    btn.title = t(isDeafened ? 'voice.undeafen' : 'voice.deafen');
     btn.classList.toggle('muted', isDeafened);
   });
 },
 
+// Whether "Join Voice" makes sense right now: a channel is open, voice is
+// on in it, and this user may use voice. The welcome screen, text-only
+// channels and people without the permission get no button (#5598).
+_voiceJoinAvailable() {
+  if (!this.currentChannel) return false;
+  const ch = this.channels && this.channels.find(c => c.code === this.currentChannel);
+  if (ch && ch.voice_enabled === 0) return false;
+  return !!(this.user?.isAdmin || this.user?.isGuest || this._hasPerm('use_voice'));
+},
+
 _updateVoiceButtons(inVoice) {
-  document.getElementById('voice-join-btn').style.display = inVoice ? 'none' : 'inline-flex';
+  const showJoin = !inVoice && this._voiceJoinAvailable();
+  document.getElementById('voice-join-btn').style.display = showJoin ? 'inline-flex' : 'none';
   // Show/hide the header voice-active indicator (not a button, just a label)
   const indicator = document.getElementById('voice-active-indicator');
   if (indicator) indicator.style.display = inVoice ? 'inline-flex' : 'none';
@@ -242,8 +346,8 @@ _updateVoiceButtons(inVoice) {
   // keep the button visible while already in voice (#5387).
   const mobileJoin = document.getElementById('voice-join-mobile');
   if (mobileJoin) {
-    if (inVoice) mobileJoin.style.setProperty('display', 'none', 'important');
-    else mobileJoin.style.removeProperty('display');
+    if (showJoin) mobileJoin.style.removeProperty('display');
+    else mobileJoin.style.setProperty('display', 'none', 'important');
   }
 
   if (!inVoice) {
@@ -272,22 +376,40 @@ _updateVoiceButtons(inVoice) {
     if (vsPanel) vsPanel.style.display = 'none';
     const vsBtn = document.getElementById('voice-settings-toggle');
     if (vsBtn) vsBtn.classList.remove('active');
-    // Clear all stream tiles so no ghost tiles persist after leaving voice
-    const grid = document.getElementById('screen-share-grid');
-    grid.querySelectorAll('video').forEach(v => { v.srcObject = null; });
-    grid.innerHTML = '';
-    document.getElementById('screen-share-container').style.display = 'none';
-    // Clear all webcam tiles
-    const wcGrid = document.getElementById('webcam-grid');
-    if (wcGrid) {
-      wcGrid.querySelectorAll('video').forEach(v => { v.srcObject = null; });
-      wcGrid.innerHTML = '';
+
+    // Only destroy stream/webcam tiles when media is actually dead.
+    // A UI-only desync (maximize/resize flipping Join Voice on while
+    // WebRTC is still carrying the stream) used to wipe the grid here —
+    // audio kept playing with no tile and no way to restore without
+    // leave/rejoin. If peers or screen receivers are still live, leave
+    // the tiles alone; the reconciler will re-show the voice chrome.
+    const mediaStillLive = !!(this.voice && (
+      this.voice.inVoice ||
+      (this.voice.liveVoicePeerCount?.() || 0) > 0 ||
+      (this.voice.screenSharers && this.voice.screenSharers.size > 0) ||
+      (this.voice.localStream && this.voice.localStream.getTracks().some(t => t.readyState === 'live'))
+    ));
+    if (!mediaStillLive) {
+      const grid = document.getElementById('screen-share-grid');
+      if (grid) {
+        grid.querySelectorAll('video').forEach(v => { v.srcObject = null; });
+        grid.innerHTML = '';
+      }
+      const ssContainer = document.getElementById('screen-share-container');
+      if (ssContainer) ssContainer.style.display = 'none';
+      const wcGrid = document.getElementById('webcam-grid');
+      if (wcGrid) {
+        wcGrid.querySelectorAll('video').forEach(v => { v.srcObject = null; });
+        wcGrid.innerHTML = '';
+      }
+      const wcContainer = document.getElementById('webcam-container');
+      if (wcContainer) wcContainer.style.display = 'none';
+      this._screenShareMinimized = false;
+      this._removeScreenShareIndicator();
+      this._hideMusicPanel();
+    } else {
+      console.warn('[Voice] _updateVoiceButtons(false) skipped stream wipe — media still live');
     }
-    const wcContainer = document.getElementById('webcam-container');
-    if (wcContainer) wcContainer.style.display = 'none';
-    this._screenShareMinimized = false;
-    this._removeScreenShareIndicator();
-    this._hideMusicPanel();
   }
 },
 
@@ -350,6 +472,22 @@ _updateVoiceBar() {
 async _toggleScreenShare() {
   if (!this.voice.inVoice) return;
 
+  // Spam-click guard, mirroring the one _joinVoice has had for a while.
+  // Without it a double-click (or a laggy UI registering two triggers) ran
+  // shareScreen twice, which fired _createPeer twice within ~120ms and put two
+  // voice-offer SDP negotiations in flight against each other. The resulting
+  // glare shows up as a stalled stream and garbled audio. Reported with
+  // WebRTC-internals evidence by @RCCore. (#5426)
+  if (this._togglingScreenShare) return;
+  this._togglingScreenShare = true;
+  try {
+    await this._doToggleScreenShare();
+  } finally {
+    this._togglingScreenShare = false;
+  }
+},
+
+async _doToggleScreenShare() {
   // Block screen share if streams are disabled in this channel
   const _ssCh = this.channels.find(c => c.code === this.voice.currentChannel);
   if (_ssCh && _ssCh.streams_enabled === 0) {
@@ -378,8 +516,10 @@ async _toggleScreenShare() {
           try { this._applyShareAudioModeBadge(ev.detail); } catch (e) { console.warn('share mode badge update failed:', e); }
         });
       }
-      // Show our own screen in the viewer
-      this._handleScreenStream(this.user.id, this.voice.screenStream);
+      // Native desktop capture has no Chromium MediaStream for local preview.
+      if (this.voice.screenStream) {
+        this._handleScreenStream(this.user.id, this.voice.screenStream);
+      }
       // Show audio/no-audio badge
       if (this.voice.screenHasAudio) {
         this._handleScreenAudio(this.user.id);
@@ -445,7 +585,7 @@ _handleWebcamStream(userId, stream) {
       const lbl = document.createElement('div');
       lbl.className = 'webcam-tile-label';
       const peer = this.voice.peers.get(userId);
-      const who = (userId === null || userId === this.user.id) ? 'You' : (peer ? peer.username : 'Someone');
+      const who = (userId === null || userId === this.user.id) ? t('voice_runtime.you') : (peer ? peer.username : t('voice.someone'));
       lbl.textContent = who;
       tile.appendChild(lbl);
 
@@ -606,7 +746,7 @@ _updateWebcamVisibility() {
     container.classList.remove('webcam-focus-mode');
     this._removeWebcamIndicator();
   } else {
-    label.textContent = `📷 ${count} camera${count !== 1 ? 's' : ''}`;
+    label.textContent = `📷 ${t(count === 1 ? 'voice_runtime.camera_one' : 'voice_runtime.camera_other', { count })}`;
   }
 },
 
@@ -637,7 +777,7 @@ _showWebcamIndicator(count) {
     });
     document.querySelector('.channel-header')?.appendChild(ind);
   }
-  ind.textContent = `📷 ${count} camera${count > 1 ? 's' : ''} hidden`;
+  ind.textContent = `📷 ${t(count === 1 ? 'voice_runtime.camera_hidden_one' : 'voice_runtime.camera_hidden_other', { count })}`;
 },
 
 _removeWebcamIndicator() {
@@ -737,7 +877,7 @@ _popOutWebcamOverlay(tile, userId) {
 
   const stream = video.srcObject;
   const peer = this.voice.peers.get(userId);
-  const who = userId === null || userId === this.user.id ? 'You' : (peer ? peer.username : 'Camera');
+  const who = userId === null || userId === this.user.id ? t('voice_runtime.you') : (peer ? peer.username : t('voice_runtime.camera'));
 
   const pipId = `webcam-pip-${userId || 'self'}`;
   if (document.getElementById(pipId)) return;
@@ -752,11 +892,11 @@ _popOutWebcamOverlay(tile, userId) {
     <div class="music-pip-embed stream-pip-video"></div>
     <div class="music-pip-controls">
       <button class="music-pip-btn stream-pip-popin" title="${t('media.pop_back_in')}">⧈</button>
-      <span class="music-pip-label">📷 ${who}</span>
-      <span class="music-pip-vol-icon" title="Window opacity">👁</span>
+      <span class="music-pip-label"><span class="music-pip-label-icon" aria-hidden="true">📷</span> ${who}</span>
+      <span class="music-pip-vol-icon" title="${t('voice_runtime.window_opacity')}">👁</span>
       <input type="range" class="music-pip-vol pip-opacity-slider" min="20" max="100" value="${savedOpacity}">
       <button class="music-pip-btn stream-pip-fullscreen" title="${t('media.fullscreen')}">⤢</button>
-      <button class="music-pip-btn stream-pip-close" title="Close">✕</button>
+      <button class="music-pip-btn stream-pip-close" title="${t('modals.common.close')}">✕</button>
     </div>
   `;
 
@@ -825,17 +965,25 @@ _handleScreenStream(userId, stream, { force = false } = {}) {
   const label = document.getElementById('screen-share-label');
 
   if (stream) {
-    // Honour auto-accept setting — show a join prompt instead of opening the tile automatically
-    const autoAccept = force || localStorage.getItem('haven_auto_accept_streams') !== 'false';
+    // Honour auto-accept setting — show a join prompt instead of opening the
+    // tile automatically. Clicking the sharer's live badge counts as the
+    // accept for that share, so it skips the prompt too (#5636).
+    const accepted = !!(this._acceptedStreams && this._acceptedStreams.has(userId));
+    const autoAccept = force || accepted || localStorage.getItem('haven_auto_accept_streams') !== 'false';
     if (!autoAccept && userId !== null && userId !== this.user.id) {
       const peer = this.voice.peers.get(userId);
-      const who = peer ? peer.username : 'Someone';
+      const who = peer ? peer.username : t('voice.someone');
+      // Keep the offered stream so the live badge can open it after the
+      // prompt has gone (#5636).
+      if (!this._pendingStreamOffers) this._pendingStreamOffers = new Map();
+      this._pendingStreamOffers.set(userId, stream);
       this._showToast(t('voice.sharing_started', { who: this._escapeHtml(who) }), 'info', {
-        label: 'Join',
+        label: t('voice_runtime.join'),
         onClick: () => this._handleScreenStream(userId, stream, { force: true })
       }, 8000);
       return;
     }
+    this._pendingStreamOffers?.delete(userId);
 
     // Create a tile for this user's stream
     const tileId = `screen-tile-${userId || 'self'}`;
@@ -854,7 +1002,7 @@ _handleScreenStream(userId, stream, { force = false } = {}) {
       const lbl = document.createElement('div');
       lbl.className = 'screen-share-tile-label';
       const peer = this.voice.peers.get(userId);
-      const who = userId === null || userId === this.user.id ? 'You' : (peer ? peer.username : 'Someone');
+      const who = userId === null || userId === this.user.id ? t('voice_runtime.you') : (peer ? peer.username : t('voice.someone'));
       lbl.textContent = who;
       tile.appendChild(lbl);
 
@@ -983,6 +1131,10 @@ _handleScreenStream(userId, stream, { force = false } = {}) {
       grid.appendChild(tile);
     }
 
+    // A share the viewer had to accept may have had its audio parked while
+    // the Join prompt was up. The tile exists now, so let it play (#5636).
+    if (userId !== null && userId !== this.user.id) this.voice.flushPendingScreenAudio?.(userId);
+
     // Show the container BEFORE assigning srcObject — browsers won't decode
     // video frames inside a display:none container, causing a black rectangle
     // that only fixes itself on layout reflow (e.g. resizing the slider).
@@ -1057,6 +1209,7 @@ _handleScreenStream(userId, stream, { force = false } = {}) {
       }
     };
     setTimeout(_retryPlay, 600);
+    this._startStreamStallWatchdog(tileId, userId);
     this._screenShareMinimized = false;
     this._removeScreenShareIndicator();
     // Apply saved stream size so it doesn't start at default/cut-off height
@@ -1075,8 +1228,12 @@ _handleScreenStream(userId, stream, { force = false } = {}) {
       this.socket.emit('stream-watch', { code: this.voice.currentChannel, sharerId: userId });
     }
   } else {
-    // Stream ended — remove this tile
+    // Stream ended — remove this tile. The next share from this person gets
+    // the prompt again, and any offer that never got a tile is gone (#5636).
+    this._pendingStreamOffers?.delete(userId);
+    this._acceptedStreams?.delete(userId);
     const tileId = `screen-tile-${userId || 'self'}`;
+    this._stopStreamStallWatchdog(tileId);
     const tile = document.getElementById(tileId);
     if (tile) {
       const vid = tile.querySelector('video');
@@ -1099,6 +1256,124 @@ _handleScreenStream(userId, stream, { force = false } = {}) {
     }
     this._updateHiddenStreamsBar();
     this._updateScreenShareVisibility();
+  }
+},
+
+// ── Stream Frame-Progress Watchdog ───────────────────────
+//
+// `videoWidth > 0` only proves that metadata arrived once. On a reshare the
+// element keeps the dimensions of the stream it was previously showing, so a
+// tile can sit on a frozen or black frame indefinitely while videoWidth reads
+// as healthy — and _retryPlay, which bails the moment videoWidth is non-zero,
+// never runs. That is the "black screen until I dragged the resize slider"
+// case: the slider forced a reflow, which nudged the decoder, which is not a
+// recovery path anyone should have to discover.
+//
+// Watch the decoded-frame counter instead. It is the only signal that says
+// frames are actually arriving *now*.
+_startStreamStallWatchdog(tileId, userId) {
+  if (!this._streamStallTimers) this._streamStallTimers = {};
+  this._stopStreamStallWatchdog(tileId);
+
+  const readFrames = (videoEl) => {
+    try {
+      const q = videoEl.getVideoPlaybackQuality && videoEl.getVideoPlaybackQuality();
+      if (q && typeof q.totalVideoFrames === 'number') return q.totalVideoFrames;
+    } catch {}
+    return typeof videoEl.webkitDecodedFrameCount === 'number'
+      ? videoEl.webkitDecodedFrameCount
+      : -1;
+  };
+
+  let lastFrames = -1;
+  let stalls = 0;
+
+  this._streamStallTimers[tileId] = setInterval(() => {
+    const tile = document.getElementById(tileId);
+    const videoEl = tile && tile.querySelector('video');
+    if (!tile || !videoEl || !videoEl.srcObject) {
+      this._stopStreamStallWatchdog(tileId);
+      return;
+    }
+    // A hidden tile or a backgrounded window legitimately stops decoding.
+    // Treating that as a stall would spam the sharer with renegotiate
+    // requests every time someone minimises a stream.
+    if (tile.dataset.hidden === 'true' || document.hidden) { stalls = 0; return; }
+
+    const track = videoEl.srcObject.getVideoTracks
+      ? videoEl.srcObject.getVideoTracks()[0]
+      : null;
+    // Nothing is meant to be flowing — not a stall.
+    if (!track || track.readyState !== 'live' || track.muted) { stalls = 0; return; }
+
+    const frames = readFrames(videoEl);
+    if (frames < 0) { this._stopStreamStallWatchdog(tileId); return; } // unsupported
+
+    if (frames > lastFrames) {
+      lastFrames = frames;
+      stalls = 0;
+      return;
+    }
+
+    stalls++;
+    if (stalls === 2) {
+      // ~3s without a new frame. Re-attach the stream: a fresh srcObject
+      // assignment rebuilds the element's decode pipeline, which is what the
+      // accidental resize was really doing.
+      console.warn('[Stream] No frames for', tileId, '— re-attaching srcObject');
+      const s = videoEl.srcObject;
+      videoEl.srcObject = null;
+      videoEl.srcObject = s;
+      videoEl.play().catch(() => {});
+    } else if (stalls === 4 && userId && userId !== this.user.id &&
+               this.voice && this.voice.inVoice) {
+      // ~6s. Re-attaching didn't help, so the problem is upstream of us.
+      //
+      // The budget below is the fix for the loop @RCCore identified (#5426).
+      // A renegotiation delivers a new stream, which re-arms this watchdog
+      // with stalls back at 0, so the `stalls >= 12` give-up further down was
+      // unreachable: every request reset the counter that was supposed to
+      // stop the requests. On a link that is dropping frames for bandwidth
+      // reasons rather than signalling reasons, each renegotiation interrupts
+      // the buffer and causes the very stall that triggers the next one.
+      //
+      // The budget lives on `this` keyed by sharer, so it survives re-arms,
+      // and it backs off rather than hammering at a fixed interval.
+      if (!this._renegBudget) this._renegBudget = {};
+      const now = Date.now();
+      const b = this._renegBudget[userId] || { count: 0, nextAllowed: 0, windowStart: now };
+      if (now - b.windowStart > 120000) { b.count = 0; b.windowStart = now; }
+
+      if (b.count >= 3) {
+        console.warn('[Stream] Renegotiate budget spent for', userId,
+          '— not asking again this window. The stream is likely bandwidth-starved, not stuck.');
+      } else if (now < b.nextAllowed) {
+        // Backing off; say nothing and let the next tick reconsider.
+      } else {
+        b.count++;
+        b.nextAllowed = now + (5000 * b.count);   // 5s, 10s, 15s
+        this._renegBudget[userId] = b;
+        console.warn('[Stream] Still no frames for', tileId, '— requesting renegotiate',
+          `(${b.count}/3 this window)`);
+        this.socket.emit('request-screen-renegotiate', {
+          code: this.voice.currentChannel,
+          sharerId: userId
+        });
+      }
+      this._renegBudget[userId] = b;
+    } else if (stalls >= 12) {
+      // ~18s of nothing after both recovery attempts. Stop burning a timer;
+      // a fresh share or rejoin will re-arm this.
+      console.warn('[Stream] Giving up frame watchdog for', tileId);
+      this._stopStreamStallWatchdog(tileId);
+    }
+  }, 1500);
+},
+
+_stopStreamStallWatchdog(tileId) {
+  if (this._streamStallTimers && this._streamStallTimers[tileId]) {
+    clearInterval(this._streamStallTimers[tileId]);
+    delete this._streamStallTimers[tileId];
   }
 },
 
@@ -1166,14 +1441,14 @@ async _populateAudioDevices() {
     && typeof HTMLAudioElement.prototype.setSinkId === 'function';
   if (!_supportsSinkId) {
     outputSelect.disabled = true;
-    outputSelect.title = 'Your browser does not support switching audio output devices. Pick the output in your OS sound settings.';
+    outputSelect.title = t('voice_settings.output_unsupported_title');
     const _hintId = 'voice-output-unsupported-hint';
     if (!document.getElementById(_hintId) && outputSelect.parentElement) {
       const hint = document.createElement('small');
       hint.id = _hintId;
       hint.className = 'settings-hint';
       hint.style.cssText = 'display:block;margin-top:4px;opacity:0.85';
-      hint.textContent = 'Your browser can\u2019t switch audio output devices. Use your OS sound settings instead.';
+      hint.textContent = t('voice_settings.output_unsupported_hint');
       outputSelect.parentElement.appendChild(hint);
     }
   }
@@ -1194,14 +1469,45 @@ async _populateAudioDevices() {
 
 // ── Mic Level Meter ──────────────────────────────────────
 
+// (#5456) This used to start a requestAnimationFrame loop at app startup and
+// never stop it, so every client ran a frame loop for its entire session even
+// though the meter lives inside the settings modal and is off screen almost
+// all of the time. A permanently scheduled rAF keeps the renderer asking the
+// compositor for a new frame on every vsync, which is why an audio-only call
+// could sit there burning CPU on Rendering/Painting and keeping the GPU busy
+// with nothing on screen that moves. Now the loop only runs while the meter is
+// actually visible, and it only touches the DOM when the value really changed.
 _startMicMeter() {
+  const fill = this._micMeterFill;
+  if (!fill) return;
+
+  if (typeof IntersectionObserver === 'function') {
+    if (this._micMeterObserver) return;
+    this._micMeterObserver = new IntersectionObserver((entries) => {
+      if (entries.some(e => e.isIntersecting)) this._runMicMeter();
+      else this._stopMicMeter();
+    });
+    this._micMeterObserver.observe(fill);
+    return;
+  }
+  this._runMicMeter();
+},
+
+_runMicMeter() {
   if (this._micMeterRAF) return;
   const fill = this._micMeterFill;
   if (!fill) return;
 
+  let lastWidth = null;
   const tick = () => {
     const level = (this.voice && this.voice.inVoice) ? this.voice.currentMicLevel : 0;
-    fill.style.width = level + '%';
+    // Whole percents only — the bar is a few hundred pixels wide, so finer
+    // steps cost a layout + paint per frame and change nothing visually.
+    const width = Math.round(level) + '%';
+    if (width !== lastWidth) {
+      fill.style.width = width;
+      lastWidth = width;
+    }
     this._micMeterRAF = requestAnimationFrame(tick);
   };
   this._micMeterRAF = requestAnimationFrame(tick);
@@ -1253,6 +1559,14 @@ _updateScreenShareVisibility() {
   const container = document.getElementById('screen-share-container');
   const grid = document.getElementById('screen-share-grid');
   const label = document.getElementById('screen-share-label');
+  // Focus mode hides every tile but the focused one, so once that tile is
+  // gone (its sharer stopped, or it was closed or minimised) the remaining
+  // streams sat invisible in a blank container until something happened to
+  // reset it. Drop back to the grid instead. (#5609)
+  if (container.classList.contains('stream-focus-mode') &&
+      !grid.querySelector('.screen-share-tile.stream-focused:not([data-hidden="true"])')) {
+    this._exitStreamFocus();
+  }
   const totalCount = grid.children.length;
   const visibleCount = grid.querySelectorAll('.screen-share-tile:not([data-hidden=\"true\"])').length;
   const hiddenCount = totalCount - visibleCount;
@@ -1270,8 +1584,8 @@ _updateScreenShareVisibility() {
     this._showScreenShareIndicator(totalCount);
   } else {
     container.style.display = 'flex';
-    const labelParts = [`🖥️ ${visibleCount} stream${visibleCount !== 1 ? 's' : ''}`];
-    if (hiddenCount > 0) labelParts.push(`(${hiddenCount} hidden)`);
+    const labelParts = [`🖥️ ${t(visibleCount === 1 ? 'voice_runtime.stream_one' : 'voice_runtime.stream_other', { count: visibleCount })}`];
+    if (hiddenCount > 0) labelParts.push(t('voice_runtime.hidden_count', { count: hiddenCount }));
     label.textContent = labelParts.join(' ');
   }
 },
@@ -1319,7 +1633,7 @@ _showScreenShareIndicator(count) {
     });
     document.querySelector('.channel-header')?.appendChild(ind);
   }
-  ind.textContent = `🖥️ ${count} stream${count > 1 ? 's' : ''} hidden`;
+  ind.textContent = `🖥️ ${t(count === 1 ? 'media.hidden_streams_one' : 'media.hidden_streams_other', { count })}`;
 },
 
 _removeScreenShareIndicator() {
@@ -1486,7 +1800,7 @@ _handleScreenAudio(userId) {
     if (!tile.querySelector('.stream-audio-badge')) {
       const badge = document.createElement('div');
       badge.className = 'stream-audio-badge';
-      badge.innerHTML = '🔊 Audio';
+      badge.innerHTML = `🔊 ${t('voice_runtime.audio')}`;
       tile.appendChild(badge);
     }
     // If the desktop app already reported a specific audio mode for this
@@ -1519,24 +1833,30 @@ _applyShareAudioModeBadge(modeInfo) {
   let label, cls, tip;
   switch (modeInfo.applied) {
     case 'app':
-      label = `🔊 App Audio${modeInfo.detail ? ` (${modeInfo.detail})` : ''}`;
+      label = modeInfo.detail
+        ? t('voice_runtime.app_audio_detail', { detail: modeInfo.detail })
+        : t('voice_runtime.app_audio');
       cls   = 'mode-app';
-      tip   = `Capturing audio only from "${modeInfo.detail || 'selected app'}". No system or voice audio is included.`;
+      tip   = t('voice_runtime.app_audio_tip', { app: modeInfo.detail || t('voice_runtime.selected_app') });
       break;
     case 'system-clean':
-      label = '🔊 System Audio';
+      label = t('voice_runtime.system_audio');
       cls   = 'mode-system-clean';
-      tip   = 'Capturing all system audio except Haven. Your voice is not looped back.';
+      tip   = t('voice_runtime.system_audio_tip');
       break;
     case 'fallback-system-clean':
-      label = '🔊 System Audio (fallback)';
+      label = t('voice_runtime.system_audio_fallback');
       cls   = 'mode-fallback';
-      tip   = `Per-app capture failed, so the share is using system audio minus Haven.${modeInfo.detail ? ` Reason: ${modeInfo.detail}.` : ''}`;
+      tip   = modeInfo.detail
+        ? t('voice_runtime.system_audio_fallback_tip_reason', { reason: modeInfo.detail })
+        : t('voice_runtime.system_audio_fallback_tip');
       break;
     case 'system-loopback':
-      label = '🔊 All Audio ⚠';
+      label = t('voice_runtime.all_audio');
       cls   = 'mode-loopback';
-      tip   = `Using raw system loopback. This may include Haven\u2019s own voice output (voice loop possible).${modeInfo.detail ? ` Reason: ${modeInfo.detail}.` : ''}`;
+      tip   = modeInfo.detail
+        ? t('voice_runtime.all_audio_tip_reason', { reason: modeInfo.detail })
+        : t('voice_runtime.all_audio_tip');
       break;
     default:
       return;
@@ -1573,7 +1893,7 @@ _applyNoAudioBadge(tile, userId) {
   // Add the no-audio badge
   const badge = document.createElement('div');
   badge.className = 'stream-no-audio-badge';
-  badge.innerHTML = '🔇 No Audio';
+  badge.innerHTML = `🔇 ${t('voice_runtime.no_audio')}`;
   tile.appendChild(badge);
   // Hide audio controls since there's no audio to control
   const controls = document.getElementById(`stream-controls-${userId || 'self'}`);
@@ -1603,7 +1923,7 @@ _updateStreamViewerBadges() {
     const names = viewers.map(v => v.username).join(', ');
     const eyeCount = viewers.length;
     badge.innerHTML = `<span class="viewer-eye">👁</span> ${eyeCount}`;
-    badge.title = `Watching: ${names}`;
+  badge.title = t('users.watching_stream_title', { names });
     tile.appendChild(badge);
   });
 },
@@ -1615,28 +1935,33 @@ _toggleStreamFocus(tile) {
   const grid = document.getElementById('screen-share-grid');
   const wasFocused = tile.classList.contains('stream-focused');
 
-  // Remove focus from all tiles first
-  grid.querySelectorAll('.screen-share-tile').forEach(t => {
-    t.classList.remove('stream-focused');
-  });
-  container.classList.remove('stream-focus-mode');
+  // Leave focus mode first, whichever tile held it.
+  this._exitStreamFocus();
+  if (wasFocused) return;
 
-  if (!wasFocused) {
-    tile.classList.add('stream-focused');
-    container.classList.add('stream-focus-mode');
-    // Clear inline max-height so CSS flex constraints take over (viewport-bounded)
-    container.style.maxHeight = '';
-    grid.style.maxHeight = '';
-    const vid = tile.querySelector('video');
-    if (vid) vid.style.maxHeight = '';
-  } else {
-    // Restore slider-based size
-    const saved = localStorage.getItem('haven_stream_size') || '50';
-    const vh = parseInt(saved, 10);
-    container.style.maxHeight = vh + 'vh';
-    grid.style.maxHeight = (vh - 2) + 'vh';
-    document.querySelectorAll('.screen-share-tile video').forEach(v => { v.style.maxHeight = (vh - 4) + 'vh'; });
-  }
+  tile.classList.add('stream-focused');
+  container.classList.add('stream-focus-mode');
+  // Clear inline max-height so CSS flex constraints take over (viewport-bounded)
+  container.style.maxHeight = '';
+  grid.style.maxHeight = '';
+  const vid = tile.querySelector('video');
+  if (vid) vid.style.maxHeight = '';
+},
+
+// Leave focus mode and put the slider-based size back. Runs on the second
+// double-click, and whenever the focused tile goes away. (#5609)
+_exitStreamFocus() {
+  const container = document.getElementById('screen-share-container');
+  const grid = document.getElementById('screen-share-grid');
+  if (!container || !grid) return;
+  grid.querySelectorAll('.screen-share-tile.stream-focused').forEach(t => t.classList.remove('stream-focused'));
+  if (!container.classList.contains('stream-focus-mode')) return;
+  container.classList.remove('stream-focus-mode');
+  const saved = localStorage.getItem('haven_stream_size') || '50';
+  const vh = parseInt(saved, 10);
+  container.style.maxHeight = vh + 'vh';
+  grid.style.maxHeight = (vh - 2) + 'vh';
+  document.querySelectorAll('.screen-share-tile video').forEach(v => { v.style.maxHeight = (vh - 4) + 'vh'; });
 },
 
 /** Collapse the stream container when all tiles are popped out (no visible streams) */
@@ -1689,7 +2014,7 @@ _popOutStreamWindow(tile, userId) {
 
   const stream = video.srcObject;
   const peer = this.voice.peers.get(userId);
-  const who = userId === null || userId === this.user.id ? 'You' : (peer ? peer.username : 'Stream');
+  const who = userId === null || userId === this.user.id ? t('voice_runtime.you') : (peer ? peer.username : t('voice_runtime.stream'));
 
   // Create floating in-page overlay (like music PiP) instead of window.open
   const pipId = `stream-pip-${userId || 'self'}`;
@@ -1707,12 +2032,12 @@ _popOutStreamWindow(tile, userId) {
     <div class="music-pip-embed stream-pip-video"></div>
     <div class="music-pip-controls">
       <button class="music-pip-btn stream-pip-popin" title="${t('media.pop_back_in')}">⧈</button>
-      <span class="music-pip-label">🖥️ ${who}</span>
-      <span class="music-pip-vol-icon stream-pip-opacity-icon" title="Window opacity">👁</span>
+      <span class="music-pip-label"><span class="music-pip-label-icon" aria-hidden="true">🖥️</span> ${who}</span>
+      <span class="music-pip-vol-icon stream-pip-opacity-icon" title="${t('voice_runtime.window_opacity')}">👁</span>
       <input type="range" class="music-pip-vol pip-opacity-slider stream-pip-opacity" min="20" max="100" value="${savedOpacity}">
-      <button class="music-pip-btn stream-pip-maximize" title="Maximize">⛶</button>
+      <button class="music-pip-btn stream-pip-maximize" title="${t('voice_runtime.maximize')}">⛶</button>
       <button class="music-pip-btn stream-pip-fullscreen" title="${t('media.fullscreen')}">⤢</button>
-      <button class="music-pip-btn stream-pip-close" title="Close">✕</button>
+      <button class="music-pip-btn stream-pip-close" title="${t('modals.common.close')}">✕</button>
     </div>
   `;
 
@@ -1749,7 +2074,7 @@ _popOutStreamWindow(tile, userId) {
     this._updateStreamContainerCollapse();
     // Also hide the stream tile — user wants to close the stream, not just pop back in
     const peer = this.voice.peers.get(userId);
-    const who2 = userId === null || userId === this.user.id ? 'You' : (peer ? peer.username : 'Stream');
+    const who2 = userId === null || userId === this.user.id ? t('voice_runtime.you') : (peer ? peer.username : t('voice_runtime.stream'));
     this._hideStreamTile(tile, userId, who2, true);
   };
 
@@ -1773,7 +2098,7 @@ _popOutStreamWindow(tile, userId) {
     e.stopPropagation();
     const maximized = pip.classList.toggle('stream-pip-maximized');
     maxBtn.classList.toggle('active', maximized);
-    maxBtn.title = maximized ? 'Restore' : 'Maximize';
+    maxBtn.title = t(maximized ? 'voice_runtime.restore' : 'voice_runtime.maximize');
   });
 
   pip.querySelector('.stream-pip-opacity').addEventListener('input', (e) => {
@@ -1862,8 +2187,8 @@ _previewMusicLink(url) {
   if (playlistInfo) { //Conditional display of playlist parsing
     preview.classList.add('active');
     preview.innerHTML = playlistInfo.isPlaylistOnly
-      ? '🔴 <strong>YouTube Playlist</strong> - Ready to share'
-      : '🔴 <strong>YouTube</strong> - Video in a playlist';
+      ? t('voice_runtime.youtube_playlist_ready')
+      : t('voice_runtime.youtube_playlist_video');
     this._updateMusicModalButtons(url);
     return;
   }
@@ -1871,7 +2196,7 @@ _previewMusicLink(url) {
   const embedUrl = this._getMusicEmbed(url);
   if (platform && embedUrl) {
     preview.classList.add('active');
-    preview.innerHTML = `${platform.icon} <strong>${platform.name}</strong> — Ready to share`;
+    preview.innerHTML = `${platform.icon} <strong>${platform.name}</strong> — ${t('voice.music_ready')}`;
   } else {
     preview.classList.remove('active');
     preview.innerHTML = '';
@@ -1893,17 +2218,17 @@ _shareMusic() {
 //Playlist queue addition
 _shareMusicPlaylist() {
   const url = document.getElementById('music-link-input').value.trim();
-  if (!url) { this._showToast('Please paste a music link', 'error'); return; }
+  if (!url) { this._showToast(t('toasts.paste_music_link'), 'error'); return; }
   const info = this._getYouTubePlaylistInfo(url);
-  if (!info?.playlistId) { this._showToast('No playlist found in this link', 'error'); return; }
-  if (!this.voice || !this.voice.inVoice) { this._showToast('Join voice first', 'error'); return; }
+  if (!info?.playlistId) { this._showToast(t('toasts.playlist_not_found'), 'error'); return; }
+  if (!this.voice || !this.voice.inVoice) { this._showToast(t('toasts.join_voice_required'), 'error'); return; }
   this.socket.emit('music-share-playlist', { code: this.voice.currentChannel, playlistId: info.playlistId });
   this._closeMusicModal();
 },
 
 _stopMusic() { //Check for music management role to halt playback
   if (!this._canControlMusic()) {
-    this._showToast('Only the requestor or a moderator can stop playback', 'error');
+    this._showToast(t('toasts.music_stop_forbidden'), 'error');
     return;
   }
   if (this.voice && this.voice.inVoice) {
@@ -1927,26 +2252,26 @@ _showMusicSearchResults(data) {
   picker.className = 'music-search-picker';
   picker.innerHTML = `
     <div class="music-search-picker-header">
-      <span>🔍 Results for "<strong>${this._escapeHtml(query)}</strong>"</span>
-      <button class="music-search-picker-close" title="Cancel">✕</button>
+      <span>${t('voice_runtime.results_for', { query: `<strong>${this._escapeHtml(query)}</strong>` })}</span>
+      <button class="music-search-picker-close" title="${t('modals.common.cancel')}">✕</button>
     </div>
     <div class="music-search-picker-list">
       ${results.map((r, i) => `
-        <div class="music-search-picker-item" data-video-id="${r.videoId}" data-title="${this._escapeHtml(r.title || `Result ${offset + i + 1}`)}">
+        <div class="music-search-picker-item" data-video-id="${r.videoId}" data-title="${this._escapeHtml(r.title || t('voice_runtime.result', { number: offset + i + 1 }))}">
           <div class="music-search-picker-thumb">
             ${r.thumbnail ? `<img src="${this._escapeHtml(r.thumbnail)}" alt="" loading="lazy">` : '<span>🎵</span>'}
           </div>
           <div class="music-search-picker-info">
-            <div class="music-search-picker-title">${this._escapeHtml(r.title || `Result ${offset + i + 1}`)}</div>
+            <div class="music-search-picker-title">${this._escapeHtml(r.title || t('voice_runtime.result', { number: offset + i + 1 }))}</div>
             <div class="music-search-picker-meta">${this._escapeHtml(r.channel)}</div>
           </div>
-          <button class="music-search-picker-play" data-video-id="${r.videoId}" data-title="${this._escapeHtml(r.title || `Result ${offset + i + 1}`)}" title="Play this">▶</button>
+          <button class="music-search-picker-play" data-video-id="${r.videoId}" data-title="${this._escapeHtml(r.title || t('voice_runtime.result', { number: offset + i + 1 }))}" title="${t('voice_runtime.play_this')}">▶</button>
         </div>
       `).join('')}
     </div>
     <div class="music-search-picker-footer">
-      <button class="music-search-picker-more">More results</button>
-      <button class="music-search-picker-cancel">Cancel</button>
+      <button class="music-search-picker-more">${t('voice_runtime.more_results')}</button>
+      <button class="music-search-picker-cancel">${t('modals.common.cancel')}</button>
     </div>
   `;
 
@@ -2043,12 +2368,18 @@ _handleMusicShared(data) {
   // We skip referrerpolicy=no-referrer so the IFrame API (enablejsapi) can
   // communicate with the parent window; the origin= param already handles
   // the "Video unavailable" issue that self-hosted instances used to trigger.
-  container.innerHTML = `<div class="music-embed-wrapper"><iframe id="music-iframe" src="${embedUrl}" width="100%" height="${iframeH}" frameborder="0" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>${needsOverlay ? '<div class="music-embed-overlay"></div>' : ''}</div>`;
-  if (data.resolvedFrom === 'spotify') {
-    label.textContent = `🎵 🟢 Spotify (via YouTube) — shared by ${data.username || 'someone'}`;
-  } else {
-    label.textContent = `🎵 ${platform ? platform.name : 'Music'} — shared by ${data.username || 'someone'}`;
-  }
+  // Same per-iframe referrerpolicy as the chat YouTube embed. The document
+  // default (same-origin since 3.41.0) sends no referrer cross-origin, which
+  // YouTube reports as "Error 153" and other providers can reject too. The
+  // origin alone is enough for them and carries no invite code.
+  container.innerHTML = `<div class="music-embed-wrapper"><iframe id="music-iframe" src="${embedUrl}" width="100%" height="${iframeH}" frameborder="0" referrerpolicy="strict-origin-when-cross-origin" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>${needsOverlay ? '<div class="music-embed-overlay"></div>' : ''}</div>`;
+  const labelText = data.resolvedFrom === 'spotify'
+    ? t('voice.music_shared_spotify', { user: data.username || t('voice.someone') })
+    : t('voice.music_shared', {
+      platform: platform ? platform.name : t('voice.music'),
+      user: data.username || t('voice.someone')
+    });
+  label.innerHTML = `<span class="music-pip-label-icon" aria-hidden="true">🎶</span> ${this._escapeHtml(labelText)}`;
   panel.style.display = 'flex';
 
   // Update play/pause button — hide for Spotify (no external API)
@@ -2099,11 +2430,13 @@ _handleMusicShared(data) {
     }
   }
 
-  const who = data.userId === this.user?.id ? 'You shared' : `${data.username} shared`;
+  const who = data.userId === this.user?.id
+    ? t('voice_runtime.you_shared')
+    : t('voice_runtime.user_shared', { user: data.username });
   this._applyMusicControlPermissions();
 
-  const platformLabel = data.resolvedFrom === 'spotify' ? 'Spotify (via YouTube)' : (platform ? platform.name : 'music');
-  this._showToast(`${who} ${platformLabel}`, 'info');
+  const platformLabel = data.resolvedFrom === 'spotify' ? 'Spotify (via YouTube)' : (platform ? platform.name : t('voice.music'));
+  this._showToast(t('voice_runtime.shared_platform', { who, platform: platformLabel }), 'info');
 },
 //Check for perms to adjust music stuff, like queue and removals
 _canControlMusic() {
@@ -2114,7 +2447,7 @@ _canControlMusic() {
 //Music control permission validation
 _applyMusicControlPermissions() {
   const allowed = this._canControlMusic();
-  const restricted = 'Only the requestor or a moderator can do this';
+  const restricted = t('toasts.music_stop_forbidden');
   const ppBtn = document.getElementById('music-play-pause-btn');
   const seekSlider = document.getElementById('music-seek-slider');
   const nextBtn = document.getElementById('music-next-btn');
@@ -2123,27 +2456,27 @@ _applyMusicControlPermissions() {
   const pipStopBtn = document.getElementById('music-pip-close');
   if (ppBtn) {
     ppBtn.disabled = !allowed;
-    ppBtn.title = allowed ? 'Play/Pause' : restricted;
+    ppBtn.title = allowed ? t('media.music_play_pause') : restricted;
   }
   if (seekSlider) {
     seekSlider.disabled = !allowed;
-    seekSlider.title = allowed ? 'Seek' : restricted;
+    seekSlider.title = allowed ? t('media.music_seek') : restricted;
   }
   if (nextBtn) {
     nextBtn.disabled = !allowed;
-    nextBtn.title = allowed ? 'Next track' : restricted;
+    nextBtn.title = allowed ? t('media.music_next') : restricted;
   }
   if (stopBtn) {
     stopBtn.disabled = !allowed;
-    stopBtn.title = allowed ? 'Close / stop music' : restricted;
+    stopBtn.title = allowed ? t('media.music_stop') : restricted;
   }
   if (pipPpBtn) {
     pipPpBtn.disabled = !allowed;
-    pipPpBtn.title = allowed ? 'Play/Pause' : restricted;
+    pipPpBtn.title = allowed ? t('media.music_play_pause') : restricted;
   }
   if (pipStopBtn) {
     pipStopBtn.disabled = !allowed;
-    pipStopBtn.title = allowed ? 'Close / stop music' : restricted;
+    pipStopBtn.title = allowed ? t('media.music_stop') : restricted;
   }
 },
 
@@ -2165,9 +2498,9 @@ _updateMusicQueueState(payload) {
 
 _syncMusicQueueUi() {
   const text = this._musicUpNext?.title
-    ? `Up next: ${this._truncateMusicQueueTitle(this._musicUpNext.title, 54)}`
-    : 'Up next: Nothing queued';
-  const title = this._musicUpNext?.title || 'Nothing queued';
+    ? t('voice_runtime.up_next', { title: this._truncateMusicQueueTitle(this._musicUpNext.title, 54) })
+    : t('media.music_up_next_empty');
+  const title = this._musicUpNext?.title || t('voice_runtime.nothing_queued');
   const targets = ['music-up-next', 'music-pip-up-next'];
   targets.forEach((id) => {
     const el = document.getElementById(id);
@@ -2210,23 +2543,23 @@ _renderMusicQueueModal() {
   const shuffleBtn = document.getElementById('shuffle-music-queue-btn');
   if (shuffleBtn) shuffleBtn.style.display = (canManage && queue.length >= 2) ? '' : 'none';
   summary.textContent = queue.length
-    ? `${queue.length} queued track${queue.length === 1 ? '' : 's'}`
-    : 'No queued tracks';
+    ? t(queue.length === 1 ? 'voice_runtime.queued_one' : 'voice_runtime.queued_other', { count: queue.length })
+    : t('media.music_queue_empty_summary');
   if (!queue.length) {
-    body.innerHTML = '<tr><td colspan="5" class="music-queue-empty">Queue is empty</td></tr>';
+    body.innerHTML = `<tr><td colspan="5" class="music-queue-empty">${t('media.music_queue_is_empty')}</td></tr>`;
     return;
   }
   body.innerHTML = queue.map((item, idx) => `
     <tr class="music-queue-row" data-entry-id="${this._escapeHtml(item.id)}" draggable="${canManage ? 'true' : 'false'}">
-      <td class="music-queue-col-handle">${canManage ? '<span class="music-queue-drag-handle" title="Drag to reorder">⋮⋮</span>' : ''}</td>
+      <td class="music-queue-col-handle">${canManage ? `<span class="music-queue-drag-handle" title="${t('voice_runtime.drag_reorder')}">⋮⋮</span>` : ''}</td>
       <td class="music-queue-col-pos"><span class="music-queue-pos">${idx + 1}</span></td>
       <td class="music-queue-col-requested-by">
-        <span class="music-queue-requestor" title="${this._escapeHtml(item.username || 'Unknown')}">${this._escapeHtml(this._truncateMusicQueueTitle(item.username || 'Unknown', 24))}</span>
+        <span class="music-queue-requestor" title="${this._escapeHtml(item.username || t('app.messages.unknown_user'))}">${this._escapeHtml(this._truncateMusicQueueTitle(item.username || t('app.messages.unknown_user'), 24))}</span>
       </td>
       <td class="music-queue-title-cell">
-        <div class="music-queue-title" title="${this._escapeHtml(item.title || 'Untitled track')}">${this._escapeHtml(this._truncateMusicQueueTitle(item.title || 'Untitled track', 80))}</div>
+        <div class="music-queue-title" title="${this._escapeHtml(item.title || t('voice_runtime.untitled_track'))}">${this._escapeHtml(this._truncateMusicQueueTitle(item.title || t('voice_runtime.untitled_track'), 80))}</div>
       </td>
-      <td class="music-queue-col-actions">${canManage ? '<button class="music-queue-remove-btn" title="Remove from queue">✕</button>' : ''}</td>
+      <td class="music-queue-col-actions">${canManage ? `<button class="music-queue-remove-btn" title="${t('voice_runtime.remove_queue')}">✕</button>` : ''}</td>
     </tr>
   `).join('');
 
@@ -2601,7 +2934,7 @@ _handleMusicStopped(data) {
   this._musicPlaying = false;
   this._hideMusicPanel();
   this._updateMusicQueueState({ queue: [], upNext: null });
-  const who = data.userId === this.user?.id ? 'You' : (data.username || 'Someone');
+  const who = data.userId === this.user?.id ? t('voice_runtime.you') : (data.username || t('voice.someone'));
   this._showToast(t('voice.music_stopped', { who }), 'info');
 },
 
@@ -2610,12 +2943,12 @@ _handleMusicControl(data) {
     this._suppressMusicBroadcasts();
     this._pauseMusicEmbed();
     this._setMusicPlayingUi(false);
-    this._setMusicActivityHint(`${data.username || 'Someone'} paused playback.`);
+    this._setMusicActivityHint(t('voice_runtime.user_paused', { user: data.username || t('voice.someone') }));
   } else if (data.action === 'play') {
     this._suppressMusicBroadcasts();
     this._playMusicEmbed();
     this._setMusicPlayingUi(true);
-    this._setMusicActivityHint(`${data.username || 'Someone'} resumed playback.`);
+    this._setMusicActivityHint(t('voice_runtime.user_resumed', { user: data.username || t('voice.someone') }));
   } else if (data.action === 'next') {
     this._suppressMusicBroadcasts();
     this._musicNextTrack();
@@ -2634,7 +2967,7 @@ _handleMusicSeek(data) {
   if (data.syncState) this._applyMusicSyncState(data.syncState);
   else if (typeof data.positionSeconds === 'number') this._applyMusicSyncState({ positionSeconds: data.positionSeconds });
   else if (typeof data.position === 'number') this._seekMusic(data.position);
-  if (data.username) this._setMusicActivityHint(`${data.username} seeked.`);
+  if (data.username) this._setMusicActivityHint(t('voice_runtime.user_seeked', { user: data.username }));
 },
 
 _toggleMusicPlayPause() {
@@ -2642,11 +2975,11 @@ _toggleMusicPlayPause() {
   if (this._musicPlaying) {
     this._pauseMusicEmbed();
     this._setMusicPlayingUi(false);
-    this._setMusicActivityHint('You paused playback.');
+    this._setMusicActivityHint(t('voice_runtime.you_paused'));
   } else {
     this._playMusicEmbed();
     this._setMusicPlayingUi(true);
-    this._setMusicActivityHint('You resumed playback.');
+    this._setMusicActivityHint(t('voice_runtime.you_resumed'));
   }
   this._emitMusicControl(this._musicPlaying ? 'play' : 'pause');
 },
@@ -2789,30 +3122,30 @@ _popOutMusicPlayer() {
     pip.className = 'music-pip-overlay';
 
     const volume = parseInt(document.getElementById('music-volume-slider')?.value ?? '80');
-    const platform = this._musicPlatform || 'Music';
+    const platform = this._musicPlatform || t('voice.music');
     const playing = this._musicPlaying;
 
     const savedOpacity = parseInt(localStorage.getItem('haven_pip_opacity') ?? '100');
 
     pip.innerHTML = `
       <div class="music-pip-header" id="music-pip-drag">
-        <button class="music-pip-btn" id="music-pip-popin" title="Minimize (back to panel)">─</button>
+        <button class="music-pip-btn" id="music-pip-popin" title="${t('media.music_pip_minimize')}">─</button>
         <div class="music-pip-copy">
-          <span class="music-pip-label">🎵 ${platform}</span>
-          <span class="music-up-next music-pip-up-next" id="music-pip-up-next">Up next: Nothing queued</span>
+          <span class="music-pip-label"><span class="music-pip-label-icon" aria-hidden="true">🎶</span> ${platform}</span>
+          <span class="music-up-next music-pip-up-next" id="music-pip-up-next">${t('media.music_up_next_empty')}</span>
         </div>
         <span class="music-activity-hint" id="music-pip-activity-hint"></span>
-        <button class="music-pip-btn" id="music-pip-queue-btn" title="Queue">☰</button>
-        <button class="music-pip-btn" id="music-pip-fullscreen" title="Fullscreen">⤢</button>
-        <button class="music-pip-btn" id="music-pip-close" title="Close / stop music">✕</button>
+        <button class="music-pip-btn" id="music-pip-queue-btn" title="${t('media.music_queue')}">☰</button>
+        <button class="music-pip-btn" id="music-pip-fullscreen" title="${t('media.fullscreen')}">⤢</button>
+        <button class="music-pip-btn" id="music-pip-close" title="${t('media.music_stop')}">✕</button>
       </div>
       <div class="music-pip-embed" id="music-pip-embed"></div>
       <div class="music-pip-controls">
-        <button class="music-pip-btn" id="music-pip-pp" title="Play/Pause">${playing ? '⏸' : '▶'}</button>
-        <span class="music-pip-vol-icon" id="music-pip-mute" title="Mute">🔊</span>
+        <button class="music-pip-btn" id="music-pip-pp" title="${t('media.music_play_pause')}">${playing ? '⏸' : '▶'}</button>
+        <span class="music-pip-vol-icon" id="music-pip-mute" title="${t('media.music_mute')}">🔊</span>
         <input type="range" class="music-pip-vol" id="music-pip-vol" min="0" max="100" value="${volume}">
         <span class="pip-opacity-divider"></span>
-        <span class="music-pip-vol-icon" id="music-pip-opacity-icon" title="Window opacity">👁</span>
+        <span class="music-pip-vol-icon" id="music-pip-opacity-icon" title="${t('voice_runtime.window_opacity')}">👁</span>
         <input type="range" class="music-pip-vol pip-opacity-slider" id="music-pip-opacity" min="20" max="100" value="${savedOpacity}">
       </div>
     `;
@@ -2840,7 +3173,7 @@ _popOutMusicPlayer() {
 
     // Update popout button icon to show "pop-in"
     const popBtn = document.getElementById('music-popout-btn');
-    if (popBtn) { popBtn.textContent = '⧈'; popBtn.title = 'Pop back in'; }
+    if (popBtn) { popBtn.textContent = '⧈'; popBtn.title = t('media.pop_back_in'); }
 
     // ── PiP controls ──
     document.getElementById('music-pip-popin').addEventListener('click', () => this._popInMusicPlayer());
@@ -2883,9 +3216,9 @@ _popOutMusicPlayer() {
       const fsBtn = document.getElementById('music-pip-fullscreen');
       if (!fsBtn) return;
       if (document.fullscreenElement === pip) {
-        fsBtn.textContent = '⤡'; fsBtn.title = 'Exit fullscreen';
+        fsBtn.textContent = '⤡'; fsBtn.title = t('media.exit_fullscreen');
       } else {
-        fsBtn.textContent = '⤢'; fsBtn.title = 'Fullscreen';
+        fsBtn.textContent = '⤢'; fsBtn.title = t('media.fullscreen');
       }
     });
 

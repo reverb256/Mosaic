@@ -4,17 +4,21 @@
 //           notifications, volume sliders, status bar
 // ═══════════════════════════════════════════════════════════
 
-import SocketMethods   from './modules/app-socket.js?v=3.17.1';
-import UIBindMethods   from './modules/app-ui.js?v=3.16.12';
-import MediaMethods    from './modules/app-media.js?v=3.16.12';
-import ContextMethods  from './modules/app-context.js?v=3.16.12';
-import ChannelMethods  from './modules/app-channels.js?v=3.16.12';
-import MessageMethods  from './modules/app-messages.js?v=3.16.12';
-import UserMethods     from './modules/app-users.js?v=3.25.3';
-import VoiceMethods    from './modules/app-voice.js?v=3.25.3';
-import UtilityMethods  from './modules/app-utilities.js?v=3.16.12';
-import AdminMethods    from './modules/app-admin.js?v=3.16.12';
-import PlatformMethods from './modules/app-platform.js?v=3.16.12';
+import SocketMethods   from './modules/app-socket.js?v=4.8.3';
+import UIBindMethods   from './modules/app-ui.js?v=4.9.2';
+import MediaMethods    from './modules/app-media.js?v=4.9.1';
+import ContextMethods  from './modules/app-context.js?v=4.9.1';
+import ChannelMethods  from './modules/app-channels.js?v=4.8.2';
+import MessageMethods  from './modules/app-messages.js?v=4.8.2';
+import UserMethods     from './modules/app-users.js?v=4.8.2';
+import VoiceMethods    from './modules/app-voice.js?v=4.7.1';
+import UtilityMethods  from './modules/app-utilities.js?v=4.9.1';
+import AdminMethods    from './modules/app-admin.js?v=4.8.3';
+import PlatformMethods from './modules/app-platform.js?v=4.9.1';
+import SearchMethods   from './modules/app-search.js?v=3.49.0';
+import FerryMethods    from './modules/app-ferry.js?v=3.51.4';
+import ForumMethods    from './modules/app-forum.js?v=4.9.1';
+import RoleToolMethods from './modules/app-role-tools.js?v=4.9.1';
 
 class HavenApp {
   constructor() {
@@ -66,30 +70,32 @@ class HavenApp {
 
     // Slash command definitions for autocomplete
     this.slashCommands = [
-      { cmd: 'shrug',      args: '[text]',   desc: 'Appends ¯\\_(ツ)_/¯' },
-      { cmd: 'tableflip',  args: '[text]',   desc: 'Flip a table (╯°□°)╯︵ ┻━┻' },
-      { cmd: 'unflip',     args: '[text]',   desc: 'Put the table back ┬─┬ ノ( ゜-゜ノ)' },
-      { cmd: 'lenny',      args: '[text]',   desc: 'Lenny face ( ͡° ͜ʖ ͡°)' },
-      { cmd: 'disapprove', args: '[text]',   desc: 'ಠ_ಠ look of disapproval' },
-      { cmd: 'me',         args: '<action>', desc: 'Italic action message' },
-      { cmd: 'spoiler',    args: '<text>',   desc: 'Hidden spoiler text' },
-      { cmd: 'tts',        args: '<text>',   desc: 'Text-to-speech message' },
-      { cmd: 'tts:stop',   args: '',         desc: 'Stop all TTS playback' },
-      { cmd: 'break',      args: '<message>', desc: 'Force a new message group (no compacting with previous)' },
-      { cmd: 'bbs',        args: '',         desc: 'Announce you\'ll be back soon' },
-      { cmd: 'brb',        args: '',         desc: 'Announce you\'ll be right back' },
-      { cmd: 'afk',        args: '',         desc: 'Away from keyboard' },
+      { cmd: 'shrug',      args: t('commands.args.optional_text'),   desc: t('commands.description.shrug') },
+      { cmd: 'tableflip',  args: t('commands.args.optional_text'),   desc: t('commands.description.tableflip') },
+      { cmd: 'unflip',     args: t('commands.args.optional_text'),   desc: t('commands.description.unflip') },
+      { cmd: 'lenny',      args: t('commands.args.optional_text'),   desc: t('commands.description.lenny') },
+      { cmd: 'disapprove', args: t('commands.args.optional_text'),   desc: t('commands.description.disapprove') },
+      { cmd: 'me',         args: t('commands.args.action'),          desc: t('commands.description.me') },
+      { cmd: 'spoiler',    args: t('commands.args.text'),            desc: t('commands.description.spoiler') },
+      { cmd: 'tts',        args: t('commands.args.text'),            desc: t('commands.description.tts') },
+      { cmd: 'tts:stop',   args: '',                                 desc: t('commands.description.tts_stop') },
+      { cmd: 'break',      args: t('commands.args.message'),         desc: t('commands.description.break') },
+      { cmd: 'bbs',        args: '',                                 desc: t('commands.description.bbs') },
+      { cmd: 'brb',        args: '',                                 desc: t('commands.description.brb') },
+      { cmd: 'afk',        args: '',                                 desc: t('commands.description.afk') },
       { cmd: 'boobs',      args: '',         desc: '( . Y . )' },
       { cmd: 'butt',       args: '',         desc: '( . )( . )' },
-      { cmd: 'nick',       args: '<name>',   desc: 'Change your username' },
-      { cmd: 'clear',      args: '',         desc: 'Clear your chat view' },
-      { cmd: 'flip',       args: '',         desc: 'Flip a coin: heads or tails' },
-      { cmd: 'roll',       args: '[NdN]',    desc: 'Roll dice (e.g. /roll 2d6)' },
-      { cmd: 'hug',        args: '<@user>',  desc: 'Send a hug to someone' },
-      { cmd: 'wave',       args: '[text]',   desc: 'Wave at the chat 👋' },
-      { cmd: 'play',       args: '<name or url>',    desc: 'Search & play music (e.g. /play Cut Your Teeth Kygo)' },
-      { cmd: 'gif',        args: '<query>',  desc: 'Search & send a GIF inline (e.g. /gif thumbs up)' },
-      { cmd: 'poll',       args: '[question]',       desc: 'Open the poll creator' },
+      { cmd: 'nick',       args: t('commands.args.name'),              desc: t('commands.description.nick') },
+      { cmd: 'clear',      args: '',                                   desc: t('commands.description.clear') },
+      { cmd: 'flip',       args: '',                                   desc: t('commands.description.flip') },
+      { cmd: 'roll',       args: '[NdN]',                              desc: t('commands.description.roll') },
+      { cmd: 'hug',        args: '<@user>',                            desc: t('commands.description.hug') },
+      { cmd: 'wave',       args: t('commands.args.optional_text'),     desc: t('commands.description.wave') },
+      { cmd: 'play',       args: t('commands.args.name_or_url'),       desc: t('commands.description.play') },
+      { cmd: 'gif',        args: t('commands.args.query'),             desc: t('commands.description.gif') },
+      { cmd: 'poll',       args: t('commands.args.optional_question'), desc: t('commands.description.poll') },
+      { cmd: 'schedule',   args: t('commands.args.optional_text'),     desc: t('commands.description.schedule') },
+      { cmd: 'time',       args: t('commands.args.time'),              desc: t('commands.description.time') },
     ];
 
     // Load bot-registered slash commands for autocomplete
@@ -106,7 +112,8 @@ class HavenApp {
       'Activities':['⚽','🏀','🏈','⚾','🎾','🏐','🎱','🏓','🎮','🕹️','🎲','🧩','🎯','🎳','🎭','🎨','🎼','🎵','🎶','🎸','🥁','🎹','🏆','🥇','🏅','🎪','🎬','🎤','🎧','🎺','🪘','🎻','🪗','🎉','🎊','🎈','🎀','🎗️','🏋️','🤸','🧗','🏄','🏊','🚴','⛷️','🏂','🤺'],
       'Travel':   ['🚗','🚕','🚀','✈️','🚁','🛸','🚢','🏠','🏢','🏰','🗼','🗽','⛩️','🌋','🏔️','🌊','🌅','🌄','🌉','🎡','🎢','🗺️','🧭','🏖️','🏕️','🌍','🌎','🌏','🛳️','⛵','🚂','🚇','🏎️','🏍️','🛵','🛶'],
       'Objects':  ['⌚','📱','💻','⌨️','🖥️','💾','📷','🔭','🔬','💡','🔦','📚','📝','✏️','📎','📌','🔑','🔒','🔓','🛡️','⚔️','🔧','💰','💎','📦','🎁','✉️','🔔','🪙','💸','🏷️','🔨','🪛','🧲','🧪','🧫','💊','🩺','🩹','🧬','💬','💭','🗨️','🗯️','📣','📢','🔊','🔇','📰','🗞️','📋','📁','📂','🗂️','📅','📆','🗓️','🖊️','🖋️','✒️','📏','📐','🗑️','👑','💍','👒','🎩','🧢','👓','🕶️','🧳','🌂','☂️'],
-      'Symbols':  ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❣️','💕','💞','💓','💗','💖','💝','✨','⭐','🌟','💫','🔥','💯','✅','❌','❗','❓','❕','❔','‼️','⁉️','!','?',',','.','💤','🚫','⚠️','♻️','🏳️','🏴','🎵','➕','➖','➗','💲','♾️','🔴','🟠','🟡','🟢','🔵','🟣','⚫','⚪','🟤','🔶','🔷','🔺','🔻','💠','🔘','🏳️‍🌈','🏴‍☠️','⚡','☀️','🌙','🌈','☁️','❄️','💨','🌪️','☮️','✝️','☪️','🕉️','☯️','✡️','🔯','♈','♉','♊','♋','♌','♍','♎','♏','♐','♑','♒','♓','⛎','🆔','⚛️','🈶','🈚','🈸','🈺','🈷️','🆚','🉐','🈹','🈲','🉑','🈴','🈳','㊗️','㊙️','🈵','🔅','🔆','🔱','📛','♻️','🔰','⭕','✳️','❇️','🔟','🔠','🔡','🔢','🔣','🔤','🆎','🆑','🆒','🆓','ℹ️','🆕','🆖','🅾️','🆗','🅿️','🆘','🆙','🆚','🈁','🈂️','💱','💲','#️⃣','*️⃣','0️⃣','1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟','©️','®️','™️']
+      'Symbols':  ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❣️','💕','💞','💓','💗','💖','💝','✨','⭐','🌟','💫','🔥','💯','✅','❌','❗','❓','❕','❔','‼️','⁉️','!','?',',','.','💤','🚫','⚠️','♻️','🏳️','🏴','🎵','➕','➖','➗','💲','♾️','🔴','🟠','🟡','🟢','🔵','🟣','⚫','⚪','🟤','🔶','🔷','🔺','🔻','💠','🔘','🏳️‍🌈','🏴‍☠️','⚡','☀️','🌙','🌈','☁️','❄️','💨','🌪️','☮️','✝️','☪️','🕉️','☯️','✡️','🔯','♈','♉','♊','♋','♌','♍','♎','♏','♐','♑','♒','♓','⛎','🆔','⚛️','🈶','🈚','🈸','🈺','🈷️','🆚','🉐','🈹','🈲','🉑','🈴','🈳','㊗️','㊙️','🈵','🔅','🔆','🔱','📛','♻️','🔰','⭕','✳️','❇️','🔟','🔠','🔡','🔢','🔣','🔤','🆎','🆑','🆒','🆓','ℹ️','🆕','🆖','🅾️','🆗','🅿️','🆘','🆙','🆚','🈁','🈂️','💱','💲','#️⃣','*️⃣','0️⃣','1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟','©️','®️','™️'],
+      'Flags':    [':flag_us:',':us_betsy_ross:',':gadsden:',':flag_gb:',':flag_ca:',':flag_au:',':flag_nz:',':flag_ie:',':flag_fr:',':flag_de:',':flag_it:',':flag_es:',':flag_pt:',':flag_nl:',':flag_be:',':flag_lu:',':flag_ch:',':flag_at:',':flag_dk:',':flag_no:',':flag_se:',':flag_fi:',':flag_is:',':flag_pl:',':flag_ee:',':flag_lv:',':flag_lt:',':flag_cz:',':flag_sk:',':flag_hu:',':flag_ro:',':flag_bg:',':flag_si:',':flag_hr:',':flag_gr:',':flag_al:',':flag_me:',':flag_mk:',':flag_ua:',':flag_tr:',':flag_jp:',':flag_kr:',':flag_tw:',':flag_ph:',':flag_th:',':flag_sg:',':flag_in:',':flag_id:',':flag_my:',':flag_vn:',':flag_mn:',':flag_bd:',':flag_lk:',':flag_np:',':flag_il:',':flag_sa:',':flag_ae:',':flag_qa:',':flag_bh:',':flag_kw:',':flag_om:',':flag_jo:',':flag_eg:',':flag_ma:',':flag_tn:',':flag_mx:',':flag_br:',':flag_ar:',':flag_cl:',':flag_co:',':flag_pe:',':flag_uy:',':flag_ec:',':flag_cr:',':flag_pa:',':flag_gt:',':flag_do:',':flag_jm:',':flag_bs:',':flag_tt:',':flag_za:',':flag_ke:',':flag_ng:',':flag_gh:',':flag_sn:',':flag_rw:',':flag_bw:',':flag_ci:',':flag_tz:']
     };
 
     // Flat list for quick access (used by search)
@@ -138,8 +145,122 @@ class HavenApp {
     this._canModerate = () => this.user.isAdmin || (this.user.effectiveLevel || 0) >= 25;
     this._isServerMod = () => this.user.isAdmin || (this.user.effectiveLevel || 0) >= 50;
     this._hasPerm = (p) => this.user.isAdmin || (this.user.permissions || []).includes('*') || (this.user.permissions || []).includes(p);
+    // Whether Settings should offer the Admin tab at all. One list, shared by
+    // the tab switch, the admin panel container and the settings nav, so a
+    // permission added in one place cannot be missed in the others. (#5470:
+    // invite_users was in the nav but not in the tab gate, so holders saw an
+    // Admin tab that did nothing when clicked.)
+    // Mirrors the access table in _syncSettingsNav (app-admin.js): anyone who
+    // can see at least one admin section must also be allowed onto the tab.
+    this._hasAnyAdminSettingsAccess = () => this.user.isAdmin || [
+      'manage_emojis', 'manage_stickers', 'manage_soundboard', 'manage_roles',
+      'manage_server', 'manage_webhooks', 'view_audit_log', 'invite_users',
+      'ban_user', 'kick_user', 'view_all_members'
+    ].some(p => this._hasPerm(p));
+    // Global-only variant: excludes permissions granted via a channel-scoped
+    // role assignment, for gating UI that always performs a server-wide
+    // action (e.g. the sidebar "Create Channel" section always creates a
+    // top-level channel, regardless of which channel is active). (#5433)
+    this._hasGlobalPerm = (p) => this.user.isAdmin || (this.user.globalPermissions || []).includes('*') || (this.user.globalPermissions || []).includes(p);
 
     this.customEmojis = []; // [{name, url}] — loaded from server
+    // Bundled image emoji shipped with Haven (rendered like custom emoji but
+    // built into the app, so every client on this version resolves them).
+    // Country flags are image-based on purpose: Windows browsers refuse to
+    // render Unicode regional-indicator flags and fall back to the bare
+    // two-letter code ("US", "GB", ...), so SVGs keep them consistent
+    // everywhere. Flag artwork: flag-icons (MIT). See emoji/flags/ATTRIBUTION.txt.
+    this.builtinEmojis = [
+      { name: 'flag_us', url: '/emoji/flags/us.svg', keywords: 'united states america usa flag' },
+      { name: 'flag_gb', url: '/emoji/flags/gb.svg', keywords: 'united kingdom britain uk british england flag' },
+      { name: 'flag_ca', url: '/emoji/flags/ca.svg', keywords: 'canada canadian flag' },
+      { name: 'flag_au', url: '/emoji/flags/au.svg', keywords: 'australia australian flag' },
+      { name: 'flag_nz', url: '/emoji/flags/nz.svg', keywords: 'new zealand flag' },
+      { name: 'flag_ie', url: '/emoji/flags/ie.svg', keywords: 'ireland irish flag' },
+      { name: 'flag_fr', url: '/emoji/flags/fr.svg', keywords: 'france french flag' },
+      { name: 'flag_de', url: '/emoji/flags/de.svg', keywords: 'germany german flag' },
+      { name: 'flag_it', url: '/emoji/flags/it.svg', keywords: 'italy italian flag' },
+      { name: 'flag_es', url: '/emoji/flags/es.svg', keywords: 'spain spanish flag' },
+      { name: 'flag_pt', url: '/emoji/flags/pt.svg', keywords: 'portugal portuguese flag' },
+      { name: 'flag_nl', url: '/emoji/flags/nl.svg', keywords: 'netherlands dutch holland flag' },
+      { name: 'flag_be', url: '/emoji/flags/be.svg', keywords: 'belgium belgian flag' },
+      { name: 'flag_lu', url: '/emoji/flags/lu.svg', keywords: 'luxembourg flag' },
+      { name: 'flag_ch', url: '/emoji/flags/ch.svg', keywords: 'switzerland swiss flag' },
+      { name: 'flag_at', url: '/emoji/flags/at.svg', keywords: 'austria austrian flag' },
+      { name: 'flag_dk', url: '/emoji/flags/dk.svg', keywords: 'denmark danish flag' },
+      { name: 'flag_no', url: '/emoji/flags/no.svg', keywords: 'norway norwegian flag' },
+      { name: 'flag_se', url: '/emoji/flags/se.svg', keywords: 'sweden swedish flag' },
+      { name: 'flag_fi', url: '/emoji/flags/fi.svg', keywords: 'finland finnish flag' },
+      { name: 'flag_is', url: '/emoji/flags/is.svg', keywords: 'iceland flag' },
+      { name: 'flag_pl', url: '/emoji/flags/pl.svg', keywords: 'poland polish flag' },
+      { name: 'flag_ee', url: '/emoji/flags/ee.svg', keywords: 'estonia flag' },
+      { name: 'flag_lv', url: '/emoji/flags/lv.svg', keywords: 'latvia flag' },
+      { name: 'flag_lt', url: '/emoji/flags/lt.svg', keywords: 'lithuania flag' },
+      { name: 'flag_cz', url: '/emoji/flags/cz.svg', keywords: 'czech czechia republic flag' },
+      { name: 'flag_sk', url: '/emoji/flags/sk.svg', keywords: 'slovakia flag' },
+      { name: 'flag_hu', url: '/emoji/flags/hu.svg', keywords: 'hungary flag' },
+      { name: 'flag_ro', url: '/emoji/flags/ro.svg', keywords: 'romania flag' },
+      { name: 'flag_bg', url: '/emoji/flags/bg.svg', keywords: 'bulgaria flag' },
+      { name: 'flag_si', url: '/emoji/flags/si.svg', keywords: 'slovenia flag' },
+      { name: 'flag_hr', url: '/emoji/flags/hr.svg', keywords: 'croatia flag' },
+      { name: 'flag_gr', url: '/emoji/flags/gr.svg', keywords: 'greece greek flag' },
+      { name: 'flag_al', url: '/emoji/flags/al.svg', keywords: 'albania flag' },
+      { name: 'flag_me', url: '/emoji/flags/me.svg', keywords: 'montenegro flag' },
+      { name: 'flag_mk', url: '/emoji/flags/mk.svg', keywords: 'north macedonia flag' },
+      { name: 'flag_ua', url: '/emoji/flags/ua.svg', keywords: 'ukraine ukrainian flag' },
+      { name: 'flag_tr', url: '/emoji/flags/tr.svg', keywords: 'turkey turkish flag' },
+      { name: 'flag_jp', url: '/emoji/flags/jp.svg', keywords: 'japan japanese flag' },
+      { name: 'flag_kr', url: '/emoji/flags/kr.svg', keywords: 'south korea korean flag' },
+      { name: 'flag_tw', url: '/emoji/flags/tw.svg', keywords: 'taiwan flag' },
+      { name: 'flag_ph', url: '/emoji/flags/ph.svg', keywords: 'philippines filipino flag' },
+      { name: 'flag_th', url: '/emoji/flags/th.svg', keywords: 'thailand thai flag' },
+      { name: 'flag_sg', url: '/emoji/flags/sg.svg', keywords: 'singapore flag' },
+      { name: 'flag_in', url: '/emoji/flags/in.svg', keywords: 'india indian flag' },
+      { name: 'flag_id', url: '/emoji/flags/id.svg', keywords: 'indonesia flag' },
+      { name: 'flag_my', url: '/emoji/flags/my.svg', keywords: 'malaysia flag' },
+      { name: 'flag_vn', url: '/emoji/flags/vn.svg', keywords: 'vietnam flag' },
+      { name: 'flag_mn', url: '/emoji/flags/mn.svg', keywords: 'mongolia flag' },
+      { name: 'flag_bd', url: '/emoji/flags/bd.svg', keywords: 'bangladesh flag' },
+      { name: 'flag_lk', url: '/emoji/flags/lk.svg', keywords: 'sri lanka flag' },
+      { name: 'flag_np', url: '/emoji/flags/np.svg', keywords: 'nepal flag' },
+      { name: 'flag_il', url: '/emoji/flags/il.svg', keywords: 'israel israeli flag' },
+      { name: 'flag_sa', url: '/emoji/flags/sa.svg', keywords: 'saudi arabia flag' },
+      { name: 'flag_ae', url: '/emoji/flags/ae.svg', keywords: 'united arab emirates uae flag' },
+      { name: 'flag_qa', url: '/emoji/flags/qa.svg', keywords: 'qatar flag' },
+      { name: 'flag_bh', url: '/emoji/flags/bh.svg', keywords: 'bahrain flag' },
+      { name: 'flag_kw', url: '/emoji/flags/kw.svg', keywords: 'kuwait flag' },
+      { name: 'flag_om', url: '/emoji/flags/om.svg', keywords: 'oman flag' },
+      { name: 'flag_jo', url: '/emoji/flags/jo.svg', keywords: 'jordan flag' },
+      { name: 'flag_eg', url: '/emoji/flags/eg.svg', keywords: 'egypt egyptian flag' },
+      { name: 'flag_ma', url: '/emoji/flags/ma.svg', keywords: 'morocco flag' },
+      { name: 'flag_tn', url: '/emoji/flags/tn.svg', keywords: 'tunisia flag' },
+      { name: 'flag_mx', url: '/emoji/flags/mx.svg', keywords: 'mexico mexican flag' },
+      { name: 'flag_br', url: '/emoji/flags/br.svg', keywords: 'brazil brazilian flag' },
+      { name: 'flag_ar', url: '/emoji/flags/ar.svg', keywords: 'argentina flag' },
+      { name: 'flag_cl', url: '/emoji/flags/cl.svg', keywords: 'chile flag' },
+      { name: 'flag_co', url: '/emoji/flags/co.svg', keywords: 'colombia flag' },
+      { name: 'flag_pe', url: '/emoji/flags/pe.svg', keywords: 'peru flag' },
+      { name: 'flag_uy', url: '/emoji/flags/uy.svg', keywords: 'uruguay flag' },
+      { name: 'flag_ec', url: '/emoji/flags/ec.svg', keywords: 'ecuador flag' },
+      { name: 'flag_cr', url: '/emoji/flags/cr.svg', keywords: 'costa rica flag' },
+      { name: 'flag_pa', url: '/emoji/flags/pa.svg', keywords: 'panama flag' },
+      { name: 'flag_gt', url: '/emoji/flags/gt.svg', keywords: 'guatemala flag' },
+      { name: 'flag_do', url: '/emoji/flags/do.svg', keywords: 'dominican republic flag' },
+      { name: 'flag_jm', url: '/emoji/flags/jm.svg', keywords: 'jamaica flag' },
+      { name: 'flag_bs', url: '/emoji/flags/bs.svg', keywords: 'bahamas flag' },
+      { name: 'flag_tt', url: '/emoji/flags/tt.svg', keywords: 'trinidad tobago flag' },
+      { name: 'flag_za', url: '/emoji/flags/za.svg', keywords: 'south africa flag' },
+      { name: 'flag_ke', url: '/emoji/flags/ke.svg', keywords: 'kenya flag' },
+      { name: 'flag_ng', url: '/emoji/flags/ng.svg', keywords: 'nigeria flag' },
+      { name: 'flag_gh', url: '/emoji/flags/gh.svg', keywords: 'ghana flag' },
+      { name: 'flag_sn', url: '/emoji/flags/sn.svg', keywords: 'senegal flag' },
+      { name: 'flag_rw', url: '/emoji/flags/rw.svg', keywords: 'rwanda flag' },
+      { name: 'flag_bw', url: '/emoji/flags/bw.svg', keywords: 'botswana flag' },
+      { name: 'flag_ci', url: '/emoji/flags/ci.svg', keywords: 'ivory coast cote divoire flag' },
+      { name: 'flag_tz', url: '/emoji/flags/tz.svg', keywords: 'tanzania flag' },
+      { name: 'us_betsy_ross', url: '/emoji/us-betsy-ross.svg', keywords: 'betsy ross flag united states america usa stars stripes colonies historical patriotic' },
+      { name: 'gadsden', url: '/emoji/us-gadsden.svg', keywords: 'gadsden dont tread on me snake rattlesnake flag united states america usa liberty patriotic' },
+    ];
     this.stickers = []; // [{id, name, pack_name, url}] — loaded from server
     this._emojiPickerContext = 'main'; // 'main' | 'thread' | 'dmpip' — set by emoji button handlers
     this._emojiPickerSection = 'emoji'; // 'emoji' | 'sticker' — last-used picker tab
@@ -159,6 +280,17 @@ class HavenApp {
       if (chatServer) console.log(`[mosiac] chat delegated to ${chatServer}`);
     } catch {}
 
+    // Kick this off before anything can render a message. Until it resolves,
+    // _imgSrcAttr parks remote images in data-mp-src rather than emitting a
+    // raw external src, so there is no window in which an image leaks. (v3.43.0)
+    this._mediaProxyEnabled = true;   // assume on: fail closed, not open
+    this._mediaToken = null;
+    this._loadMediaToken?.();
+    this._startMediaTokenRefresh?.();   // the token expires after ~2 days
+    this._setupMediaTokenRetry?.();     // and a stale one used to fail silently
+    // Link policy for decrypted DM content (#5483). Requested once the socket
+    // exists, below, since it travels over the authenticated connection.
+
     this.socket = io(chatServer || undefined, {
       auth: { token: this.token },
       reconnectionDelay: 1500,
@@ -175,6 +307,7 @@ class HavenApp {
     this._setupAvatarUpload();
 
     this._setupSocketListeners();
+    this._initLinkPolicy?.();
     this._setupUI();
     this._setupThemes();
     this._setupServerBar();
@@ -206,9 +339,14 @@ class HavenApp {
     this.modMode = typeof ModMode === 'function' ? new ModMode() : null;
     this.modMode?.init();
     this._setupDensityPicker();
-    this._setupFontSizePicker();
+    this._setupChannelScrollPicker();
+    this._setupToggleStylePicker();
+    this._setupAnimatePfpPicker();
+    this._setupAnimateChatPicker();
+    this._setupZoomSlider();
     this._setupEmojiSizePicker();
     this._setupImageModePicker();
+    this._setupLazyMedia();
     this._setupEmbedSizePicker();
     this._setupRoleDisplayPicker();
     this._setupToolbarIconPicker();
@@ -251,11 +389,14 @@ class HavenApp {
     const loginEl = document.getElementById('login-name');
     if (loginEl) loginEl.textContent = `@${this.user.username}`;
 
-    if (this.user.isAdmin || this._hasPerm('create_channel')) {
+    if (this.user.isAdmin || this._hasGlobalPerm('create_channel')) {
       document.getElementById('admin-controls').style.display = 'block';
     }
     if (this.user.isAdmin || this._hasPerm('manage_roles') || this._hasPerm('manage_server')) {
       document.getElementById('admin-mod-panel').style.display = 'block';
+    }
+    if (this.user.isAdmin || this._hasGlobalPerm('invite_users') || this._hasPerm('manage_server')) {
+      document.getElementById('sidebar-invite-panel').style.display = 'block';
     }
     const organizeBtn = document.getElementById('organize-channels-btn');
     if (organizeBtn) organizeBtn.style.display = '';
@@ -269,20 +410,38 @@ class HavenApp {
       if (!res.ok) return;
       const data = await res.json();
       if (!data.commands || !data.commands.length) return;
-      const knownCmds = new Set(this.slashCommands.map(c => String(c.cmd || '').toLowerCase()));
+      const known = new Map(this.slashCommands.map(c => [String(c.cmd || '').toLowerCase(), c]));
       for (const bc of data.commands) {
         const cmd = String(bc.command || '').trim();
         if (!cmd) continue;
         const key = cmd.toLowerCase();
-        if (knownCmds.has(key)) continue;
-        knownCmds.add(key);
-        this.slashCommands.push({
+        const channelCode = bc.channel_code || null;
+        const desc = `${bc.description || t('commands.bot_command')}  [${bc.bot_name || t('commands.bot')}]`;
+        const existing = known.get(key);
+        if (existing) {
+          // The same command registered by a second bot in another channel
+          // keeps the one menu entry and adds its channel to it, so the
+          // suggestions show in every channel that has a bot for it, each
+          // naming its own bot. A built-in command of the same name stays as
+          // it is (#5635).
+          if (channelCode && Array.isArray(existing.channelCodes) && !existing.channelCodes.includes(channelCode)) {
+            existing.channelCodes.push(channelCode);
+            existing.descByChannel[channelCode] = desc;
+          }
+          continue;
+        }
+        const entry = {
           cmd,
           // Bot commands can have arbitrary args; a hardcoded "<...>" makes
           // subcommand entries look broken and encourages base-command clicks.
           args: '',
-          desc: `${bc.description || 'Bot command'}  [${bc.bot_name || 'Bot'}]`
-        });
+          desc,
+          // A bot lives in one channel, so its commands are only offered there (#5635).
+          channelCodes: channelCode ? [channelCode] : null,
+          descByChannel: channelCode ? { [channelCode]: desc } : {}
+        };
+        known.set(key, entry);
+        this.slashCommands.push(entry);
       }
     } catch { /* non-critical */ }
   }
@@ -302,6 +461,10 @@ Object.assign(HavenApp.prototype,
   UtilityMethods,
   AdminMethods,
   PlatformMethods,
+  SearchMethods,
+  FerryMethods,
+  ForumMethods,
+  RoleToolMethods,
 );
 
 // ── Boot ───────────────────────────────────────────────

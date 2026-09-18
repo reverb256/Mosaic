@@ -149,6 +149,7 @@
   },
   "toasts": {
     "roles_updated": "Vos rôles ont été mis à jour",
+    "role_server_no_response": "Aucune réponse du serveur. Il utilise peut-être une ancienne version de Haven. Mettez à jour les fichiers du serveur, redémarrez-le complètement, puis réessayez.",
     "status_pending_reconnect": "Le statut sera mis à jour lors de la reconnexion",
     "channel_created": "Salon \"#{{name}}\" créé !\nCode : {{code}}",
     "channel_deleted": "Le salon a été supprimé",
@@ -369,6 +370,7 @@
     "rename_sub_channel": "Renommer des sous-salons",
     "set_channel_topic": "Définir le sujet du salon",
     "manage_sub_channels": "Gérer les sous-salons",
+    "manage_channel_settings": "Gérer les paramètres du salon",
     "create_channel": "Créer des salons",
     "upload_files": "Envoyer des fichiers",
     "use_voice": "Utiliser la voix",
@@ -378,6 +380,7 @@
     "mention_everyone": "Mentionner @everyone",
     "view_history": "Voir l'historique des messages",
     "view_all_members": "Voir tous les membres",
+    "view_all_channels": "Voir tous les salons (adhésion auto)",
     "manage_emojis": "Gérer les emojis personnalisés",
     "manage_soundboard": "Gérer le soundboard",
     "promote_user": "Promouvoir des utilisateurs",
@@ -546,6 +549,7 @@
     "bio_placeholder": "Parlez de vous…",
     "gear_menu": {
       "assign_role": "Attribuer un rôle",
+      "role_management": "Gestion des rôles",
       "kick": "Expulser",
       "mute": "Mettre en sourdine",
       "ban": "Bannir",
@@ -608,6 +612,8 @@
     "resolution": "Résolution",
     "resolution_source": "Source",
     "frame_rate": "Fréquence d'images",
+    "native_screen_share": "Partage GPU natif",
+    "native_screen_share_hint": "Utilise le pipeline multimédia natif expérimental de l'application. Chromium reste le mode par défaut et de secours.",
     "camera_fallback": "Caméra {{n}}"
   },
   "status_bar": {
@@ -638,6 +644,7 @@
       "desktop_app": "Application bureau",
       "admin_group": "Admin",
       "branding": "Identité visuelle",
+      "tos": "Conditions d’utilisation",
       "members": "Membres",
       "whitelist": "Liste blanche",
       "invite": "Code d'invitation",
@@ -645,25 +652,39 @@
       "limits": "Limites",
       "admin_sounds": "Sons",
       "emojis": "Emojis",
+      "stickers": "Autocollants",
       "roles": "Rôles",
       "tunnel": "Tunnel",
       "bots": "Bots",
       "import": "Importer",
-      "mod_mode": "Mode mod"
+      "mod_mode": "Mode mod",
+      "automod": "Modération automatique",
+      "guests": "Accès invité"
     },
     "language_section": {
       "title": "Langue",
       "label": "Langue",
+      "auto": "Automatique",
       "hint": "Les changements s'appliquent immédiatement"
     },
-    "layout_density": {
-      "title": "Densité de disposition",
-      "compact": "Compact",
-      "compact_hint": "Compact — espacement réduit, avatars plus petits",
-      "cozy": "Confortable",
-      "cozy_hint": "Confortable — disposition équilibrée par défaut",
-      "spacious": "Espacé",
-      "spacious_hint": "Espacé — plus d'espace entre les éléments"
+    "layout": {
+      "title": "Mise en page",
+      "density": {
+        "title": "Densité de disposition",
+        "compact": "Compact",
+        "compact_hint": "Compact — espacement réduit, avatars plus petits",
+        "cozy": "Confortable",
+        "cozy_hint": "Confortable — disposition équilibrée par défaut",
+        "spacious": "Espacé",
+        "spacious_hint": "Espacé — plus d'espace entre les éléments"
+      },
+      "channel_scrolling": {
+        "title": "Défilement des canaux",
+        "separate": "Séparé",
+        "separate_hint": "Séparé — des barres de défilement distinctes pour les canaux et les MP",
+        "combined": "Combiné",
+        "combined_hint": "Combiné — une seule barre de défilement pour les canaux et les MP"
+      }
     },
     "font_size": {
       "title": "Taille de police",
@@ -678,10 +699,13 @@
     },
     "image_display": {
       "title": "Affichage des images",
-      "thumbnail": "Miniature",
-      "thumbnail_hint": "Miniature — aperçu réduit, cliquer pour agrandir",
-      "full": "Complet",
-      "full_hint": "Complet — images en grand format comme Discord"
+      "image_mode": {
+        "title": "Mode d’affichage des images",
+        "thumbnail": "Miniature",
+        "thumbnail_hint": "Miniature — aperçu réduit, cliquer pour agrandir",
+        "full": "Complet",
+        "full_hint": "Complet — images en grand format comme Discord"
+      }
     },
     "sounds_section": {
       "title": "Sons",
@@ -883,6 +907,8 @@
       "max_sound_hint": "Taille max des sons du soundboard (256–10240 Ko, défaut 1024 / 1 Mo)",
       "max_emoji_hint": "Taille max des emojis personnalisés (64–1024 Ko, défaut 256)",
       "max_poll_hint": "Nombre maximum de choix par sondage (2–25, défaut 10)",
+      "max_invite_uses": "Nombre maximal d’utilisations du lien d’invitation",
+      "max_invite_uses_hint": "Le nombre maximal d’utilisations pouvant être défini pour un lien d’invitation. Les administrateurs et les utilisateurs disposant de l’autorisation de gérer le serveur ignorent cette limite. (0 = illimité)",
       "sounds_hint": "Envoyez des fichiers audio pour des sons de notification personnalisés",
       "emojis_hint": "Envoyez des images pour des emojis de serveur personnalisés",
       "emojis_upload_hint": "Envoyez des images pour des emojis de serveur personnalisés (max 256 Ko, png/gif/webp). Le nom doit être en minuscules, sans espaces.",
@@ -946,12 +972,22 @@
       "import_skipped": "{{count}} doublon(s) ignoré(s).",
       "import_reused": "{{count}} salon(s) existant(s) mis à jour.",
       "import_failed_alert": "Échec de l'importation : {{error}}",
+      "invite_links": {
+        "copy_email_card": "Copier la carte d’invitation par e-mail",
+        "email_card_copied": "Carte d’e-mail copiée !",
+        "email_card_copy_failed": "Échec de la copie de la carte !",
+        "card_invited": "Vous êtes invité à rejoindre {{server}} !",
+        "card_register": "Cliquez sur le bouton ci-dessous pour vous inscrire !",
+        "card_join": "Rejoindre {{server}}",
+        "card_copy_link": "Ou copiez ce lien :",
+        "card_expires": "Cette invitation est valide jusqu’au {{date}}."
+      },
       "roles_no_custom": "Aucun rôle personnalisé",
-      "roles_level_invalid": "Le niveau doit être entre 1 et 99",
+      "roles_level_invalid": "Le niveau doit être entre 0 et 99",
       "roles_create_title": "Créer un rôle",
       "roles_create_hint": "Entrez le nom du rôle :",
       "roles_level_title": "Niveau du rôle",
-      "roles_level_hint": "Niveau du rôle (1-99, plus élevé = plus d'autorité) :\nMod serveur par défaut = 50, Mod salon par défaut = 25",
+      "roles_level_hint": "Niveau du rôle (0–99, plus élevé = plus d’autorité) :\nModérateur du serveur par défaut = 50\nModérateur du canal par défaut = 25\nAuto-gestion (aucune permission) = 0",
       "roles_created": "Rôle créé",
       "roles_saved": "Rôle enregistré",
       "roles_updated": "Rôle mis à jour",
@@ -999,7 +1035,7 @@
       "roles_changes_saved_other": "{{count}} modifications de rôles enregistrées",
       "role_form": {
         "name": "Nom",
-        "level": "Niveau (1-99)",
+        "level": "Niveau (0-99)",
         "color": "Couleur",
         "auto_assign": "Attribuer automatiquement aux nouveaux membres",
         "auto_assign_hint": "Les nouveaux utilisateurs recevront automatiquement ce rôle lors de leur inscription ou quand ils rejoignent un salon.",
@@ -1008,6 +1044,8 @@
         "link_channel_access_hint": "Lorsqu'activé, attribuer/révoquer ce rôle accordera/révoquera automatiquement les adhésions aux salons.",
         "reapply_access": "Réappliquer l'accès à tous les utilisateurs",
         "permissions": "Permissions",
+        "admin_only_note": "Les permissions mises en évidence sont réservées aux administrateurs — seul le propriétaire du serveur peut les accorder.",
+        "level_0_role_note": "Les rôles de niveau 0 sont appelés « Groupes ». Les groupes n’accordent aucune permission. Les utilisateurs peuvent rejoindre ces groupes librement sans disposer de permissions élevées. Ils peuvent notamment servir pour : les attributions de canaux, les regroupements et le jeu de rôle.",
         "delete": "Supprimer"
       }
     }
@@ -1133,7 +1171,14 @@
       "display_name_placeholder": "Nouveau pseudo...",
       "bio_label": "Biographie",
       "bio_max": "(max 190 caractères)",
-      "bio_placeholder": "Parlez de vous…"
+      "bio_placeholder": "Parlez de vous…",
+      "groups_title": "Groupes",
+      "manage_groups_btn": "Gérer les groupes",
+      "save_groups_btn": "Enregistrer les groupes",
+      "groups_hint": "Les groupes sont affichés comme des rôles sur votre carte de profil. Ils n’accordent aucune permission, mais peuvent donner accès aux canaux !",
+      "no_groups": "Vous ne faites encore partie d’aucun groupe. Cliquez sur « Gérer les groupes » pour en rejoindre un.",
+      "groups_saved": "Groupes enregistrés !",
+      "group_channels_granted": "Accès aux canaux accordé"
     },
     "admin_action": {
       "title": "Modérer l'utilisateur",
@@ -1380,7 +1425,8 @@
     "role_management": {
       "title": "Gestion des rôles",
       "new_role_btn": "+ Nouveau rôle",
-      "select_to_edit": "Sélectionnez un rôle à modifier"
+      "select_to_edit": "Sélectionnez un rôle à modifier",
+      "groups_label": "Groupes"
     },
     "assign_role": {
       "title": "Assigner un rôle",
@@ -1525,6 +1571,8 @@
     "slow_mode": "Mode lent",
     "slow_mode_hint": "Imposer un délai entre les messages (0 = désactivé)",
     "cleanup_guard": "Protection nettoyage",
+    "welcome": "Messages de bienvenue",
+    "welcome_hint": "Publier ici un message de bienvenue enregistré lorsqu'un nouveau membre rejoint le serveur",
     "cleanup_guard_hint": "Protéger ce salon du nettoyage automatique des messages",
     "voice_limit": "Limite vocal",
     "voice_limit_hint": "Limiter les utilisateurs vocaux simultanés (cliquer pour définir ; vide = illimité)",
@@ -1569,6 +1617,13 @@
     "remove": "Supprimer"
   },
   "gifs": {
+    "tab_search": "Recherche",
+    "tab_favorites": "★ Favoris",
+    "search_favorites": "Rechercher dans les favoris…",
+    "no_favorites": "Aucun GIF favori pour l'instant — touchez l'☆ d'un GIF pour l'enregistrer ici",
+    "no_favorite_matches": "Aucun favori ne correspond à cette recherche",
+    "favorite": "Ajouter aux favoris",
+    "unfavorite": "Retirer des favoris",
     "searching": "Recherche en cours...",
     "no_results": "Aucun GIF trouvé",
     "search_failed": "Échec de la recherche",
@@ -1597,6 +1652,15 @@
     "all_emojis_title": "Tous les emojis",
     "customize_quick_title": "Personnaliser les réactions rapides",
     "customize_quick_hint": "Cliquez sur un emplacement, puis choisissez un emoji pour le remplacer.",
+    "skin_tone": "Teint",
+    "skin_tones": {
+      "default": "Par défaut",
+      "light": "Clair",
+      "medium_light": "Moyennement clair",
+      "medium": "Moyen",
+      "medium_dark": "Moyennement foncé",
+      "dark": "Foncé"
+    },
     "categories": {
       "smileys": "Smileys",
       "faces": "Visages",

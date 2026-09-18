@@ -2,16 +2,18 @@
 
 const path = require('path');
 const fs   = require('fs');
-const { utcStamp, isString, isInt, sanitizeText } = require('./helpers');
+const { utcStamp, isString, isInt, sanitizeText, parseBorderTransform, toReplyContext, stripRoleMentions } = require('./helpers');
+const { getActiveTokenizer, minQueryChars, buildMatchQuery } = require('../searchIndex');
 
 module.exports = function register(socket, ctx) {
-  const { io, db, state, userHasPermission, getUserEffectiveLevel,
+  const { io, db, state, userHasPermission, getUserEffectiveLevel, getChannelRoleChain,
           sendPushNotifications, fireWebhookCallbacks, fireWebhookEvent, processSlashCommand,
-          touchVoiceActivity, floodCheck, UPLOADS_DIR, DELETED_ATTACHMENTS_DIR } = ctx;
+          touchVoiceActivity, floodCheck, enforceAutomod, parseFerryTarget, ferryRelay,
+          UPLOADS_DIR, DELETED_ATTACHMENTS_DIR } = ctx;
   const { slowModeTracker } = state;
 
-  const UPLOAD_PATH_RE = /\/uploads\/((?!(?:deleted-attachments|stickers)\/)(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+)/g;
-  const UPLOAD_PATH_EXACT_RE = /^\/uploads\/((?!(?:deleted-attachments|stickers)\/)(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+)$/;
+  const UPLOAD_PATH_RE = /\/uploads\/((?!(?:bot-audio|deleted-attachments|stickers)\/)(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+)/g;
+  const UPLOAD_PATH_EXACT_RE = /^\/uploads\/((?!(?:bot-audio|deleted-attachments|stickers)\/)(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+)$/;
 
   function isSafeUploadRelPath(relPath) {
     if (typeof relPath !== 'string' || !relPath) return false;
@@ -39,7 +41,97 @@ module.exports = function register(socket, ctx) {
     } catch { /* file locked or already moved */ }
   }
 
+  // Reply banners must match message rendering: bots live in webhook_* with
+  // user_id NULL, so a users-table COALESCE alone becomes "[Deleted User]".
+  const REPLY_CONTEXT_SELECT = `
+    SELECT m.id, m.content, m.user_id, m.is_webhook, m.webhook_username, m.imported_from, m.persona_username,
+           COALESCE(u.display_name, u.username, '[Deleted User]') as username
+    FROM messages m LEFT JOIN users u ON m.user_id = u.id`;
+
   // ── Get message history ─────────────────────────────────
+  // ── Forum channels (#144) ──────────────────────────────
+  // A forum channel is an ordinary channel whose top-level messages are
+  // topics. Replies live in each topic's thread, and the channel lists topics
+  // by their latest activity (the topic itself or its newest reply) instead of
+  // by when they were posted, so a reply bumps an old topic back to the newest
+  // end. Cursors keep the same shape as the chronological queries (a message
+  // id) but resolve to that message's activity stamp first, so "older than X"
+  // means "less recently active than X".
+  const FORUM_ACTIVITY = 'COALESCE((SELECT MAX(t.created_at) FROM messages t WHERE t.thread_id = m.id), m.created_at)';
+  const FORUM_SELECT = `
+    SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data, m.burn_seconds, m.burning_started_at, m.persona_id, m.persona_username, m.persona_avatar, m.break_chain, m.ferry_target, m.type, m.title, m.tags, m.closed, m.nsfw,
+           COALESCE(u.display_name, u.username, '[Deleted User]') as real_username,
+           COALESCE(m.persona_username, m.webhook_username, u.display_name, u.username, '[Deleted User]') as username, u.id as user_id, u.avatar, COALESCE(u.avatar_shape, 'circle') as avatar_shape, u.border, u.border_transform, COALESCE(u.animate_profile, 'trigger') as animate_profile,
+           ${FORUM_ACTIVITY} AS activity_at
+    FROM messages m LEFT JOIN users u ON m.user_id = u.id
+    WHERE m.channel_id = ? AND m.thread_id IS NULL`;
+  // Sort key for a forum page: 'active' (default, latest reply bumps the
+  // topic) or 'created' (date posted). Tags filter with 'some' (any of the
+  // picked tags) or 'all' (every picked tag), read from the JSON array on
+  // the topic row.
+  function forumKeyExpr(sort) { return sort === 'created' ? 'm.created_at' : FORUM_ACTIVITY; }
+  function forumKeyCol(sort) { return sort === 'created' ? 'created_at' : 'activity_at'; }
+  function forumTagSql(tags, mode) {
+    if (!tags.length) return { sql: '', params: [] };
+    const one = "EXISTS (SELECT 1 FROM json_each(COALESCE(m.tags, '[]')) je WHERE je.value = ?)";
+    return { sql: ` AND (${tags.map(() => one).join(mode === 'all' ? ' AND ' : ' OR ')})`, params: tags };
+  }
+  function forumKeyOf(id, sort) {
+    const row = db.prepare(`SELECT ${forumKeyExpr(sort)} AS k FROM messages m WHERE m.id = ?`).get(id);
+    return row ? row.k : null;
+  }
+  // Less recently active (or older) than the cursor message, newest first
+  // (reversed by the caller, like the chronological "before" query).
+  function forumOlder(channelId, cursorId, limit, opts) {
+    const at = forumKeyOf(cursorId, opts.sort);
+    if (!at) return [];
+    const key = forumKeyCol(opts.sort); const tag = forumTagSql(opts.tags, opts.tagMode);
+    return db.prepare(`
+      SELECT * FROM (${FORUM_SELECT}${tag.sql})
+      WHERE ${key} < ? OR (${key} = ? AND id < ?)
+      ORDER BY ${key} DESC, id DESC LIMIT ?
+    `).all(channelId, ...tag.params, at, at, cursorId, limit);
+  }
+  function forumNewer(channelId, cursorId, limit, opts) {
+    const at = forumKeyOf(cursorId, opts.sort);
+    if (!at) return [];
+    const key = forumKeyCol(opts.sort); const tag = forumTagSql(opts.tags, opts.tagMode);
+    return db.prepare(`
+      SELECT * FROM (${FORUM_SELECT}${tag.sql})
+      WHERE ${key} > ? OR (${key} = ? AND id > ?)
+      ORDER BY ${key} ASC, id ASC LIMIT ?
+    `).all(channelId, ...tag.params, at, at, cursorId, limit);
+  }
+  function forumHistory(channelId, { before, after, around, limit, sort = 'active', tags = [], tagMode = 'some' }) {
+    const opts = { sort, tags, tagMode };
+    if (before) return forumOlder(channelId, before, limit, opts);
+    if (after) return forumNewer(channelId, after, limit, opts);
+    if (around) {
+      const half = Math.floor(limit / 2);
+      const target = db.prepare(`SELECT * FROM (${FORUM_SELECT}) WHERE id = ?`).all(channelId, around);
+      return [...forumOlder(channelId, around, half, opts).reverse(), ...target, ...forumNewer(channelId, around, half, opts)];
+    }
+    const key = forumKeyCol(sort); const tag = forumTagSql(tags, tagMode);
+    // Pinned topics ride on the first page whatever their last activity, so
+    // they are on top from the start rather than only once they happen to
+    // load. Later pages may hand one back again; the client skips repeats.
+    const pinned = db.prepare(`
+      SELECT * FROM (${FORUM_SELECT}${tag.sql})
+      WHERE id IN (SELECT message_id FROM pinned_messages WHERE channel_id = ?)
+      ORDER BY ${key} DESC, id DESC
+    `).all(channelId, ...tag.params, channelId);
+    const page = db.prepare(`
+      SELECT * FROM (${FORUM_SELECT}${tag.sql})
+      ORDER BY ${key} DESC, id DESC LIMIT ?
+    `).all(channelId, ...tag.params, limit);
+    const seen = new Set(pinned.map(r => r.id));
+    return [...pinned, ...page.filter(r => !seen.has(r.id))];
+  }
+  function parseTags(raw) {
+    if (!raw) return [];
+    try { const a = JSON.parse(raw); return Array.isArray(a) ? a.filter(t => typeof t === 'string') : []; } catch { return []; }
+  }
+
   socket.on('get-messages', (data) => {
     if (!data || typeof data !== 'object') return;
     const code = typeof data.code === 'string' ? data.code.trim() : '';
@@ -48,30 +140,36 @@ module.exports = function register(socket, ctx) {
     const after  = isInt(data.after)  ? data.after  : null;
     const around = isInt(data.around) ? data.around : null;
     const limit = isInt(data.limit) && data.limit > 0 && data.limit <= 100 ? data.limit : 80;
+    const sort = data.sort === 'created' ? 'created' : 'active';
+    const tags = Array.isArray(data.tags) ? data.tags.filter(t => typeof t === 'string' && t.trim()).map(t => t.trim().slice(0, 30)).slice(0, 10) : [];
+    const tagMode = data.tagMode === 'all' ? 'all' : 'some';
 
-    const channel = db.prepare('SELECT id FROM channels WHERE code = ?').get(code);
+    const channel = db.prepare('SELECT id, is_forum, role_gate FROM channels WHERE code = ?').get(code);
     if (!channel) return;
 
     const member = db.prepare(
       'SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?'
     ).get(channel.id, socket.user.id);
     if (!member && !socket.user.isAdmin) return socket.emit('error-msg', 'Not a member of this channel');
+    if (!socket.user.isAdmin && !ctx.roleGateAllows(socket.user.id, channel)) return socket.emit('error-msg', 'This channel needs a role you do not hold');
 
     let messages;
-    if (before) {
+    if (channel.is_forum) {
+      messages = forumHistory(channel.id, { before, after, around, limit, sort, tags, tagMode });
+    } else if (before) {
       messages = db.prepare(`
-        SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data, m.burn_seconds, m.burning_started_at, m.persona_id, m.persona_username, m.persona_avatar, m.break_chain,
+        SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data, m.burn_seconds, m.burning_started_at, m.persona_id, m.persona_username, m.persona_avatar, m.break_chain, m.ferry_target, m.type,
                COALESCE(u.display_name, u.username, '[Deleted User]') as real_username,
-               COALESCE(m.persona_username, m.webhook_username, u.display_name, u.username, '[Deleted User]') as username, u.id as user_id, u.avatar, COALESCE(u.avatar_shape, 'circle') as avatar_shape
+               COALESCE(m.persona_username, m.webhook_username, u.display_name, u.username, '[Deleted User]') as username, u.id as user_id, u.avatar, COALESCE(u.avatar_shape, 'circle') as avatar_shape, u.border, u.border_transform, COALESCE(u.animate_profile, 'trigger') as animate_profile
         FROM messages m LEFT JOIN users u ON m.user_id = u.id
         WHERE m.channel_id = ? AND m.id < ? AND m.thread_id IS NULL
         ORDER BY m.created_at DESC, m.id DESC LIMIT ?
       `).all(channel.id, before, limit);
     } else if (after) {
       messages = db.prepare(`
-        SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data, m.burn_seconds, m.burning_started_at, m.persona_id, m.persona_username, m.persona_avatar, m.break_chain,
+        SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data, m.burn_seconds, m.burning_started_at, m.persona_id, m.persona_username, m.persona_avatar, m.break_chain, m.ferry_target, m.type,
                COALESCE(u.display_name, u.username, '[Deleted User]') as real_username,
-               COALESCE(m.persona_username, m.webhook_username, u.display_name, u.username, '[Deleted User]') as username, u.id as user_id, u.avatar, COALESCE(u.avatar_shape, 'circle') as avatar_shape
+               COALESCE(m.persona_username, m.webhook_username, u.display_name, u.username, '[Deleted User]') as username, u.id as user_id, u.avatar, COALESCE(u.avatar_shape, 'circle') as avatar_shape, u.border, u.border_transform, COALESCE(u.animate_profile, 'trigger') as animate_profile
         FROM messages m LEFT JOIN users u ON m.user_id = u.id
         WHERE m.channel_id = ? AND m.id > ? AND m.thread_id IS NULL
         ORDER BY m.created_at ASC, m.id ASC LIMIT ?
@@ -79,24 +177,24 @@ module.exports = function register(socket, ctx) {
     } else if (around) {
       const half = Math.floor(limit / 2);
       const beforeMsgs = db.prepare(`
-        SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data, m.burn_seconds, m.burning_started_at, m.persona_id, m.persona_username, m.persona_avatar, m.break_chain,
+        SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data, m.burn_seconds, m.burning_started_at, m.persona_id, m.persona_username, m.persona_avatar, m.break_chain, m.ferry_target, m.type,
                COALESCE(u.display_name, u.username, '[Deleted User]') as real_username,
-               COALESCE(m.persona_username, m.webhook_username, u.display_name, u.username, '[Deleted User]') as username, u.id as user_id, u.avatar, COALESCE(u.avatar_shape, 'circle') as avatar_shape
+               COALESCE(m.persona_username, m.webhook_username, u.display_name, u.username, '[Deleted User]') as username, u.id as user_id, u.avatar, COALESCE(u.avatar_shape, 'circle') as avatar_shape, u.border, u.border_transform, COALESCE(u.animate_profile, 'trigger') as animate_profile
         FROM messages m LEFT JOIN users u ON m.user_id = u.id
         WHERE m.channel_id = ? AND m.id < ? AND m.thread_id IS NULL
         ORDER BY m.created_at DESC, m.id DESC LIMIT ?
       `).all(channel.id, around, half);
       const targetMsg = db.prepare(`
-        SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data, m.burn_seconds, m.burning_started_at, m.persona_id, m.persona_username, m.persona_avatar, m.break_chain,
+        SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data, m.burn_seconds, m.burning_started_at, m.persona_id, m.persona_username, m.persona_avatar, m.break_chain, m.ferry_target, m.type,
                COALESCE(u.display_name, u.username, '[Deleted User]') as real_username,
-               COALESCE(m.persona_username, m.webhook_username, u.display_name, u.username, '[Deleted User]') as username, u.id as user_id, u.avatar, COALESCE(u.avatar_shape, 'circle') as avatar_shape
+               COALESCE(m.persona_username, m.webhook_username, u.display_name, u.username, '[Deleted User]') as username, u.id as user_id, u.avatar, COALESCE(u.avatar_shape, 'circle') as avatar_shape, u.border, u.border_transform, COALESCE(u.animate_profile, 'trigger') as animate_profile
         FROM messages m LEFT JOIN users u ON m.user_id = u.id
         WHERE m.channel_id = ? AND m.id = ?
       `).all(channel.id, around);
       const afterMsgs = db.prepare(`
-        SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data, m.burn_seconds, m.burning_started_at, m.persona_id, m.persona_username, m.persona_avatar, m.break_chain,
+        SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data, m.burn_seconds, m.burning_started_at, m.persona_id, m.persona_username, m.persona_avatar, m.break_chain, m.ferry_target, m.type,
                COALESCE(u.display_name, u.username, '[Deleted User]') as real_username,
-               COALESCE(m.persona_username, m.webhook_username, u.display_name, u.username, '[Deleted User]') as username, u.id as user_id, u.avatar, COALESCE(u.avatar_shape, 'circle') as avatar_shape
+               COALESCE(m.persona_username, m.webhook_username, u.display_name, u.username, '[Deleted User]') as username, u.id as user_id, u.avatar, COALESCE(u.avatar_shape, 'circle') as avatar_shape, u.border, u.border_transform, COALESCE(u.animate_profile, 'trigger') as animate_profile
         FROM messages m LEFT JOIN users u ON m.user_id = u.id
         WHERE m.channel_id = ? AND m.id > ? AND m.thread_id IS NULL
         ORDER BY m.created_at ASC, m.id ASC LIMIT ?
@@ -105,9 +203,9 @@ module.exports = function register(socket, ctx) {
       messages = [...beforeMsgs.reverse(), ...targetMsg, ...afterMsgs];
     } else {
       messages = db.prepare(`
-        SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data, m.burn_seconds, m.burning_started_at, m.persona_id, m.persona_username, m.persona_avatar, m.break_chain,
+        SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived, m.poll_data, m.burn_seconds, m.burning_started_at, m.persona_id, m.persona_username, m.persona_avatar, m.break_chain, m.ferry_target, m.type,
                COALESCE(u.display_name, u.username, '[Deleted User]') as real_username,
-               COALESCE(m.persona_username, m.webhook_username, u.display_name, u.username, '[Deleted User]') as username, u.id as user_id, u.avatar, COALESCE(u.avatar_shape, 'circle') as avatar_shape
+               COALESCE(m.persona_username, m.webhook_username, u.display_name, u.username, '[Deleted User]') as username, u.id as user_id, u.avatar, COALESCE(u.avatar_shape, 'circle') as avatar_shape, u.border, u.border_transform, COALESCE(u.animate_profile, 'trigger') as animate_profile
         FROM messages m LEFT JOIN users u ON m.user_id = u.id
         WHERE m.channel_id = ? AND m.thread_id IS NULL
         ORDER BY m.created_at DESC, m.id DESC LIMIT ?
@@ -121,15 +219,14 @@ module.exports = function register(socket, ctx) {
     const replyMap = new Map();
     if (replyIds.length > 0) {
       const ph = replyIds.map(() => '?').join(',');
-      db.prepare(`
-        SELECT m.id, m.content, m.user_id, COALESCE(u.display_name, u.username, '[Deleted User]') as username
-        FROM messages m LEFT JOIN users u ON m.user_id = u.id
+      db.prepare(`${REPLY_CONTEXT_SELECT}
         WHERE m.id IN (${ph}) AND m.channel_id = ?
-      `).all(...replyIds, channel.id).forEach(r => replyMap.set(r.id, r));
+      `).all(...replyIds, channel.id).forEach(r => replyMap.set(r.id, toReplyContext(r)));
     }
 
     const reactionMap = new Map();
     const pollVoteMap = new Map();
+    const roleMenuMap = new Map();
     let pinnedSet = null;
     if (msgIds.length > 0) {
       const ph = msgIds.map(() => '?').join(',');
@@ -146,6 +243,9 @@ module.exports = function register(socket, ctx) {
         db.prepare(`SELECT message_id FROM pinned_messages WHERE message_id IN (${ph})`)
           .all(...msgIds).map(r => r.message_id)
       );
+
+      db.prepare(`SELECT message_id, title, data FROM role_menus WHERE message_id IN (${ph})`).all(...msgIds)
+        .forEach(r => { const menu = ctx.buildRoleMenu?.(r, socket.user.id); if (menu) roleMenuMap.set(r.message_id, menu); });
 
       db.prepare(`
         SELECT pv.message_id, pv.option_index, pv.user_id, COALESCE(u.display_name, u.username) as username
@@ -179,11 +279,12 @@ module.exports = function register(socket, ctx) {
       db.prepare(`
         SELECT thread_id,
                COUNT(*) as reply_count,
-               MAX(created_at) as last_reply_at
+               MAX(created_at) as last_reply_at,
+               MAX(id) as last_reply_id
         FROM messages WHERE thread_id IN (${ph})
         GROUP BY thread_id
       `).all(...msgIds).forEach(t => {
-        threadMap.set(t.thread_id, { count: t.reply_count, lastReplyAt: utcStamp(t.last_reply_at), participants: [] });
+        threadMap.set(t.thread_id, { count: t.reply_count, lastReplyAt: utcStamp(t.last_reply_at), lastReplyId: t.last_reply_id, participants: [] });
       });
       // Get participants for threads (up to 5 unique usernames)
       if (threadMap.size > 0) {
@@ -206,15 +307,45 @@ module.exports = function register(socket, ctx) {
       }
     }
 
+    // Which reply this account last saw in each topic, for the unread dot on
+    // forum cards (#5641).
+    const threadReadMap = new Map();
+    if (channel.is_forum && msgIds.length > 0) {
+      const rph = msgIds.map(() => '?').join(',');
+      db.prepare(`SELECT thread_id, last_read_reply_id FROM thread_reads WHERE user_id = ? AND thread_id IN (${rph})`)
+        .all(socket.user.id, ...msgIds)
+        .forEach(r => threadReadMap.set(r.thread_id, r.last_read_reply_id));
+    }
+
     const enriched = messages.map(m => {
       const obj = { ...m };
+      // Border fit travels with the message (like avatar) so it renders even when
+      // the author is offline. Parse the stored JSON into the op array the client folds.
+      obj.borderTransform = parseBorderTransform(m.border_transform);
+      delete obj.border_transform;
+      // Animation policy travels with the message too (offline-safe, like the border).
+      obj.animateProfile = m.animate_profile || 'trigger';
+      delete obj.animate_profile;
       if (obj.created_at && !obj.created_at.endsWith('Z')) obj.created_at = utcStamp(obj.created_at);
       if (obj.edited_at && !obj.edited_at.endsWith('Z')) obj.edited_at = utcStamp(obj.edited_at);
       obj.replyContext = m.reply_to ? (replyMap.get(m.reply_to) || null) : null;
       obj.reactions = reactionMap.get(m.id) || [];
+      if (roleMenuMap.has(m.id)) obj.roleMenu = roleMenuMap.get(m.id);
       obj.pinned = pinnedSet ? pinnedSet.has(m.id) : false;
       obj.is_archived = !!m.is_archived;
       obj.thread = threadMap.get(m.id) || null;
+      // A forum topic is unread until you open it (your own topics start
+      // read), and again whenever a reply lands after the last one you saw.
+      if (channel.is_forum && !m.thread_id) {
+        const tinfo = obj.thread || { count: 0, lastReplyAt: null, lastReplyId: 0, participants: [] };
+        const lastId = tinfo.lastReplyId || 0;
+        const seen = threadReadMap.get(m.id);
+        tinfo.unread = seen !== undefined ? lastId > seen : (m.user_id !== socket.user.id || lastId > 0);
+        obj.thread = tinfo;
+      }
+      if ('tags' in m) obj.tags = parseTags(m.tags);
+      if ('closed' in m) obj.closed = !!m.closed;
+      if ('nsfw' in m) obj.nsfw = !!m.nsfw;
       if (m.poll_data) {
         try {
           obj.poll = JSON.parse(m.poll_data);
@@ -233,10 +364,12 @@ module.exports = function register(socket, ctx) {
         obj.username = `[BOT] ${m.webhook_username || 'Bot'}`;
         obj.avatar_shape = 'square';
         obj.avatar = m.webhook_avatar || webhookAvatarMap.get(m.webhook_username) || null;
+        obj.border = null; obj.borderTransform = null; obj.animateProfile = 'trigger'; // bot identity, not the user's frame
       }
       if (m.imported_from) {
         obj.imported_from = m.imported_from;
         obj.username = m.webhook_username || 'Unknown';
+        obj.border = null; obj.borderTransform = null; obj.animateProfile = 'trigger';
       }
       // ── Persona override (#86, #5349) ──
       // Persona display always wins over the real user's avatar/name
@@ -251,6 +384,7 @@ module.exports = function register(socket, ctx) {
         obj.username = m.persona_username || m.real_username || obj.username;
         obj.avatar = m.persona_avatar || null;
         obj.avatar_shape = 'circle';
+        obj.border = null; obj.borderTransform = null; obj.animateProfile = 'trigger'; // persona identity, not the user's frame
       }
       return obj;
     });
@@ -271,68 +405,95 @@ module.exports = function register(socket, ctx) {
     });
   });
 
-  // ── Search messages ─────────────────────────────────────
+  // ── Search messages (global FTS5 across the user's channels) ─────────────
+  // Global by default: scoped to every non-DM channel the user is a member of,
+  // re-checked server-side on every query so results can never include content
+  // they can't access. in:#channel narrows to one channel; from:/has: filter on
+  // top. Paginated 25/page with a total count. DMs are searched client-side
+  // (E2E), so they never reach here. (search-overhaul phase 2)
+  const SEARCH_PAGE_SIZE = 25;
   socket.on('search-messages', (data) => {
     if (!data || typeof data !== 'object') return;
-    const code = typeof data.code === 'string' ? data.code.trim() : '';
     let query = typeof data.query === 'string' ? data.query.trim() : '';
-    if (!code || !query || query.length < 2) return;
+    if (!query) return;
 
-    const channel = db.prepare('SELECT id, is_dm FROM channels WHERE code = ?').get(code);
-    if (!channel) return;
-
-    const member = db.prepare(
-      'SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?'
-    ).get(channel.id, socket.user.id);
-    if (!member) return;
-
-    if (channel.is_dm) {
-      return socket.emit('search-results', { results: [], query, isDM: true });
+    // Per-account rate limit on the expensive FTS path. On trip we tell the
+    // client to stop its spinner and keep the results it already has; the
+    // toast text is rendered client-side for translation. (search-overhaul)
+    if (floodCheck('search')) {
+      return socket.emit('search-throttled', { token: data.token });
     }
 
-    // ── Parse search filters ──
-    const filters = { from: null, in: null, has: null };
-    // Extract from:username
+    const tokenizer = getActiveTokenizer();
+    const page = (Number.isInteger(data.page) && data.page > 0) ? data.page : 1;
+    const sort = ['newest', 'oldest', 'relevant'].includes(data.sort) ? data.sort : 'newest';
+    // Opaque token echoed back so the client can drop stale (out-of-order) responses.
+    const token = data.token;
+
+    // ── Parse filters out of the query text ──
+    const filters = { from: null, in: null, has: null, pinned: null, before: null, after: null, during: null };
     query = query.replace(/\bfrom:(\S+)/gi, (_, v) => { filters.from = v; return ''; });
-    // Extract in:#channel or in:channel
-    query = query.replace(/\bin:#?(\S+)/gi, (_, v) => { filters.in = v; return ''; });
-    // Extract has:image, has:file, has:link, has:embed
+    // A leading # means "this is a channel code" (unambiguous, what the filter
+    // picker appends); without it, in: is treated as a channel name.
+    query = query.replace(/\bin:(#?)(\S+)/gi, (_, hash, v) => { filters.in = v; filters.inIsCode = !!hash; return ''; });
     query = query.replace(/\bhas:(\S+)/gi, (_, v) => { filters.has = v.toLowerCase(); return ''; });
+    query = query.replace(/\bpinned:(\S+)/gi, (_, v) => { filters.pinned = v.toLowerCase(); return ''; });
+    query = query.replace(/\bbefore:(\S+)/gi, (_, v) => { filters.before = v; return ''; });
+    query = query.replace(/\bafter:(\S+)/gi, (_, v) => { filters.after = v; return ''; });
+    query = query.replace(/\bduring:(\S+)/gi, (_, v) => { filters.during = v; return ''; });
     query = query.trim();
 
-    // Determine target channel(s)
-    let targetChannelId = channel.id;
+    // Only keep well-formed YYYY-MM-DD dates; drop anything else silently.
+    const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+    ['before', 'after', 'during'].forEach(k => { if (filters[k] && !DATE_RE.test(filters[k])) filters[k] = null; });
+
+    const empty = { results: [], total: 0, page: 1, query: data.query, filters, token };
+    const conditions = [];
+    const params = [];
+
+    // ── Free-text MATCH (tokenizer-aware; skipped when there's no text) ──
+    let usesFts = false;
+    if (query.length > 0) {
+      if (query.length < minQueryChars(tokenizer)) return socket.emit('search-results', empty);
+      const matchExpr = buildMatchQuery(query, tokenizer);
+      if (matchExpr) { conditions.push('messages_fts MATCH ?'); params.push(matchExpr); usesFts = true; }
+    }
+
+    // Never dump the whole corpus: require free text or at least one filter.
+    const anyFilter = filters.from || filters.has || filters.in || filters.pinned ||
+                      filters.before || filters.after || filters.during;
+    if (!usesFts && !anyFilter) {
+      return socket.emit('search-results', empty);
+    }
+
+    // ── Access scope: non-DM channels the user belongs to ──
     if (filters.in) {
-      const targetChannel = db.prepare('SELECT id FROM channels WHERE name = ? COLLATE NOCASE AND is_dm = 0').get(filters.in);
-      if (!targetChannel) {
-        return socket.emit('search-results', { results: [], query: data.query, filters });
-      }
-      // Verify user is a member of the target channel
-      const targetMember = db.prepare('SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?').get(targetChannel.id, socket.user.id);
-      if (!targetMember) {
-        return socket.emit('search-results', { results: [], query: data.query, filters });
-      }
-      targetChannelId = targetChannel.id;
+      // #code resolves by unique code (unambiguous); a bare name resolves by
+      // name, which is not unique so it takes the first match.
+      const target = filters.inIsCode
+        ? db.prepare('SELECT id FROM channels WHERE code = ? AND is_dm = 0').get(filters.in)
+        : db.prepare('SELECT id FROM channels WHERE name = ? COLLATE NOCASE AND is_dm = 0').get(filters.in);
+      if (!target) return socket.emit('search-results', empty);
+      const isMember = db.prepare('SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?').get(target.id, socket.user.id);
+      if (!isMember) return socket.emit('search-results', empty);
+      conditions.push('m.channel_id = ?');
+      params.push(target.id);
+    } else {
+      conditions.push(`m.channel_id IN (
+        SELECT cm.channel_id FROM channel_members cm
+        JOIN channels c ON c.id = cm.channel_id
+        WHERE cm.user_id = ? AND c.is_dm = 0
+      )`);
+      params.push(socket.user.id);
     }
 
-    // Build dynamic WHERE conditions
-    const conditions = ['m.channel_id = ?'];
-    const params = [targetChannelId];
-
-    // Text search (only if there's remaining query text after extracting filters)
-    if (query.length >= 1) {
-      const escapedQuery = query.replace(/[%_\\]/g, '\\$&');
-      conditions.push("m.content LIKE ? ESCAPE '\\'");
-      params.push(`%${escapedQuery}%`);
-    }
-
-    // from:username filter
+    // ── from:username filter ──
     if (filters.from) {
       conditions.push('(u.username = ? COLLATE NOCASE OR u.display_name = ? COLLATE NOCASE)');
       params.push(filters.from, filters.from);
     }
 
-    // has: filter
+    // ── has: filter (URL-pattern LIKE on content) ──
     if (filters.has) {
       switch (filters.has) {
         case 'image':
@@ -347,22 +508,76 @@ module.exports = function register(socket, ctx) {
         case 'video':
           conditions.push("(m.content LIKE '%/uploads/%.mp4%' ESCAPE '\\' OR m.content LIKE '%/uploads/%.webm%' ESCAPE '\\' OR m.content LIKE '%/uploads/%.mov%' ESCAPE '\\' OR m.content LIKE '%youtube.com%' ESCAPE '\\' OR m.content LIKE '%youtu.be%' ESCAPE '\\')");
           break;
+        case 'audio':
+          conditions.push("(m.content LIKE '%/uploads/%.mp3%' ESCAPE '\\' OR m.content LIKE '%/uploads/%.wav%' ESCAPE '\\' OR m.content LIKE '%/uploads/%.ogg%' ESCAPE '\\' OR m.content LIKE '%/uploads/%.m4a%' ESCAPE '\\' OR m.content LIKE '%/uploads/%.flac%' ESCAPE '\\' OR m.content LIKE '%/uploads/%.aac%' ESCAPE '\\' OR m.content LIKE '%/uploads/%.opus%' ESCAPE '\\' OR m.content LIKE '%/uploads/%.weba%' ESCAPE '\\')");
+          break;
       }
     }
 
-    const results = db.prepare(`
-      SELECT m.id, m.content, m.created_at,
-             COALESCE(u.display_name, u.username, '[Deleted User]') as username, u.id as user_id
-      FROM messages m LEFT JOIN users u ON m.user_id = u.id
-      WHERE ${conditions.join(' AND ')}
-      ORDER BY m.created_at DESC LIMIT 50
-    `).all(...params);
+    // ── pinned: filter ──
+    if (filters.pinned === 'true') {
+      conditions.push('m.id IN (SELECT message_id FROM pinned_messages)');
+    }
+
+    // ── date filters (created_at). during: is the whole named day. ──
+    if (filters.after)  { conditions.push('m.created_at >= ?'); params.push(filters.after); }
+    if (filters.before) { conditions.push('m.created_at < ?');  params.push(filters.before); }
+    if (filters.during) { conditions.push("m.created_at >= ? AND m.created_at < date(?, '+1 day')"); params.push(filters.during, filters.during); }
+
+    // FTS queries join through messages_fts so bm25() is available for ranking.
+    // Channels are joined so each result carries the channel it came from (the
+    // results now span channels, and the client jumps into that channel).
+    const fromSql = (usesFts
+      ? 'messages_fts JOIN messages m ON m.id = messages_fts.rowid LEFT JOIN users u ON m.user_id = u.id'
+      : 'messages m LEFT JOIN users u ON m.user_id = u.id')
+      + ' LEFT JOIN channels c ON c.id = m.channel_id';
+    const orderSql = sort === 'oldest' ? 'm.created_at ASC'
+      : (sort === 'relevant' && usesFts) ? 'bm25(messages_fts)'
+      : 'm.created_at DESC';
+    const whereSql = conditions.join(' AND ');
+
+    let results = [];
+    let total = 0;
+    try {
+      total = db.prepare(`SELECT count(*) AS n FROM ${fromSql} WHERE ${whereSql}`).get(...params).n;
+      results = db.prepare(`
+        SELECT m.id, m.content, m.created_at,
+               COALESCE(u.display_name, u.username, '[Deleted User]') AS username, u.id AS user_id,
+               c.name AS channel_name, c.code AS channel_code
+        FROM ${fromSql}
+        WHERE ${whereSql}
+        ORDER BY ${orderSql}
+        LIMIT ${SEARCH_PAGE_SIZE} OFFSET ?
+      `).all(...params, (page - 1) * SEARCH_PAGE_SIZE);
+    } catch (e) {
+      console.warn('[search] query failed:', e.message);
+      return socket.emit('search-results', empty);
+    }
 
     results.forEach(r => {
       if (r.created_at && !r.created_at.endsWith('Z')) r.created_at = utcStamp(r.created_at);
     });
-    socket.emit('search-results', { results, query: data.query, filters });
+
+    // Thread reply counts for this page's results. A result is a thread parent
+    // when other messages carry thread_id = its id. One grouped COUNT over the
+    // 25 ids (same idiom as the channel loader) drives a display-only badge on
+    // the client. (search-overhaul phase 3)
+    const resultIds = results.map(r => r.id);
+    if (resultIds.length) {
+      const ph = resultIds.map(() => '?').join(',');
+      const counts = db.prepare(
+        `SELECT thread_id, COUNT(*) AS n FROM messages WHERE thread_id IN (${ph}) GROUP BY thread_id`
+      ).all(...resultIds);
+      const countMap = new Map(counts.map(c => [c.thread_id, c.n]));
+      results.forEach(r => { r.thread_count = countMap.get(r.id) || 0; });
+    }
+
+    socket.emit('search-results', { results, total, page, query: data.query, filters, token });
   });
+
+  // Tell the client the minimum query length for the active tokenizer (trigram
+  // needs 3 chars; word tokenizers 2) so the input gate matches the server.
+  socket.emit('search-config', { minChars: minQueryChars(), tokenizer: getActiveTokenizer() });
 
   // ── Channel media gallery (#5350) ───────────────────────
   // Returns categorized media + links from all messages in a channel.
@@ -515,14 +730,64 @@ module.exports = function register(socket, ctx) {
     });
   });
 
-  // ── Bulk delete from media gallery (#5375) ──────────────
-  // Lets admins / users with delete permission remove many attachments at
-  // once from the Files & Media view. Reuses the same permission rules and
-  // file-move-to-deleted-attachments behavior as the single-message
-  // `delete-message` handler. Operates per-message inside a transaction
-  // and broadcasts `message-deleted` for each one so other clients update.
-  socket.on('delete-channel-media', (data, callback) => {
-    const cb = typeof callback === 'function' ? callback : () => {};
+  // ── Channel thread list (#5506) ─────────────────────────
+  // Every thread in the channel, newest activity first, so people can find a
+  // conversation again without scrolling the channel back to where it started.
+  socket.on('get-channel-threads', (data) => {
+    if (!data || typeof data !== 'object') return;
+    const code = typeof data.code === 'string' ? data.code.trim() : '';
+    if (!code || !/^[a-f0-9]{8}$/i.test(code)) return;
+
+    const channel = db.prepare('SELECT id FROM channels WHERE code = ?').get(code);
+    if (!channel) return;
+
+    const member = db.prepare(
+      'SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?'
+    ).get(channel.id, socket.user.id);
+    if (!member && !socket.user.isAdmin) {
+      return socket.emit('error-msg', 'Not a member of this channel');
+    }
+
+    // A thread is a message that has replies hanging off it, so the join is
+    // what defines one: no replies, no thread, nothing to list. Capped like
+    // the media gallery so a long-lived channel cannot produce an unbounded
+    // payload. Ordered by last reply, because "which thread is alive" is the
+    // question people open this to answer.
+    const threads = db.prepare(`
+      SELECT p.id,
+             p.content,
+             p.created_at,
+             COALESCE(p.persona_username, p.webhook_username, u.display_name, u.username, '[Deleted User]') AS username,
+             u.id AS user_id,
+             COUNT(t.id) AS reply_count,
+             MAX(t.created_at) AS last_reply_at
+      FROM messages p
+      JOIN messages t ON t.thread_id = p.id
+      LEFT JOIN users u ON p.user_id = u.id
+      WHERE p.channel_id = ? AND p.thread_id IS NULL
+      GROUP BY p.id
+      ORDER BY last_reply_at DESC, p.id DESC
+      LIMIT 500
+    `).all(channel.id);
+
+    socket.emit('channel-threads', {
+      channelCode: code,
+      threads: threads.map(t => ({
+        ...t,
+        created_at: utcStamp(t.created_at),
+        last_reply_at: utcStamp(t.last_reply_at),
+      })),
+    });
+  });
+
+  // ── Shared bulk message delete ──────────────────────────
+  // Deletes many messages by id in one transaction using the same
+  // permission rules as the single `delete-message` handler, moves their
+  // attachments to deleted-attachments/, and broadcasts `message-deleted`
+  // for each so other clients update. Shared by the Files & Media gallery
+  // (delete-channel-media, #5375) and the multi-select toolbar Delete
+  // (delete-messages, #5460) so both stay behaviourally identical.
+  const bulkDeleteMessagesByIds = (data, cb) => {
     if (!data || typeof data !== 'object') return cb({ error: 'Bad request' });
     const code = typeof data.code === 'string' ? data.code.trim() : '';
     if (!code || !/^[a-f0-9]{8}$/i.test(code)) return cb({ error: 'Bad channel' });
@@ -549,9 +814,12 @@ module.exports = function register(socket, ctx) {
     let allowOwnDelete = true;
     if (!socket.user.isAdmin) {
       try {
+        // (#5433) Channel-scoped override rows only apply in their channel.
+        const chain = getChannelRoleChain(channel.id);
+        const ph = chain.map(() => '?').join(',');
         const deny = db.prepare(
-          "SELECT allowed FROM user_role_perms WHERE user_id = ? AND permission = 'delete_own_messages' ORDER BY allowed ASC LIMIT 1"
-        ).get(socket.user.id);
+          `SELECT allowed FROM user_role_perms WHERE user_id = ? AND permission = 'delete_own_messages' AND (channel_id IS NULL OR channel_id IN (${ph})) ORDER BY allowed ASC LIMIT 1`
+        ).get(socket.user.id, ...chain);
         if (deny && deny.allowed === 0) allowOwnDelete = false;
       } catch { /* table may not exist */ }
     }
@@ -630,6 +898,22 @@ module.exports = function register(socket, ctx) {
     }
 
     cb({ success: true, deleted: deletable.length, skipped: skipped.length });
+  };
+
+  // ── Bulk delete from media gallery (#5375) ──────────────
+  socket.on('delete-channel-media', (data, callback) => {
+    const cb = typeof callback === 'function' ? callback : () => {};
+    bulkDeleteMessagesByIds(data, cb);
+  });
+
+  // ── Bulk delete from the multi-select toolbar (#5460) ────
+  // Piggybacks the "Select messages" move selector: a mod picks messages and
+  // hits Delete instead of "Move to". Per-message permission is enforced in
+  // the shared helper, so a lower mod can only remove what they could already
+  // delete one at a time.
+  socket.on('delete-messages', (data, callback) => {
+    const cb = typeof callback === 'function' ? callback : () => {};
+    bulkDeleteMessagesByIds(data, cb);
   });
 
   // ── Send message ────────────────────────────────────────
@@ -652,21 +936,44 @@ module.exports = function register(socket, ctx) {
       return socket.emit('error-msg', 'Slow down — you\'re sending messages too fast');
     }
 
-    const activeMute = db.prepare(
-      'SELECT id, expires_at FROM mutes WHERE user_id = ? AND expires_at > datetime(\'now\') ORDER BY expires_at DESC LIMIT 1'
-    ).get(socket.user.id);
-    if (activeMute) {
-      const remaining = Math.ceil((new Date(activeMute.expires_at + 'Z') - Date.now()) / 60000);
-      return socket.emit('error-msg', `You are muted for ${remaining} more minute${remaining !== 1 ? 's' : ''}`);
+    const channel = db.prepare('SELECT id, name, slow_mode_interval, text_enabled, voice_enabled, media_enabled, read_only, is_dm, is_forum, forum_tags, role_gate FROM channels WHERE code = ?').get(code);
+    if (!channel) return socket.emit('error-msg', 'Channel not found — try switching channels and back');
+
+    // A moderation mute covers the server's channels, not private messages:
+    // a muted person can still DM, which is also how they reach a mod about
+    // the mute (#5640).
+    if (!channel.is_dm) {
+      const sendMute = activeMuteNotice(socket.user.id);
+      if (sendMute) return socket.emit('error-msg', sendMute);
     }
 
-    const channel = db.prepare('SELECT id, name, slow_mode_interval, text_enabled, voice_enabled, media_enabled, read_only, is_dm FROM channels WHERE code = ?').get(code);
-    if (!channel) return socket.emit('error-msg', 'Channel not found — try switching channels and back');
+    // Forum topics carry a title and a pick of the channel's tags. Both are
+    // ignored outside forum channels so a stale client cannot tag chat.
+    let topicTitle = null;
+    let topicTags = null;
+    let topicNsfw = 0;
+    if (channel.is_forum) {
+      if (typeof data.title === 'string' && data.title.trim()) topicTitle = data.title.trim().replace(/\s+/g, ' ').slice(0, 120);
+      // The poster can mark the topic NSFW (#5633).
+      if (data.nsfw === true) topicNsfw = 1;
+      const allowed = new Set(parseChannelTags(channel.forum_tags).map(t => t.name));
+      if (Array.isArray(data.tags)) {
+        const picked = [...new Set(data.tags.filter(t => typeof t === 'string').map(t => t.trim()).filter(t => allowed.has(t)))].slice(0, 5);
+        if (picked.length) topicTags = JSON.stringify(picked);
+      }
+    }
 
     const member = db.prepare(
       'SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?'
     ).get(channel.id, socket.user.id);
     if (!member) return socket.emit('error-msg', 'Not a member of this channel');
+    if (!socket.user.isAdmin && !ctx.roleGateAllows(socket.user.id, channel)) return socket.emit('error-msg', 'This channel needs a role you do not hold');
+
+    // ── Auto-mod link policy (v3.42.0) ────────────────────
+    // Runs before the message is persisted or broadcast. A blocked message
+    // never reaches another client, which is the only way to stop the passive
+    // IP leak from inline images and link-preview og:image fetches.
+    if (enforceAutomod(content, { surface: channel.is_dm ? 'dm' : 'message', channelId: channel.id })) return;
 
     if (channel.read_only === 1 && !socket.user.isAdmin && !userHasPermission(socket.user.id, 'read_only_override', channel.id)) {
       return socket.emit('error-msg', 'This channel is read-only');
@@ -679,6 +986,10 @@ module.exports = function register(socket, ctx) {
     if (!socket.user.isAdmin && !userHasPermission(socket.user.id, 'mention_everyone', channel.id)) {
       const stripped = content.replace(/(?<![\w@])@(everyone|here)\b/gi, '@\u200B$1');
       if (stripped !== content) content = stripped;
+      // @Role pings fan out the same way, so they sit behind the same permission. (#5579)
+      const roleNames = db.prepare('SELECT name FROM roles').all().map(r => r.name);
+      const roleStripped = stripRoleMentions(content, roleNames);
+      if (roleStripped !== content) content = roleStripped;
     }
 
     if (channel.text_enabled === 0) {
@@ -753,6 +1064,9 @@ module.exports = function register(socket, ctx) {
           user_id: socket.user.id,
           avatar: socket.user.avatar || null,
           avatar_shape: socket.user.avatar_shape || 'circle',
+          border: socket.user.border || null,
+          borderTransform: socket.user.borderTransform || null,
+          animateProfile: socket.user.animate_profile || 'trigger',
           reply_to: null,
           replyContext: null,
           reactions: [],
@@ -834,19 +1148,46 @@ module.exports = function register(socket, ctx) {
       }
     }
 
+    // ── Ferry target (Discord bridge) ─────────────────────
+    // Runs after persona detection so the two prefixes compose: "::Alter
+    // =>Server#general hi" resolves the persona first and leaves the ferry
+    // prefix for this step. The target is stripped from what Haven stores and
+    // kept in ferry_target instead, so channel history reads as plain messages
+    // with a small destination badge rather than raw routing syntax.
+    let ferryTarget = null;
+    let ferryLabel = null;
+    if (!channel.is_dm) {
+      ferryTarget = parseFerryTarget(channel.id, finalContent, data.ferryDiscordUserId);
+      if (ferryTarget) {
+        finalContent = ferryTarget.body;
+        ferryLabel = ferryTarget.dm
+          ? 'dm'
+          : `${ferryTarget.link.guild_name || 'Discord'}#${ferryTarget.link.discord_channel_name || ''}`;
+        // An addressed message with nothing after the target is a typo, not a
+        // send. Bail before writing an empty row into channel history.
+        if (!finalContent) return socket.emit('error-msg', 'Add a message after the Discord target');
+      }
+    }
+
     try {
       const result = db.prepare(
-        'INSERT INTO messages (channel_id, user_id, content, reply_to, burn_seconds, persona_id, persona_username, persona_avatar, break_chain) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-      ).run(channel.id, socket.user.id, finalContent, replyTo, burnSeconds, personaId, personaUsername, personaAvatar, breakChain);
+        'INSERT INTO messages (channel_id, user_id, content, reply_to, burn_seconds, persona_id, persona_username, persona_avatar, break_chain, ferry_target, title, tags, nsfw) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      ).run(channel.id, socket.user.id, finalContent, replyTo, burnSeconds, personaId, personaUsername, personaAvatar, breakChain, ferryLabel, topicTitle, topicTags, topicNsfw);
 
       const message = {
         id: result.lastInsertRowid,
         content: finalContent,
+        title: topicTitle || undefined,
+        tags: topicTags ? JSON.parse(topicTags) : undefined,
+        nsfw: topicNsfw ? true : undefined,
         created_at: new Date().toISOString(),
         username: personaUsername || socket.user.displayName,
         user_id: socket.user.id,
         avatar: personaAvatar || socket.user.avatar || null,
         avatar_shape: personaId ? 'circle' : (socket.user.avatar_shape || 'circle'),
+        border: personaId ? null : (socket.user.border || null),
+        borderTransform: personaId ? null : (socket.user.borderTransform || null),
+        animateProfile: personaId ? 'trigger' : (socket.user.animate_profile || 'trigger'),
         reply_to: replyTo,
         replyContext: null,
         reactions: [],
@@ -858,13 +1199,13 @@ module.exports = function register(socket, ctx) {
         persona_avatar: personaAvatar || undefined,
         real_username: personaId ? socket.user.displayName : undefined,
         break_chain: breakChain || undefined,
+        ferry_target: ferryLabel || undefined,
       };
 
       if (replyTo) {
-        message.replyContext = db.prepare(`
-          SELECT m.id, m.content, m.user_id, COALESCE(u.display_name, u.username, '[Deleted User]') as username FROM messages m
-          LEFT JOIN users u ON m.user_id = u.id WHERE m.id = ? AND m.channel_id = ?
-        `).get(replyTo, channel.id) || null;
+        message.replyContext = toReplyContext(db.prepare(`${REPLY_CONTEXT_SELECT}
+          WHERE m.id = ? AND m.channel_id = ?
+        `).get(replyTo, channel.id));
       }
 
       io.to(`channel:${code}`).emit('new-message', { channelCode: code, message });
@@ -874,6 +1215,19 @@ module.exports = function register(socket, ctx) {
       const pushDisplayName = personaUsername || socket.user.displayName;
       sendPushNotifications(channel.id, code, channel.name, socket.user.id, pushDisplayName, pushContent);
       fireWebhookCallbacks(channel.id, code, message);
+
+      // Deliberately after the broadcast: the Haven message is already sent and
+      // stored, so a slow or broken Discord never holds up the channel.
+      if (!channel.is_dm) {
+        ferryRelay({
+          channelId: channel.id,
+          user: socket.user,
+          body: finalContent,
+          target: ferryTarget,
+          personaUsername, personaAvatar,
+          notify: (msg) => socket.emit('error-msg', msg),
+        });
+      }
 
       try {
         db.prepare(`
@@ -947,6 +1301,127 @@ module.exports = function register(socket, ctx) {
     }, 10000);
   }
 
+  // ── Scheduled messages (#5638) ──────────────────────────
+  // Held on the server, so they go out whether or not the sender is online.
+  // Not for DMs: those are encrypted in the browser, and a message parked
+  // here in plain text would defeat that.
+  const SCHEDULE_MAX_DAYS = 30;
+  const SCHEDULE_MAX_PENDING = 25;
+  function parseSendAt(raw) {
+    const ts = Date.parse(typeof raw === 'string' ? raw : '');
+    if (!Number.isFinite(ts)) return null;
+    if (ts < Date.now() + 15000 || ts > Date.now() + SCHEDULE_MAX_DAYS * 86400000) return null;
+    return new Date(ts).toISOString();
+  }
+  function scheduledList(userId) {
+    return db.prepare(`
+      SELECT s.id, s.content, s.send_at, c.code AS channelCode, c.name AS channelName
+      FROM scheduled_messages s JOIN channels c ON c.id = s.channel_id
+      WHERE s.user_id = ? ORDER BY s.send_at ASC
+    `).all(userId).map(r => ({ id: r.id, content: r.content, sendAt: r.send_at, channelCode: r.channelCode, channelName: r.channelName }));
+  }
+  function scheduleMaxChars() {
+    return parseInt(db.prepare("SELECT value FROM server_settings WHERE key = 'max_message_chars'").get()?.value) || 2000;
+  }
+
+  socket.on('schedule-message', (data, callback) => {
+    const cb = typeof callback === 'function' ? callback : () => {};
+    if (!data || typeof data !== 'object') return cb({ error: 'Invalid request' });
+    const code = typeof data.code === 'string' ? data.code.trim() : '';
+    if (!/^[a-f0-9]{8}$/i.test(code)) return cb({ error: 'Invalid channel' });
+    if (!isString(data.content, 1, scheduleMaxChars())) return cb({ error: 'Nothing to send, or the message is too long' });
+    const sendAt = parseSendAt(data.sendAt);
+    if (!sendAt) return cb({ error: `Pick a time in the future, up to ${SCHEDULE_MAX_DAYS} days away` });
+    const channel = db.prepare('SELECT id, is_dm, read_only, text_enabled FROM channels WHERE code = ?').get(code);
+    if (!channel) return cb({ error: 'Channel not found' });
+    if (channel.is_dm) return cb({ error: 'Scheduled sends are not available in direct messages' });
+    if (channel.text_enabled === 0) return cb({ error: 'Text messages are disabled in this channel' });
+    if (!db.prepare('SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?').get(channel.id, socket.user.id)) return cb({ error: 'Not a member of this channel' });
+    if (channel.read_only === 1 && !socket.user.isAdmin && !userHasPermission(socket.user.id, 'read_only_override', channel.id)) return cb({ error: 'This channel is read-only' });
+    const mute = activeMuteNotice(socket.user.id);
+    if (mute) return cb({ error: mute });
+    const content = sanitizeText(data.content.trim());
+    if (!content) return cb({ error: 'Nothing to send' });
+    // The same checks a live send gets, at the moment it is queued.
+    if (enforceAutomod(content, { surface: 'message', channelId: channel.id })) return cb({ error: 'That message was blocked' });
+    const pending = db.prepare('SELECT COUNT(*) AS c FROM scheduled_messages WHERE user_id = ?').get(socket.user.id).c;
+    if (pending >= SCHEDULE_MAX_PENDING) return cb({ error: `You already have ${SCHEDULE_MAX_PENDING} messages waiting to send` });
+    try {
+      const r = db.prepare('INSERT INTO scheduled_messages (user_id, channel_id, content, send_at) VALUES (?, ?, ?, ?)').run(socket.user.id, channel.id, content, sendAt);
+      cb({ success: true, id: r.lastInsertRowid, sendAt, items: scheduledList(socket.user.id) });
+    } catch (err) {
+      console.error('schedule-message error:', err);
+      cb({ error: 'Failed to schedule the message' });
+    }
+  });
+
+  socket.on('get-scheduled-messages', (data, callback) => {
+    const cb = typeof callback === 'function' ? callback : (typeof data === 'function' ? data : () => {});
+    try { cb({ items: scheduledList(socket.user.id) }); } catch { cb({ items: [] }); }
+  });
+
+  socket.on('update-scheduled-message', (data, callback) => {
+    const cb = typeof callback === 'function' ? callback : () => {};
+    if (!data || typeof data !== 'object' || !isInt(data.id)) return cb({ error: 'Invalid request' });
+    const row = db.prepare('SELECT id, channel_id FROM scheduled_messages WHERE id = ? AND user_id = ?').get(data.id, socket.user.id);
+    if (!row) return cb({ error: 'That scheduled message is gone' });
+    if (!isString(data.content, 1, scheduleMaxChars())) return cb({ error: 'Nothing to send, or the message is too long' });
+    const sendAt = parseSendAt(data.sendAt);
+    if (!sendAt) return cb({ error: `Pick a time in the future, up to ${SCHEDULE_MAX_DAYS} days away` });
+    const content = sanitizeText(data.content.trim());
+    if (!content) return cb({ error: 'Nothing to send' });
+    if (enforceAutomod(content, { surface: 'edit', channelId: row.channel_id })) return cb({ error: 'That message was blocked' });
+    db.prepare('UPDATE scheduled_messages SET content = ?, send_at = ? WHERE id = ?').run(content, sendAt, row.id);
+    cb({ success: true, items: scheduledList(socket.user.id) });
+  });
+
+  socket.on('cancel-scheduled-message', (data, callback) => {
+    const cb = typeof callback === 'function' ? callback : () => {};
+    if (!data || typeof data !== 'object' || !isInt(data.id)) return cb({ error: 'Invalid request' });
+    db.prepare('DELETE FROM scheduled_messages WHERE id = ? AND user_id = ?').run(data.id, socket.user.id);
+    cb({ success: true, items: scheduledList(socket.user.id) });
+  });
+
+  // Every 15 seconds, post whatever has come due. Membership is checked
+  // again at send time, so leaving a channel drops what was queued for it.
+  if (!global.__havenScheduleSweep) {
+    global.__havenScheduleSweep = setInterval(() => {
+      let due = [];
+      try {
+        due = db.prepare(`
+          SELECT s.id, s.user_id, s.channel_id, s.content, c.code, c.name AS channel_name
+          FROM scheduled_messages s JOIN channels c ON c.id = s.channel_id
+          WHERE s.send_at <= ? ORDER BY s.send_at ASC LIMIT 20
+        `).all(new Date().toISOString());
+      } catch (err) { console.error('[schedule-sweep] query error:', err.message); return; }
+      for (const row of due) {
+        try {
+          db.prepare('DELETE FROM scheduled_messages WHERE id = ?').run(row.id);
+          const author = db.prepare('SELECT id, username, display_name, avatar, avatar_shape, border, border_transform, animate_profile FROM users WHERE id = ?').get(row.user_id);
+          const member = db.prepare('SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?').get(row.channel_id, row.user_id);
+          if (!author || !member) continue;
+          const result = db.prepare('INSERT INTO messages (channel_id, user_id, content) VALUES (?, ?, ?)').run(row.channel_id, row.user_id, row.content);
+          const message = {
+            id: result.lastInsertRowid, content: row.content, created_at: new Date().toISOString(),
+            username: author.display_name || author.username, user_id: author.id,
+            avatar: author.avatar || null, avatar_shape: author.avatar_shape || 'circle',
+            border: author.border || null, borderTransform: parseBorderTransform(author.border_transform),
+            animateProfile: author.animate_profile || 'trigger',
+            reply_to: null, replyContext: null, reactions: [], edited_at: null, thread: null
+          };
+          io.to(`channel:${row.code}`).emit('new-message', { channelCode: row.code, message });
+          sendPushNotifications(row.channel_id, row.code, row.channel_name, author.id, message.username, row.content);
+          fireWebhookCallbacks(row.channel_id, row.code, message);
+          for (const [, s] of io.sockets.sockets) {
+            if (s.user && s.user.id === author.id) s.emit('scheduled-message-sent', { id: row.id, channelCode: row.code, channelName: row.channel_name });
+          }
+        } catch (err) {
+          console.error('[schedule-sweep] send error:', err.message);
+        }
+      }
+    }, 15000);
+  }
+
   // ── Typing indicator ────────────────────────────────────
   socket.on('typing', (data) => {
     if (!data || typeof data !== 'object') return;
@@ -964,6 +1439,55 @@ module.exports = function register(socket, ctx) {
   });
 
   // ── Edit message ────────────────────────────────────────
+  function parseChannelTags(raw) {
+    if (!raw) return [];
+    try { const a = JSON.parse(raw); return Array.isArray(a) ? a.filter(t => t && typeof t.name === 'string') : []; } catch { return []; }
+  }
+
+  // Retitle or retag a forum topic. The author, or anyone who may manage
+  // messages in the channel, may do it.
+  socket.on('set-topic-meta', (data) => {
+    if (!data || typeof data !== 'object' || !isInt(data.messageId)) return;
+    const msg = db.prepare('SELECT m.id, m.user_id, m.channel_id, m.thread_id, c.code, c.is_forum, c.forum_tags FROM messages m JOIN channels c ON c.id = m.channel_id WHERE m.id = ?').get(data.messageId);
+    if (!msg || !msg.is_forum || msg.thread_id) return socket.emit('error-msg', 'Not a forum topic');
+    const mine = msg.user_id === socket.user.id;
+    if (!mine && !socket.user.isAdmin && !userHasPermission(socket.user.id, 'manage_messages', msg.channel_id)) {
+      return socket.emit('error-msg', 'You don\'t have permission to edit this topic');
+    }
+    const title = typeof data.title === 'string' ? data.title.trim().replace(/\s+/g, ' ').slice(0, 120) : null;
+    const allowed = new Set(parseChannelTags(msg.forum_tags).map(t => t.name));
+    const tags = Array.isArray(data.tags) ? [...new Set(data.tags.filter(t => typeof t === 'string').map(t => t.trim()).filter(t => allowed.has(t)))].slice(0, 5) : [];
+    // Closed is only changed when the editor sent it, so an older client that
+    // edits the title leaves it alone (#5624).
+    const closed = typeof data.closed === 'boolean' ? (data.closed ? 1 : 0) : null;
+    // Same rule for the NSFW flag (#5633).
+    const nsfw = typeof data.nsfw === 'boolean' ? (data.nsfw ? 1 : 0) : null;
+    try {
+      db.prepare('UPDATE messages SET title = ?, tags = ? WHERE id = ?').run(title || null, tags.length ? JSON.stringify(tags) : null, msg.id);
+      if (closed !== null) db.prepare('UPDATE messages SET closed = ? WHERE id = ?').run(closed, msg.id);
+      if (nsfw !== null) db.prepare('UPDATE messages SET nsfw = ? WHERE id = ?').run(nsfw, msg.id);
+      const row = db.prepare('SELECT closed, nsfw FROM messages WHERE id = ?').get(msg.id) || {};
+      const closedNow = closed !== null ? closed : (row.closed || 0);
+      const nsfwNow = nsfw !== null ? nsfw : (row.nsfw || 0);
+      io.to(`channel:${msg.code}`).emit('topic-updated', { channelCode: msg.code, messageId: msg.id, title: title || null, tags, closed: !!closedNow, nsfw: !!nsfwNow });
+    } catch (err) {
+      console.error('set-topic-meta error:', err);
+      socket.emit('error-msg', 'Failed to update the topic');
+    }
+  });
+
+  // "You are muted for N more minutes", or null when the user has no active
+  // mute. Sends, edits and reactions in the server's channels all go through
+  // it; DMs are exempt (#5640).
+  function activeMuteNotice(userId) {
+    const row = db.prepare(
+      'SELECT expires_at FROM mutes WHERE user_id = ? AND expires_at > datetime(\'now\') ORDER BY expires_at DESC LIMIT 1'
+    ).get(userId);
+    if (!row) return null;
+    const remaining = Math.ceil((new Date(row.expires_at + 'Z') - Date.now()) / 60000);
+    return `You are muted for ${remaining} more minute${remaining !== 1 ? 's' : ''}`;
+  }
+
   socket.on('edit-message', (data) => {
     if (!data || typeof data !== 'object') return;
     const _editMaxRow = db.prepare("SELECT value FROM server_settings WHERE key = 'max_message_chars'").get();
@@ -977,7 +1501,7 @@ module.exports = function register(socket, ctx) {
     const code = (rawCode && /^[a-f0-9]{8}$/i.test(rawCode)) ? rawCode : socket.currentChannel;
     if (!code) return;
 
-    const channel = db.prepare('SELECT id FROM channels WHERE code = ?').get(code);
+    const channel = db.prepare('SELECT id, is_dm FROM channels WHERE code = ?').get(code);
     if (!channel) return;
 
     const msg = db.prepare(
@@ -991,9 +1515,15 @@ module.exports = function register(socket, ctx) {
     if (!socket.user.isAdmin && !userHasPermission(socket.user.id, 'edit_own_messages', channel.id)) {
       return socket.emit('error-msg', 'You don\'t have permission to edit messages');
     }
+    const editMute = channel.is_dm ? null : activeMuteNotice(socket.user.id);
+    if (editMute) return socket.emit('error-msg', editMute);
 
     const newContent = sanitizeText(data.content.trim());
     if (!newContent) return;
+
+    // Edits get the same link policy as sends. Without this the filter is
+    // trivially bypassed: post something harmless, then edit the payload in.
+    if (enforceAutomod(newContent, { surface: 'edit', channelId: channel.id })) return;
 
     if (/^\/uploads\/[\w\-]+\.(jpg|jpeg|png|gif|webp)$/i.test(newContent)) {
       const origMsg = db.prepare('SELECT original_name FROM messages WHERE id = ?').get(data.messageId);
@@ -1042,9 +1572,12 @@ module.exports = function register(socket, ctx) {
     if (msg.user_id === socket.user.id) {
       if (!socket.user.isAdmin) {
         try {
+          // (#5433) Channel-scoped override rows only apply in their channel.
+          const chain = getChannelRoleChain(channel.id);
+          const ph = chain.map(() => '?').join(',');
           const deny = db.prepare(
-            "SELECT allowed FROM user_role_perms WHERE user_id = ? AND permission = 'delete_own_messages' ORDER BY allowed ASC LIMIT 1"
-          ).get(socket.user.id);
+            `SELECT allowed FROM user_role_perms WHERE user_id = ? AND permission = 'delete_own_messages' AND (channel_id IS NULL OR channel_id IN (${ph})) ORDER BY allowed ASC LIMIT 1`
+          ).get(socket.user.id, ...chain);
           if (deny && deny.allowed === 0) {
             return socket.emit('error-msg', 'You don\'t have permission to delete messages');
           }
@@ -1348,6 +1881,8 @@ module.exports = function register(socket, ctx) {
     try {
       if (!data || typeof data !== 'object') return;
       if (!isInt(data.messageId) || !isString(data.emoji, 1, 32)) return;
+      const reactMute = activeMuteNotice(socket.user.id);
+      if (reactMute) return socket.emit('error-msg', reactMute);
 
       const allowed = /^[\p{Emoji}\p{Emoji_Component}\uFE0F\u200D]+$/u;
       const customEmojiPattern = /^:[a-zA-Z0-9_-]{1,30}:$/;
@@ -1366,10 +1901,14 @@ module.exports = function register(socket, ctx) {
       // channel — using socket.currentChannel made the reaction silently
       // fail because the message wouldn't be found in that channel. (#bug-#4)
       const msg = db.prepare(
-        'SELECT m.id, c.code, c.id as channel_id FROM messages m JOIN channels c ON m.channel_id = c.id WHERE m.id = ?'
+        'SELECT m.id, c.code, c.id as channel_id, c.is_dm FROM messages m JOIN channels c ON m.channel_id = c.id WHERE m.id = ?'
       ).get(data.messageId);
       if (!msg) return;
       const code = msg.code;
+      if (!msg.is_dm) {
+        const reactMute = activeMuteNotice(socket.user.id);
+        if (reactMute) return socket.emit('error-msg', reactMute);
+      }
 
       // Verify membership of the channel the message lives in.
       const member = db.prepare(
@@ -1380,6 +1919,7 @@ module.exports = function register(socket, ctx) {
       db.prepare(
         'INSERT OR IGNORE INTO reactions (message_id, user_id, emoji) VALUES (?, ?, ?)'
       ).run(data.messageId, socket.user.id, data.emoji);
+      ctx.applySelfRoleReaction?.(socket, data.messageId, data.emoji, true);
 
       const reactions = db.prepare(`
         SELECT r.emoji, r.user_id, COALESCE(u.display_name, u.username) as username FROM reactions r
@@ -1425,6 +1965,7 @@ module.exports = function register(socket, ctx) {
       db.prepare(
         'DELETE FROM reactions WHERE message_id = ? AND user_id = ? AND emoji = ?'
       ).run(data.messageId, socket.user.id, data.emoji);
+      ctx.applySelfRoleReaction?.(socket, data.messageId, data.emoji, false);
 
       const reactions = db.prepare(`
         SELECT r.emoji, r.user_id, COALESCE(u.display_name, u.username) as username FROM reactions r
@@ -1455,6 +1996,16 @@ module.exports = function register(socket, ctx) {
       if (cleanOptions.some(o => o.length > 100)) return;
       const multiVote = !!data.multiVote;
       const anonymous = !!data.anonymous;
+      // One optional picture per option, as an upload path on this server;
+      // anything else is dropped rather than rendered (#5648).
+      const rawImages = Array.isArray(data.images) ? data.images : [];
+      const images = options.map((_, i) => {
+        const u = typeof rawImages[i] === 'string' ? rawImages[i].trim() : '';
+        return UPLOAD_PATH_EXACT_RE.test(u) ? u : null;
+      }).filter((_, i) => options[i] && typeof options[i] === 'string' && options[i].trim());
+      const hasImages = images.some(Boolean);
+      // A picture poll can be laid out in columns (#5648).
+      const columns = hasImages ? Math.min(5, Math.max(0, parseInt(data.columns, 10) || 0)) : 0;
 
       if (floodCheck('message')) {
         return socket.emit('error-msg', 'Slow down — you\'re sending messages too fast');
@@ -1479,7 +2030,7 @@ module.exports = function register(socket, ctx) {
       const safeQuestion = sanitizeText(question);
       if (!safeQuestion) return;
 
-      const pollData = JSON.stringify({ question: safeQuestion, options: cleanOptions, multiVote, anonymous });
+      const pollData = JSON.stringify({ question: safeQuestion, options: cleanOptions, multiVote, anonymous, ...(hasImages && { images }), ...(columns > 1 && { columns }) });
       const content = `📊 Poll: ${safeQuestion}`;
       const result = db.prepare(
         'INSERT INTO messages (channel_id, user_id, content, poll_data) VALUES (?, ?, ?, ?)'
@@ -1493,12 +2044,15 @@ module.exports = function register(socket, ctx) {
         user_id: socket.user.id,
         avatar: socket.user.avatar || null,
         avatar_shape: socket.user.avatar_shape || 'circle',
+        border: socket.user.border || null,
+        borderTransform: socket.user.borderTransform || null,
+        animateProfile: socket.user.animate_profile || 'trigger',
         reply_to: null,
         replyContext: null,
         reactions: [],
         edited_at: null,
         thread: null,
-        poll: { question: safeQuestion, options: cleanOptions, multiVote, anonymous, votes: {}, totalVotes: 0 }
+        poll: { question: safeQuestion, options: cleanOptions, multiVote, anonymous, ...(hasImages && { images }), ...(columns > 1 && { columns }), votes: {}, totalVotes: 0 }
       };
       cleanOptions.forEach((_, i) => { message.poll.votes[i] = []; });
 
@@ -1666,6 +2220,60 @@ module.exports = function register(socket, ctx) {
     }
   });
 
+  // Mark every topic in a forum channel read for this account (#5641). Each
+  // topic's row moves to its latest reply, or 0 when it has none, so the dot
+  // comes back only for replies that land after this.
+  socket.on('mark-forum-read', (data) => {
+    if (!data || typeof data !== 'object') return;
+    const code = typeof data.code === 'string' ? data.code.trim() : '';
+    if (!code || !/^[a-f0-9]{8}$/i.test(code)) return;
+
+    const channel = db.prepare('SELECT id, is_forum FROM channels WHERE code = ?').get(code);
+    if (!channel || !channel.is_forum) return;
+
+    const member = db.prepare('SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?').get(channel.id, socket.user.id);
+    if (!member && !socket.user.isAdmin) return;
+
+    try {
+      db.prepare(`
+        INSERT INTO thread_reads (user_id, thread_id, last_read_reply_id)
+        SELECT ?, m.id, COALESCE((SELECT MAX(r.id) FROM messages r WHERE r.thread_id = m.id), 0)
+        FROM messages m
+        WHERE m.channel_id = ? AND m.thread_id IS NULL
+        ON CONFLICT(user_id, thread_id) DO UPDATE SET last_read_reply_id = MAX(last_read_reply_id, excluded.last_read_reply_id)
+      `).run(socket.user.id, channel.id);
+      for (const [, s] of io.sockets.sockets) {
+        if (s.user && s.user.id === socket.user.id) s.emit('forum-read', { channelCode: code });
+      }
+    } catch (err) {
+      console.error('Mark forum read error:', err);
+    }
+  });
+
+  // A reply that lands while you have the thread open on screen has been
+  // seen: record it so a reload, or another device, does not flag it (#5641).
+  socket.on('mark-thread-read', (data) => {
+    if (!data || typeof data !== 'object' || !isInt(data.parentId)) return;
+    const parentRow = db.prepare(
+      'SELECT m.id, m.channel_id, c.code as channel_code FROM messages m JOIN channels c ON m.channel_id = c.id WHERE m.id = ? AND m.thread_id IS NULL'
+    ).get(data.parentId);
+    if (!parentRow) return;
+    const member = db.prepare('SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?').get(parentRow.channel_id, socket.user.id);
+    if (!member && !socket.user.isAdmin) return;
+    try {
+      db.prepare(`
+        INSERT INTO thread_reads (user_id, thread_id, last_read_reply_id)
+        VALUES (?, ?, COALESCE((SELECT MAX(id) FROM messages WHERE thread_id = ?), 0))
+        ON CONFLICT(user_id, thread_id) DO UPDATE SET last_read_reply_id = MAX(last_read_reply_id, excluded.last_read_reply_id)
+      `).run(socket.user.id, data.parentId, data.parentId);
+      for (const [, s] of io.sockets.sockets) {
+        if (s !== socket && s.user && s.user.id === socket.user.id) s.emit('thread-read', { channelCode: parentRow.channel_code, parentId: data.parentId });
+      }
+    } catch (err) {
+      console.error('Mark thread read error:', err);
+    }
+  });
+
   // ═══════════════════════════════════════════════════════
   // THREADS
   // ═══════════════════════════════════════════════════════
@@ -1693,10 +2301,27 @@ module.exports = function register(socket, ctx) {
       'SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?'
     ).get(channel.id, socket.user.id);
     if (!member && !socket.user.isAdmin) return;
+    // A role gate on the channel covers its threads too (#5597).
+    if (!socket.user.isAdmin && !ctx.roleGateAllows(socket.user.id, db.prepare('SELECT id, role_gate FROM channels WHERE id = ?').get(channel.id))) return;
+
+    // Opening a thread marks every reply in it seen for this account, and the
+    // person's other devices drop the unread dot too (#5641).
+    try {
+      db.prepare(`
+        INSERT INTO thread_reads (user_id, thread_id, last_read_reply_id)
+        VALUES (?, ?, COALESCE((SELECT MAX(id) FROM messages WHERE thread_id = ?), 0))
+        ON CONFLICT(user_id, thread_id) DO UPDATE SET last_read_reply_id = MAX(last_read_reply_id, excluded.last_read_reply_id)
+      `).run(socket.user.id, parentId, parentId);
+      for (const [, s] of io.sockets.sockets) {
+        if (s !== socket && s.user && s.user.id === socket.user.id) s.emit('thread-read', { channelCode: parentRow.channel_code, parentId });
+      }
+    } catch (err) {
+      console.error('Thread read error:', err);
+    }
 
     const messages = db.prepare(`
       SELECT m.id, m.content, m.created_at, m.reply_to, m.edited_at, m.is_webhook, m.webhook_username, m.webhook_avatar, m.imported_from, m.is_archived,
-             COALESCE(m.webhook_username, u.display_name, u.username, '[Deleted User]') as username, u.id as user_id, u.avatar, COALESCE(u.avatar_shape, 'circle') as avatar_shape
+             COALESCE(m.webhook_username, u.display_name, u.username, '[Deleted User]') as username, u.id as user_id, u.avatar, COALESCE(u.avatar_shape, 'circle') as avatar_shape, u.border, u.border_transform, COALESCE(u.animate_profile, 'trigger') as animate_profile
       FROM messages m LEFT JOIN users u ON m.user_id = u.id
       WHERE m.thread_id = ?
       ORDER BY m.created_at ASC, m.id ASC
@@ -1709,10 +2334,9 @@ module.exports = function register(socket, ctx) {
     const replyMap = new Map();
     if (replyIds.length > 0) {
       const ph = replyIds.map(() => '?').join(',');
-      db.prepare(`
-        SELECT m.id, m.content, m.user_id, COALESCE(u.display_name, u.username, '[Deleted User]') as username
-        FROM messages m LEFT JOIN users u ON m.user_id = u.id WHERE m.id IN (${ph})
-      `).all(...replyIds).forEach(r => replyMap.set(r.id, r));
+      db.prepare(`${REPLY_CONTEXT_SELECT}
+        WHERE m.id IN (${ph})
+      `).all(...replyIds).forEach(r => replyMap.set(r.id, toReplyContext(r)));
     }
 
     const reactionMap = new Map();
@@ -1729,6 +2353,13 @@ module.exports = function register(socket, ctx) {
 
     const enriched = messages.map(m => {
       const obj = { ...m };
+      // Border fit travels with the message (like avatar) so it renders even when
+      // the author is offline. Parse the stored JSON into the op array the client folds.
+      obj.borderTransform = parseBorderTransform(m.border_transform);
+      delete obj.border_transform;
+      // Animation policy travels with the message too (offline-safe, like the border).
+      obj.animateProfile = m.animate_profile || 'trigger';
+      delete obj.animate_profile;
       if (obj.created_at && !obj.created_at.endsWith('Z')) obj.created_at = utcStamp(obj.created_at);
       if (obj.edited_at && !obj.edited_at.endsWith('Z')) obj.edited_at = utcStamp(obj.edited_at);
       obj.replyContext = m.reply_to ? (replyMap.get(m.reply_to) || null) : null;
@@ -1773,6 +2404,35 @@ module.exports = function register(socket, ctx) {
       'SELECT 1 FROM channel_members WHERE channel_id = ? AND user_id = ?'
     ).get(channel.id, socket.user.id);
     if (!tMember && !socket.user.isAdmin) return;
+    // A role gate on the channel covers its threads too (#5597).
+    if (!socket.user.isAdmin && !ctx.roleGateAllows(socket.user.id, db.prepare('SELECT id, role_gate FROM channels WHERE id = ?').get(channel.id))) return;
+
+    // ── Moderation controls (#5483) ───────────────────────
+    // This handler grew up alongside send-message but never picked up the
+    // checks that live there, so a thread reply was a way around all of them.
+    // @birdcrazy noticed links posting freely in threads; the mute bypass and
+    // the missing length cap were sitting in the same gap.
+    const tMaxRow = db.prepare("SELECT value FROM server_settings WHERE key = 'max_message_chars'").get();
+    const tMax = parseInt(tMaxRow?.value) || 2000;
+    if (content.length > tMax) {
+      return socket.emit('error-msg', `Message too long (max ${tMax} characters)`);
+    }
+
+    const tMute = db.prepare(
+      'SELECT expires_at FROM mutes WHERE user_id = ? AND expires_at > datetime(\'now\') ORDER BY expires_at DESC LIMIT 1'
+    ).get(socket.user.id);
+    if (tMute) {
+      const remaining = Math.ceil((new Date(tMute.expires_at + 'Z') - Date.now()) / 60000);
+      return socket.emit('error-msg', `You are muted for ${remaining} more minute${remaining !== 1 ? 's' : ''}`);
+    }
+
+    const tChannelRow = db.prepare('SELECT read_only FROM channels WHERE id = ?').get(channel.id);
+    if (tChannelRow && tChannelRow.read_only === 1 && !socket.user.isAdmin &&
+        !userHasPermission(socket.user.id, 'read_only_override', channel.id)) {
+      return socket.emit('error-msg', 'This channel is read-only');
+    }
+
+    if (enforceAutomod(content, { surface: 'message', channelId: channel.id })) return;
 
     const safeContent = sanitizeText(content);
     if (!safeContent) return;
@@ -1787,6 +2447,11 @@ module.exports = function register(socket, ctx) {
       const result = db.prepare(
         'INSERT INTO messages (channel_id, user_id, content, thread_id, reply_to) VALUES (?, ?, ?, ?, ?)'
       ).run(channel.id, socket.user.id, safeContent, parentId, replyTo);
+      // Your own reply is not news to you (#5641).
+      db.prepare(`
+        INSERT INTO thread_reads (user_id, thread_id, last_read_reply_id) VALUES (?, ?, ?)
+        ON CONFLICT(user_id, thread_id) DO UPDATE SET last_read_reply_id = MAX(last_read_reply_id, excluded.last_read_reply_id)
+      `).run(socket.user.id, parentId, result.lastInsertRowid);
 
       const message = {
         id: result.lastInsertRowid,
@@ -1796,6 +2461,9 @@ module.exports = function register(socket, ctx) {
         user_id: socket.user.id,
         avatar: socket.user.avatar || null,
         avatar_shape: socket.user.avatar_shape || 'circle',
+        border: socket.user.border || null,
+        borderTransform: socket.user.borderTransform || null,
+        animateProfile: socket.user.animate_profile || 'trigger',
         reply_to: replyTo,
         replyContext: null,
         reactions: [],
@@ -1804,10 +2472,9 @@ module.exports = function register(socket, ctx) {
       };
 
       if (replyTo) {
-        message.replyContext = db.prepare(`
-          SELECT m.id, m.content, m.user_id, COALESCE(u.display_name, u.username, '[Deleted User]') as username
-          FROM messages m LEFT JOIN users u ON m.user_id = u.id WHERE m.id = ?
-        `).get(replyTo) || null;
+        message.replyContext = toReplyContext(db.prepare(`${REPLY_CONTEXT_SELECT}
+          WHERE m.id = ?
+        `).get(replyTo));
       }
 
       // Emit to everyone in the channel who has the thread open
@@ -1838,6 +2505,9 @@ module.exports = function register(socket, ctx) {
         thread: {
           count: threadCount.count,
           lastReplyAt: lastMsg ? lastMsg.created_at : null,
+          lastReplyId: lastMsg ? lastMsg.id : null,
+          // Lets forum cards light up for everyone but the person who replied (#5641).
+          senderId: socket.user.id,
           participants: participants.map(p => ({ username: p.username, avatar: p.avatar }))
         }
       });

@@ -100,13 +100,13 @@
 }
 
 .btn-voice:hover { background: var(--bg-hover); color: var(--text-primary); }
-.btn-voice.active { background: var(--success); color: white; }
-.btn-voice.btn-danger { background: var(--danger); color: white; padding: 5px 10px; font-size: 14px; }
+.btn-voice.active { background: var(--success); color: var(--success-text); }
+.btn-voice.btn-danger { background: var(--danger); color: var(--danger-text); padding: 5px 10px; font-size: 14px; }
 .btn-voice.btn-danger:hover { background: #d93636; }
-.btn-voice.muted { background: var(--warning); color: #1a1a2e; }
+.btn-voice.muted { background: var(--warning); color: var(--warning-text); }
 .btn-voice.sharing {
   background: var(--danger) !important;
-  color: #fff !important;
+  color: var(--danger-text) !important;
 }
 
 .voice-active-indicator {
@@ -254,7 +254,13 @@
    VOICE VOLUME SLIDERS
    ═══════════════════════════════════════════════════════════ */
 
-.voice-user-item { display: flex; align-items: center; flex-wrap: wrap; }
+/* nowrap, not wrap: a wrapping flex line pushes whole items to a second row
+   rather than shrinking them, so as soon as a user picked up a badge (LIVE,
+   📹, 👁) the status icons dropped onto a row of their own — and because they
+   carry margin-left:auto they sat at the far right of it, reading as an empty
+   second row. The name already ellipsises (flex:1 + min-width:0 in
+   style.css), so keeping one line just truncates the name instead. */
+.voice-user-item { display: flex; align-items: center; flex-wrap: nowrap; min-width: 0; }
 .voice-status-icons { display: flex; gap: 2px; margin-left: auto; align-items: center; flex-shrink: 0; }
 .voice-status-icon { font-size: 12px; position: relative; display: inline-block; opacity: 0.25; line-height: 1; }
 .voice-status-icon.is-muted,
@@ -291,107 +297,48 @@
   font-weight: 600;
 }
 
-.you-tag {
-  font-size: 10px;
-  color: var(--text-muted);
-  background: var(--bg-tertiary);
-  padding: 1px 6px;
-  border-radius: 8px;
-  margin-left: auto;
-}
-
-.mobile-voice-join {
-  display: none;
-  width: 100%;
-  margin-bottom: 8px;
-  justify-content: center;
-}
-
-/* ── Voice User Stream Badges ─────────────────────── */
-
-.voice-stream-badge {
-  font-size: 10px;
-  padding: 1px 5px;
-  border-radius: 3px;
-  margin-left: 4px;
-  white-space: nowrap;
-  line-height: 1.2;
-  vertical-align: middle;
-}
-.voice-stream-badge.live {
-  background: rgba(255,0,0,0.18);
-  color: #ff4444;
-  font-weight: 600;
-  animation: live-pulse 2s ease-in-out infinite;
-}
-.voice-stream-badge.watching {
-  background: rgba(255,255,255,0.08);
-  color: var(--text-muted, #888);
-  font-size: 11px;
-}
-.voice-stream-badge.webcam {
-  background: rgba(80,180,255,0.15);
-  color: #5ab4ff;
-  font-size: 11px;
-}
-@keyframes live-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
-}
-
-/* ── Hidden Streams Bar (inside voice-controls) ──────── */
-
-.hidden-streams-bar {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 11px;
-  color: var(--text-muted);
-  flex-wrap: nowrap;
-  white-space: nowrap;
-}
-
-.hidden-stream-restore-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 5px 12px;
-  font-size: 11px;
-  font-weight: 500;
-  border-radius: var(--radius);
-  background: var(--danger);
-  color: #fff;
-  border: none;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: filter 0.15s;
-  height: 30px;
-  box-sizing: border-box;
-  line-height: 1.3;
-}
-.hidden-stream-restore-btn:hover {
-  filter: brightness(1.2);
-}
-
 /* ═══════════════════════════════════════════════════════════
    VOICE USER MENU (per-user volume/mute/deafen)
    ═══════════════════════════════════════════════════════════ */
 
+/* The "..." only renders on other people's rows. It was already hidden with
+   opacity:0 until hover, but opacity does not free the space: it stayed in the
+   flex flow with margin-left:auto and its own padding, so every other user's
+   badge and status icons stopped a button-width short of where your own row's
+   did. Nothing lined up down the column.
+   Taking it out of the flow and reserving the same slot on every row (see the
+   padding-right on .voice-user-item below) makes the columns agree whether or
+   not a row has a button. pointer-events keeps the invisible button from
+   swallowing clicks in that corner. */
 .voice-user-menu-btn {
+  position: absolute;          /* .user-item is position: relative */
+  right: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: none;
   border: none;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   font-size: 16px;
   cursor: pointer;
-  padding: 0 4px;
+  padding: 0;
   line-height: 1;
-  margin-left: auto;
-  opacity: 0;
-  transition: opacity 0.15s;
   letter-spacing: 1px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
 }
-.voice-user-item:hover .voice-user-menu-btn { opacity: 1; }
-.voice-user-menu-btn:hover { color: var(--text-primary); }
+/* Reserve the slot on every row, so rows without a button match those with one. */
+.user-item.voice-user-item { padding-right: 20px; }
+
+.voice-user-item:hover .voice-user-menu-btn,
+.voice-user-menu-btn:focus-visible { opacity: 1; pointer-events: auto; }
+.voice-user-menu-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
 
 .voice-user-menu {
   position: fixed;
@@ -504,7 +451,7 @@
 .voice-panel-btn:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--accent); }
 .voice-panel-btn:disabled { opacity: 0.32; cursor: not-allowed; filter: grayscale(0.6); }
 .voice-panel-btn:disabled:hover { background: transparent; border-color: var(--border); color: var(--text-muted); }
-.voice-panel-btn.muted { background: var(--warning); color: #1a1a2e; border-color: var(--warning); position: relative; }
+.voice-panel-btn.muted { background: var(--warning); color: var(--warning-text); border-color: var(--warning); position: relative; }
 .voice-panel-btn.muted::after {
   content: '';
   position: absolute;
@@ -514,8 +461,8 @@
   transform: rotate(-45deg);
   pointer-events: none;
 }
-.voice-panel-btn.sharing { background: var(--success); color: #fff; border-color: var(--success); }
-.voice-panel-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.voice-panel-btn.sharing { background: var(--success); color: var(--success-text); border-color: var(--success); }
+.voice-panel-btn.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 .voice-panel-divider {
   width: 1px;
   height: 22px;
@@ -523,7 +470,7 @@
   margin: 0 2px;
   flex-shrink: 0;
 }
-.voice-panel-leave { width: 28px; height: 28px; font-size: 12px; background: var(--danger); color: #fff; border-color: var(--danger); }
+.voice-panel-leave { width: 28px; height: 28px; font-size: 12px; background: var(--danger); color: var(--danger-text); border-color: var(--danger); }
 .voice-panel-leave:hover { background: #d93636; color: #fff; border-color: #d93636; }
 
 .voice-panel-header {
@@ -552,8 +499,8 @@
   flex-shrink: 0;
 }
 .voice-header-btn:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--accent); }
-.voice-header-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-.voice-header-btn.muted { background: var(--warning); color: #1a1a2e; border-color: var(--warning); position: relative; }
+.voice-header-btn.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.voice-header-btn.muted { background: var(--warning); color: var(--warning-text); border-color: var(--warning); position: relative; }
 .voice-header-btn.muted::after {
   content: '';
   position: absolute;
@@ -563,7 +510,7 @@
   transform: rotate(-45deg);
   pointer-events: none;
 }
-.voice-header-leave { background: var(--danger); color: #fff; border-color: var(--danger); }
+.voice-header-leave { background: var(--danger); color: var(--danger-text); border-color: var(--danger); }
 .voice-header-leave:hover { background: #d93636; color: #fff; border-color: #d93636; }
 
 .voice-settings-panel {

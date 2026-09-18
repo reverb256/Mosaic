@@ -11,6 +11,1429 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Haven uses [Sema
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Glyphs, a third look for the interface's icons (#5673).** Settings,
+  Interface Icons (the old Toolbar Icons) has Glyphs next to Monochrome and
+  Colorful Emoji. It redraws the icons across the whole interface with a
+  bundled Font Awesome font, through the new Haven Glyphs plugin, and leaves
+  message text, reactions and the pickers alone. The plugin and font are by
+  @bernardokcosta.
+- **The NSFW blur can be switched off (#5633).** Under Settings, next to
+  Hide NSFW channels, a switch that is on by default. Off, a topic marked
+  🔞 shows plainly with its tag still on it. Asked for by @quakeman00.
+- **A paperclip in the pop-out DM (#5663).** Pictures and files can be sent
+  from the pop-out DM with the button or by dropping them on it; paste was
+  the only way before. Middle-click opens a picture in a new tab there and
+  in a thread too. Reported by @quakeman00.
+
+### Fixed
+- **Caps Lock, Num Lock and Scroll Lock record as desktop shortcuts.** The
+  recorder sent them with the browser's spelling, which the desktop app's
+  shortcut system does not accept. Reported by Constooli on the desktop
+  tracker.
+- **Leaving the Braid layout brought back closed banners (#5671).** The
+  Update, Desktop app and Android pills came back at the top when switching
+  from Braid to another look, because the layout remembered a hidden banner
+  as visible. It remembers what it found now. Reported by @quakeman00.
+- **Picture poll thumbnails are no longer cropped (#5648).** A tall or wide
+  picture fits inside its square, and a poll in columns gets a wider box on
+  a big screen. Reported by @quakeman00.
+- **The edit box's drag bar is under the box (#5662).** It was above it,
+  where the first message in a channel had nowhere to drag up to. Dragging
+  down now makes the box taller. Reported by @quakeman00.
+- **"Discord relay failed: the resource is being rate limited."** When
+  Discord throttles a channel it says how long to wait; the bridge waited at
+  most ten seconds once and then gave up with Discord's own words, which read
+  as a fault. It now waits out anything up to thirty seconds, three times
+  over, with later messages queued behind, and when the wait is longer than
+  that the toast says so and how long. Reported by Andalishious.
+
+## [4.9.0] - 2026-09-15
+
+A release built from the tracker. The message box grows a mic for voice
+messages, a formatting guide with every markdown trick and slash command,
+and a switch that folds its buttons into one; times can follow a timezone
+saved to your account; forum topics open full width with a title bar, can
+be marked NSFW, and a forum's layout can be locked; picture polls sit in
+columns; theme authors get a static preview page; and a run of fixes, among
+them the Discord multi-picture bridge, colour markdown, encrypted DM
+pictures, and backups made without uploads. One new column is created on
+first start; nothing to run by hand.
+
+### Added
+- **Saved timezone and 12 or 24 hour clock.** Settings has a Localization
+  section (the old Language section, renamed) with a Configure Time button:
+  pick your timezone from the full list and a 12 or 24 hour clock, with a live
+  preview. The choice is saved to your account, so every device shows times
+  your way, and it is never shown to other users. Daylight saving is worked
+  out per timestamp. Nothing is asked at login: leave it unset and times
+  follow the browser as before, and Erase puts a saved zone back to that.
+  Thanks to @Bo0sted.
+- **Send later shortcuts (#5657).** Ctrl+Enter in the message box opens Send
+  later with your text, and the Send later box takes the same formatting
+  shortcuts and link paste as the composer. Thanks to @birdcrazy.
+- **A theme preview page for theme authors (#5631).** `public/theme-preview.html`
+  is a static copy of the app with sample content: markdown of every kind, a
+  picture, a poll, reactions, the member list, a profile card, the Settings
+  modal and a forum. Open it from a checkout in a live CSS editor, point its
+  toolbar at a .theme.css file, and see the theme applied to the real markup
+  with no server running. Requested by @quakeman00.
+- **Voice messages (#5665).** A mic button in the message box records
+  from your microphone; click it again, or Send, to post the recording as a
+  small player with its length, or Cancel to throw it away. Five minutes
+  tops. In an encrypted DM it is encrypted like any file and a click plays
+  it. Requested by @Gho6.
+- **A formatting guide in the message box (#5654).** The pen button next
+  to the timestamp opens two tabs: every markdown trick Haven understands,
+  each with its syntax and a live example, and a click wraps your selection
+  in it; and every slash command that works in the channel, bot commands
+  included. Requested by @quakeman00.
+- **One + button in place of the toolbar (#5654).** Settings, Layout,
+  Message Box has a switch that folds upload, emoji, GIF, poll, timestamp
+  and formatting behind a single + at the start of the box, so the box
+  keeps its width on a half screen. Off by default. Requested by
+  @quakeman00.
+- **Forum topics open full width (#5659).** A topic from a forum used to
+  slide out the same narrow panel a chat thread gets. It now takes the whole
+  chat column, with a title bar naming the channel and the topic, its tags
+  and flags, and the whole first post above the replies. A Side panel button
+  on the bar switches back, and the choice sticks. Requested by @quakeman00.
+- **NSFW forum topics (#5633).** A topic can be marked NSFW when it is
+  posted or edited, or from its right-click menu. Its picture and preview
+  are blurred behind a label until clicked, like a spoiler, the title stays
+  readable, and a 🔞 sits with its tags. Anyone who hides NSFW channels in
+  Settings does not see the topic at all. Requested by @quakeman00.
+- **Lock a forum's layout (#5656).** Next to Set as default there is a lock:
+  once on, only people who can change the channel's settings can switch the
+  view or tile shape, and everyone else sees the forum the way it was set.
+  The size slider stays for everyone. Requested by @quakeman00.
+- **Picture polls in columns (#5648).** Once an option has a picture, the
+  poll creator offers a Columns choice (2 to 5), with square thumbnails, so
+  a sixteen-way picture vote fits on a screen instead of one tall scroll.
+  Requested by @quakeman00.
+- **Middle-click opens a picture in a new tab (#5663).** Same as a link.
+  Requested by @quakeman00.
+- **The edit box has the composer's drag bar (#5662).** Pull it up to see
+  the whole message while editing. Reported by @quakeman00.
+
+### Changed
+- **Send later reads the time in your configured timezone.** The Send at
+  field now uses the same wall-clock picker as the /time command instead of a
+  native datetime-local input, so the moment you pick is anchored to your
+  configured timezone rather than whatever the browser reports. A hardened
+  browser that reports a false zone no longer schedules the message at the
+  wrong real-world time. With no timezone configured it falls back to the
+  browser as before.
+- **Links are underlined in chat (#5661).** A thin underline, so a link reads
+  as one on any palette rather than by colour alone; a colour span around a
+  link leaves the link its own colour. Asked for by @quakeman00 and
+  @birdcrazy.
+- **Chrome's local-network prompt no longer appears on opening chat.** The
+  voice module probed its STUN servers on page load, which gathers LAN
+  candidates, and Chrome now asks every visitor of a public site for
+  local-network access the moment that happens. The probe waits for the
+  first voice join. Traced by @Amnibro.
+
+### Fixed
+- **A Discord post with two or more pictures arrived blank.** Discord's own
+  client now sends those as a media gallery with an empty attachment list,
+  so the bridge relayed nothing; and when two picture links did come
+  through, the image check ran them together into one broken image. Both
+  fixed. Reported by Raidenphantom; the gallery cause was found by @Amnibro.
+- **Colour markdown around a link, in a quote, and in a spoiler (#5661).**
+  A link before the closing `#c` swallowed it into the address; text inside
+  a quote never took a colour at all; a list right after a quote lost its
+  first bullet; and coloured text or a link inside a spoiler showed straight
+  through the box. Reported by @quakeman00 and @birdcrazy.
+- **Open in New Tab and Save on a picture in an encrypted DM gave a blank
+  page (#5663).** The picture is decrypted in the browser and the feed lets
+  go of the decrypted copy once painted, so the address was dead. A fresh
+  copy is decrypted for the tab or the download. Reported by @quakeman00.
+- **The same slash command from two bots named the same bot in both channels
+  (#5635).** Each channel's suggestion now names its own bot. Reported by
+  @josolanes.
+- **A backup made without uploaded files could not be restored (#5660).**
+  Any backup with Messages ticked carries the whole database and restores
+  now; the uploads folder is only replaced when the backup has one.
+  Reported by @birdcrazy.
+- **Forum modal header and toolbar styling (#5652).** Thanks to @birdcrazy.
+- **Ctrl+E opens the emoji picker while editing a message (#5668).** The
+  edit box swallowed the shortcut. Thanks to @Bo0sted.
+- **The Banner Display entry in Settings is hidden when the server has no
+  banner (#5669).** The section already was; the entry in the list was not.
+  Thanks to @birdcrazy.
+
+## [4.8.0] - 2026-09-12
+
+Channel access moves to one place: a channel's Required roles now decide
+who is in it, and the role-side Grant and Revoke lists are gone (existing
+setups are converted on first start, and admins get a one-time notice).
+Around that, a batch of community work: forums get their own right-click
+menu, an edit-post composer, a default layout an admin can set, tile
+shapes, and one-topic image posts; polls take pictures; messages can be
+sent later; Auto-Mod gets word groups with weighted strikes; role menus can
+be edited after posting; and a run of fixes from the tracker. Two new
+tables and a few columns are created on first start; nothing to run by hand.
+
+### Added
+- **Edit a posted role menu (#5644).** Right-click a role menu message and
+  pick Edit role menu: tick or untick roles, change their emojis and reword
+  the text. The buttons and reaction chips people already see update in
+  place. Requested by @quakeman00.
+- **Edit a forum post from its card (#5650).** Edit post on a topic's menu
+  opens the composer with the title, tags and Closed box, and for the author
+  the text as well, so a topic can be reworded without hunting for the
+  message. Reported by @birdcrazy.
+- **Send later (#5638).** Right-click the Send button, or type /schedule,
+  to post a message at a time you pick, up to 30 days out. It waits on the
+  server, so it goes out whether or not you are online, and the same window
+  lists what is waiting with Edit and Cancel. Not available in direct
+  messages, which are encrypted in the browser. Requested by @birdcrazy.
+- **Pictures on poll options (#5648).** Each option in the poll creator has
+  a picture button; the picture shows above the option and a click on it is
+  a vote. Requested by @quakeman00.
+- **Word groups in Auto-Mod (#5614).** Settings, Admin, Auto-Mod has a
+  Words section: groups of words or phrases, each worth a number of strikes.
+  A message carrying one is blocked and the strikes count towards the
+  existing warn, mute and ban ladder, so a serious group can mute on the
+  first offence while a mild one takes several. Whole words only, case
+  does not matter, and staff above the skip level are not checked.
+  Requested by @quakeman00.
+- **Tile shapes for the galleries (#5645).** The forum gallery and the
+  Files & Media photos and videos tabs have a Shape picker next to the size
+  slider: square, or 4:3, 3:2 and 16:9 in wide and tall. The forum's
+  Set as default carries the shape too. Requested by @quakeman00.
+- **Hide the Send button (#5654).** Settings, Layout, Message Box has a
+  switch for people who only ever press Enter. Requested by @quakeman00.
+- **A default layout for a forum (#5656).** The list, gallery or feed view
+  and the tile size were only ever remembered per browser, so a forum an
+  admin arranged as a gallery opened as a list for everyone else. Anyone
+  who can change the channel's settings has a Set as default button in the
+  forum toolbar; readers who pick their own view afterwards keep it.
+  Reported by @quakeman00.
+
+### Changed
+- **Required roles are membership now (#5649).** Channel access lives in
+  one place, on the channel: right-click it, Channel Functions, Required
+  roles. Anyone who holds the roles (any of them, or all of them) is put in
+  the channel the moment they get them, from an admin or a role menu, and
+  taken out the moment they lose them. People added by hand keep their
+  membership but only see the channel while they hold the roles. The
+  role-side Grant and Revoke channel list, and the Reapply button, are
+  gone: on first start any channels a role used to grant become Required
+  roles on those channels, so nothing that worked stops working. Suggested
+  by @quakeman00.
+- **The GIF button hides when no GIF provider is set up (#5654).** On those
+  servers it only ever opened an empty picker. Suggested by @birdcrazy.
+- **A quote needs a space after the > (#5654).** A line like ">implying" or
+  ">.<" stays as typed; "> like this" and ">> nested" still quote, and a
+  lone ">" on its own line is no longer an empty quote. Requested by
+  @quakeman00.
+- **The live badge in the voice list stays put (#5636).** It sits at the
+  right edge ahead of the mute icon, so it no longer jumps when someone on
+  push to talk mutes and unmutes. Reported by @quakeman00.
+
+### Fixed
+- **Right-clicking a forum card opened two menus at once (#5650).** The
+  thumbnail gets the image menu, with a View image entry, and the rest of
+  the card gets a menu made for topics: Open, Edit post, Pin, Close, Copy
+  link, Protect, Delete. The chat menu's Edit, React and Thread are gone
+  from there: Edit stacked a second copy of the text on the card, React
+  opened the picker under the composer, and Thread is what a click does.
+  Reported by @quakeman00 and @birdcrazy.
+- **Clicking a forum thumbnail opened the picture and the topic at once
+  (#5646).** A click opens the topic; the picture is under View image on
+  the right-click menu. Reported by @quakeman00.
+- **A picture and text sent together made two forum topics (#5653).** They
+  make one topic now, with the text as its title and the picture on the
+  card. Reported by @birdcrazy.
+- **Watch Stream did nothing once the Join prompt was gone (#5636).** With
+  auto-accept off, the red badge and Watch Stream asked the sharer to resend
+  and landed back at the same prompt check, so the click only ever said
+  Requesting stream. Clicking either now counts as the accept. Reported by
+  @quakeman00.
+- **A slash command registered by two bots showed in one channel (#5635).**
+  The same command set up on two bots in two channels only suggested itself
+  in one of them. It shows in both. Reported by @josolanes.
+- **A role's Members list never showed who held it (#5643).** Every row said
+  Assign, the badge never appeared and there was no Remove, because the list
+  checked a field the server does not send. Reported by @quakeman00.
+- **Encryption menu under the DM safety notice with a banner up (#5639).**
+  The 4.7.0 fix was overridden whenever a server banner was showing.
+  Reported by @birdcrazy.
+- **"fenix is now known as fenix".** Saving your profile for a bio or
+  avatar change sent the unchanged name along and announced a rename to the
+  channel. Only an actual change is announced now, old name first.
+- **Show Status Bar was ignored in the Desktop app (#5647).** The bar is on
+  by default there, as the window's footer, and the switch now turns it
+  off. Reported by @quakeman00 and @birdcrazy.
+
+## [4.7.0] - 2026-09-11
+
+Forums grow up another notch and a big batch of community work lands. Topic
+cards carry an unread dot that follows your account between devices, with a
+Mark all read button; there is a feed view, tile size sliders, closed topics,
+and pinned topics stay on top. Amnibro's role work is in: role and channel
+templates, required roles on a channel, per-role upload caps and self-assign
+role menus. KLIPY joins GIPHY as a GIF provider, Braid and Compact stop
+stacking on Matrix, text can be underlined and coloured, and the pop-up
+notification limit takes a custom gap or Never. Fixes cover mutes (they now
+cover channels, not DMs, muted users cannot edit or react, and mods can
+unmute), Add to Channel is multi-select again, bot slash commands stay in
+their bot's channel, declined screen shares stay silent, the hover card, the
+encryption menu, the DM PiP away colour, sub-channel deletion, stream focus
+mode, the squeezed composer and deleted-file retention. One new table
+(thread_reads) is created on first start; nothing to run by hand.
+
+### Added
+- **Forum unread dots (#5641).** A topic you have not opened, or one with
+  replies since you last looked, shows a dot and an accent edge on its card.
+  Opening the topic clears it, and a Mark all read button in the forum
+  toolbar clears the lot. It is stored on your account, so reading on one
+  device clears it everywhere. Requested by @josolanes.
+- **Theme palettes stay exclusive.** Braid, Braid Light, and Compact file
+  themes no longer stack on Matrix (or any built-in) when their Settings
+  toggles are on. Layout lives in Theme → Layout (Braid and Compact) and
+  keeps the picker colors.
+- **Gallery tile size slider.** Files & Media photos/videos and the forum
+  gallery both have a size slider, from a tight mosaic up to poster tiles.
+- **Forum feed view.** A third layout next to List and Gallery: avatar,
+  text, then a full-width photo, like a Twitter timeline.
+- **KLIPY as a GIF provider.** GIF search now supports KLIPY alongside GIPHY
+  and Tenor. Set `KLIPY_API_KEY`, and use `PREFERRED_GIF_SEARCH` (klipy, giphy
+  or tenor) to pick which provider serves the picker when more than one key is
+  set. If the preference is unset or invalid it falls back to whatever is
+  configured: GIPHY first, then KLIPY, then Tenor last, since Tenor is
+  deprecated. Supplemental; existing GIPHY/Tenor setups are unchanged.
+- **Closed forum topics (#5624).** Edit title and tags on a topic has a Closed
+  box. A closed topic greys out, carries a Closed tag and sits below the open
+  ones, and reopening it puts it back. The author, admins and anyone with
+  manage messages in the channel can flip it. Requested by @birdcrazy.
+- **Pop-up notifications: a custom gap, and Never (#5619).** The limit on
+  desktop and browser pop-ups takes a number of minutes of your own now, and a
+  Never option stops the pop-ups altogether while sounds and unread badges keep
+  working. Requested by @quakeman00.
+- **Hide the crossed-out channel icons (#5615).** An admin setting hides the
+  small screen-share-off and music-off icons in the channel list for everyone,
+  for servers where most channels have those off and the icons were only
+  clutter. Requested by @quakeman00.
+- **Underlined text (#5621).** Wrap text in `__double underscores__`, or select
+  it and press Ctrl+U. Thanks to @birdcrazy.
+- **Coloured text (#5623).** Wrap text as `c#RRGGBB...#c` or `c#(R,G,B)...#c`
+  to colour it; Ctrl+Shift+F wraps a selection and leaves the cursor on the
+  colour. Thanks to @birdcrazy.
+- **Roles start from a template.** New Role in Role Management opens a picker:
+  Moderator, Helper, Trusted member, Event host, Media poster, Group, or Blank.
+  Each comes with a level, a colour and a permission set already ticked, and
+  everything stays editable afterwards. Requested by Dispencer2.
+- **Required roles on a channel (any of them, or all of them).** Channel
+  Functions has a Required roles row. Pick roles and choose Any or All: only
+  people holding them can see or open the channel, on top of membership, so a
+  channel can ask for "Verified AND Adult" instead of just one role. Losing a
+  role closes the channel live; admins are never gated; deleting a role drops
+  it from every gate. Requested by Dispencer2.
+- **Per-role upload cap.** A role can carry its own Upload cap (MB). The
+  server-wide Max Upload Size stays the floor for everyone, a role raises it for
+  its holders, and the highest cap among someone's roles wins. The composer's
+  size check and the upload routes agree on the same number. Requested by
+  Dispencer2.
+- **Channel templates.** The Create Channel section has a template picker:
+  Chat, Announcements (read-only, announcement mode, everyone added), Forum,
+  Private team, Event (temporary, 24 h), Slow chat, Text only. Any channel can
+  be kept as a template from Channel Functions, Save as template, for the whole
+  server. Requested by Dispencer2.
+- **Self-assign roles from a role menu.** Post a role menu from Settings, Roles:
+  a message that lists roles with an emoji each. Reacting with the emoji, or
+  clicking the button under the message, gives the reader the role, and undoing
+  either takes it back. Level-0 Groups are made for this. Requested by
+  Dispencer2.
+
+### Changed
+- **Deleted files no longer sit around forever.** Attachments from deleted
+  messages and channels are parked in a deleted-attachments folder, which was
+  only ever emptied when auto-cleanup was on with a max age set, and even then
+  only its top level. They now expire a week after deletion by default,
+  whether cleanup is on or not, and the window is a setting under
+  Auto-Cleanup. Files parked before this release count as expired on the
+  first run after updating.
+
+### Fixed
+- **A moderation mute no longer blocks private messages (#5640).** Being
+  muted stops you posting in the server's channels for the set time; DMs
+  still work, which is also how you can reach a mod about it. Not to be
+  confused with muting a channel or DM in your own notification settings,
+  which only silences alerts for you.
+- **CRT theme is easier to read (#5606).** The pixel font is swapped for the
+  cleaner Share Tech Mono terminal face, which reads at normal size in
+  sub-channel names and other fine print. Requested by @quakeman00.
+- **Declined screen shares still played their audio (#5636).** With "auto
+  accept screen shares" off, the sound from a share you had not joined played
+  anyway, with no tile to turn it down. The audio now waits until you join.
+  The red live badge next to a person in the voice list opens their stream,
+  which is the way back in after the pop-up is gone; its tooltip says so now.
+  Reported by @quakeman00.
+- **Muted users could still edit messages and react (#5640).** Editing an
+  existing message and adding a reaction now get the same "you are muted"
+  refusal as sending. Reported by @birdcrazy.
+- **No way to lift a mute (#5640).** The user menu has an Unmute entry next
+  to Mute for anyone who can mute, the person gets a toast when it happens,
+  and a mute set through the REST API no longer shows "muted for undefined
+  min".
+- **Add to Channel from the user menu is multi-select again (#5637).** The
+  right-click menu now opens the same tick-the-boxes picker as Settings, All
+  Members, instead of a one-click list that closed after the first channel.
+  Reported by @quakeman00.
+- **Bot slash commands in every channel (#5635, #5504).** A bot's commands
+  only appear in the slash menu while you are in the channel the bot is set
+  up in. Built-in commands are unchanged. Reported by @josolanes.
+- **Hover profile card closed on its own while someone was in voice
+  (#5608).** The member list is redrawn on every presence update, and the
+  card treated the vanished row as the pointer leaving. It now follows the
+  rebuilt row.
+- **Encryption menu drawn under the DM safety notice (#5639).** The channel
+  header sits above the messages column again, so its dropdowns are not
+  covered. Reported by @birdcrazy.
+- **DM PiP showed Away as grey (#5574).** Away is amber like the sidebar,
+  and offline stays grey.
+- **Deleting a parent channel deletes its sub-channels too.** They used to be
+  cut loose instead and turned up as top-level channels nobody had created.
+  Delete now asks a second time when there are sub-channels, names them, and
+  suggests moving any worth keeping to another channel or promoting them to
+  top level first.
+- **Other streams no longer vanish when the focused one ends (#5609).** With
+  several people sharing, double-clicking one stream to focus it hides the
+  rest. If that sharer then stopped, the viewer stayed in focus mode with
+  nothing left to show, so the remaining streams sat invisible in a blank box
+  until something reset it. Focus mode now drops back to the grid the moment
+  the focused stream ends, or is closed or minimised. Reported by @quakeman00.
+- **The text box no longer gets squeezed out by the toolbar (#5626).** In a
+  narrow message column, such as a half-screen browser window with both
+  sidebars open, the upload, emoji, GIF and poll buttons left only a few
+  characters of room to type. The toolbar now moves onto its own row when
+  there is not enough width. Reported by @quakeman00.
+- **Pinned forum topics stay on top.** A reply to another topic could push a
+  pinned one down the list, and a pinned topic with old activity could be
+  missing from the first page altogether. Pinned topics now load with the
+  first page and keep the top of the list, in the cards and in the feed.
+- **The DM PiP send button is a square that matches the thread panel's (#5601).**
+  Thanks to @birdcrazy.
+
+## [4.6.1] - 2026-09-09
+
+A round of fixes from the issue tracker and the community server. Discord
+emotes show as pictures on both sides of the Ferry bridge, the DM PiP shows
+who is actually online, #channel links survive a rename, thread replies get
+link cards, forum cards show the protection shield, the hover card and the
+role Collapse button behave, CRT text reads bigger, and the topic bar folds
+away. The homepage has full-size screenshots and a gallery. No migration
+steps; the one new column is added on first start.
+
+### Added
+- **The topic bar folds away (#5625).** A small arrow at its right folds the
+  bar to a thin strip, so "Click to set a topic" stops taking a line for
+  people who never will. It is per browser, and the fold survives channel
+  switches and reloads. Requested by @quakeman00.
+
+### Changed
+- **Homepage.** The logo leads the page, the screenshots are full size with a
+  Gallery you can step through with the arrow keys, the phone shot sits beside
+  Security and privacy, and a community channel shot follows the feature list.
+  The download section leads with the app, since most people need that and
+  not the server, and the Download button at the top takes you there instead
+  of grabbing the server zip.
+
+### Fixed
+- **CRT text reads bigger (#5606).** The theme's VT323 face is scaled up a
+  further notch, so sub-channel names and other fine print no longer read a
+  size smaller than every other theme. Reported by @quakeman00.
+- **Discord emotes show as pictures on both sides of the bridge.** A custom
+  emote relayed from Discord arrived as its bare `:name:` shortcode, and one
+  typed in Haven so it would show on the Discord side stayed as text here.
+  Haven now draws `<:name:id>` inline, fetching the picture once through the
+  server so nobody's browser talks to Discord's CDN, and a Haven `:name:` goes
+  out as the paired server's own emote of that name. Reported by Raidenphantom.
+- **The hover profile card stays put (#5608).** It closed itself three
+  seconds after opening even with the mouse still on the name, and the next
+  twitch of the mouse opened it again. It now stays while the pointer rests on
+  the name and closes when it leaves. Reported by @quakeman00, traced by
+  @birdcrazy.
+- **Collapse works on a role card with pending changes (#5607).** In Role
+  Assignment, Collapse only folded a card whose settings were unchanged, so a
+  pending add or an edited level ignored the button. It now folds the editor
+  and keeps the pending change for Save. Reported by @quakeman00.
+- **#channel links survive a rename (#5602).** A `#old-name` typed before a
+  channel was renamed stopped rendering as a link. Channels now remember their
+  former names, so the old reference still opens the channel and reads as its
+  current name. Reported by @birdcrazy.
+- **Link cards in threads (#5620).** A link posted as a reply in a forum
+  topic, or in any other thread, now gets the same preview card as it does in
+  the channel. Reported by @quakeman00.
+- **Forum topic cards show the protection shield (#5622).** A protected topic
+  now carries the shield on its card, and its right-click menu offers Unprotect
+  instead of Protect a second time. Reported by @quakeman00.
+- **The DM PiP shows the partner's avatar and live status (#5574, #5600).**
+  The PiP header only knew about people in whatever channel was on screen, so
+  a partner who was not in that channel showed as a grey dot with an initial
+  until the DM was opened full screen. The DM now carries its partner's avatar,
+  and presence for a DM is refreshed whenever either side connects, disconnects
+  or changes status, with the DM not on screen. Reported by @birdcrazy and
+  @TianLaiEric.
+- **The DM PiP send button lines up with the reply box (#5600).** It now has
+  the same height as a one-line reply box in every theme. Reported by
+  @TianLaiEric.
+
+## [4.6.0] - 2026-09-09
+
+Forums turn into proper forums, with topic cards, a gallery view, tags and a New
+Post button. Chat images now load only when they come near the screen, which
+cuts the desktop app's memory on a busy channel by a large margin. Channels can
+be marked NSFW and hidden, Settings has a search box, members can be kicked while
+they are offline, and the website has been rebuilt from scratch. No migration
+steps; the new columns are added on first start.
+
+### Added
+- **Forums read like forums (#5595).** A forum channel now opens as a list of
+  topic cards, newest activity on top, each with its title, tags, author, reply
+  count and first image, and a Gallery view of square tiles for art and
+  character sheets. The toolbar sorts by Recently active or Date posted,
+  filters by the channel's tags (match some or all), and a New Post button
+  opens a composer with title, body and tags. Replies still live in the
+  topic's thread and bump it. Admins keep the tag list in Channel Functions
+  (one per line, an emoji first if you like), and the author or a moderator
+  can retitle or retag a topic from its card. Requested by test2 and the RP
+  crowd, built by @Amnibro.
+- **NSFW channels (#5595).** Channel Functions has an NSFW switch, and Settings
+  has "Hide NSFW channels" for a phone in public. Requested by Dispencer2.
+- **Search inside Settings (#5595).** A search box at the top of the Settings
+  nav (or Ctrl+F while Settings is open) hides every section that does not
+  mention the word. Requested by Dispencer2.
+- **One way to create a channel (#5595).** The sidebar's Create Temp Channel
+  opens the same create form with Temporary already ticked instead of its own
+  prompt. Requested by Dispencer2.
+- **& and + in channel names (#5595).** Requested by Dispencer2.
+- **Inline images load on demand (#5587).** Chat images, stickers and link
+  preview pictures used to fetch the moment a message rendered, and every one
+  of the 100 messages kept on screen held its decoded bitmap, which was most of
+  the memory the desktop app used on a busy channel. They now load only when
+  they come near the viewport, closest first and three at a time, and are let
+  go again once they scroll far away or the window has been hidden for a while,
+  in the main chat, threads, DM pop-outs and search alike. A picture keeps its
+  size while unloaded so history never jumps. Measured by @Amnibro on the
+  desktop app: about 430 MB of a 700 MB process was decoded images.
+- **Attachments per message is an admin setting (#5561).** Uploads & Limits has
+  a Max Attachments per Message box (1 to 50, default 10). Dropping, pasting or
+  picking several files at once now queues all of them, in the main composer,
+  threads and DM PiPs alike, instead of keeping the first and dropping the rest.
+  The per-minute upload allowance follows the setting so a full drop is not cut
+  off part way. Requested by @Sheoji.
+- **Relayed screen share viewers get the gentler profile automatically (#5426).**
+  When a viewer can only be reached through a TURN relay, the share to that
+  viewer uses the encoder settings behind the "Gentler screen share for relay
+  connections" toggle, while viewers on a direct route keep the full-quality
+  one. On by default; a switch under Settings, Debug turns the detection off.
+  Suggested by @RCCore after confirming the profile on two setups.
+- **Visual effects follow you between desktop launches (#5589).** The effects
+  pick used to live only in the browser's local storage, so a desktop relaunch
+  that landed on a different storage origin came back with the theme's default
+  effects while the theme itself survived. The pick now syncs through your
+  server preferences the way the theme does. Reported by Dispencer2, fixed by
+  @Amnibro.
+
+### Changed
+- **Settings sections follow the nav order (#5596).** On both the user and
+  admin panels the sections now sit in the same order as the nav, so clicking
+  down the list scrolls one way instead of jumping around. The admin panel gets
+  the same scroll highlight the user panel had, plus a Terms of Service entry.
+  Reported and fixed by @birdcrazy (#5576).
+- **CRT theme text reads the same size as every other theme (#5590).** VT323's
+  glyphs sit small in their box, so the CRT theme always read a size smaller.
+  The face is scaled to match without touching spacing or avatars. Reported by
+  Dispencer2, fixed by @Amnibro.
+
+### Fixed
+- **Members can be kicked while they are offline.** Kick refused anyone who was
+  not connected to the channel at that moment ("use ban instead"), so a member
+  who had gone offline could not be removed. Kicking is a membership change, so
+  it now works on anyone who is a member, online or not; the kicked notice and
+  the online list only update when there is a live connection to tell. The
+  confirmation is a green toast now instead of a red one. Reported by
+  Dispencer2.
+- **Join Voice only shows where you can join (#5598).** The header and sidebar
+  buttons stayed up on the welcome screen and in channels with voice turned
+  off, and came back a few seconds after switching to such a channel because
+  the voice UI check treated a hidden button as a fault and put it back. Both
+  now follow the channel: no channel, voice off, or no voice permission means
+  no button. Reported by @birdcrazy.
+- **The Android banner stays dismissed (#5594).** Closing it, or ticking "Don't
+  show this again" on the Android promo, now keeps it gone on that account,
+  across reloads and devices. Nothing was writing the permanent flag before, so
+  it came back on every page load. Reported by @Nosirus.
+- **DM PiP header stuck on a grey dot and an initial (#5574).** The avatar and
+  status dot in the DM PiP header were drawn once when the panel opened, from
+  whatever the online list held at that moment, and never again. They follow
+  presence updates now. Reported by @birdcrazy.
+- **Layout density buttons work again (#5585).** A picker helper change in 4.5.0
+  left the Compact, Cozy and Spacious buttons unresponsive. Fixed by @birdcrazy.
+- **Channel and DM lists scroll while you drag near the edges (#5591).**
+  Dragging a channel to the top or bottom of a long sidebar used to stop there;
+  the list now scrolls along, faster the closer you hold to the edge. Reported
+  by Dispencer2, fixed by @Amnibro.
+- **Copy token copies the token, or says it could not (#5592).** The Copy
+  button under Require invite token reported success even when the desktop app
+  refused the clipboard write. It now goes through the desktop clipboard first
+  and shows an error with a hint if every route fails. Reported by Dispencer2,
+  fixed by @Amnibro.
+- **Soundboard hotkeys can be set and cleared from every layout (#5593).** The
+  sidebar soundboard showed a hotkey but gave no way to clear it or set one.
+  The grid, the pop-out and the sidebar now share the same controls, with a
+  finger-sized clear button in row layouts. Reported by Dispencer2, fixed by
+  @Amnibro.
+- **Every install path uses Haven's own certificate generator (#5586).**
+  4.5.0 taught the server to make its certificate itself, but `Start Haven.bat`,
+  `Install Haven.ps1` and the web installer still went looking for
+  `openssl.exe` first and reported a skipped certificate as done. They now call
+  the same generator, the certificate carries the CA and server-auth flags that
+  phones expect when you import it, and the guide and support page stop telling
+  people to install OpenSSL. Reported by MutantRabbit767, fixed by @Amnibro.
+
+---
+
+## [4.5.0] - 2026-09-07
+
+Forums finish taking shape, roles can be pinged, and Haven no longer depends on
+OpenSSL for its certificate: a fresh install comes up on HTTPS by itself, so voice
+and the mobile app work out of the box on Windows. Also in: timestamps that render
+in every reader's own timezone with a picker to make them, a Private toggle for
+existing channels, and a batch of fixes from the community. No migration steps;
+the one new column is added on first start. If you were running plain HTTP without
+meaning to, your links become https:// on the next start; set FORCE_HTTP=true if
+plain HTTP is on purpose.
+
+### Added
+- **Haven makes its own certificate.** When none exists at start and FORCE_HTTP
+  is not set, Haven generates a self-signed certificate with Node's own crypto,
+  no OpenSSL needed, so HTTPS works on a clean Windows install and voice, camera
+  and the mobile app work with it. Anyone who was running plain HTTP without
+  meaning to gets HTTPS on their next start; anyone who means it sets
+  FORCE_HTTP=true. The installer no longer reports a skipped certificate as done.
+- **Role mentions (#5579).** `@Moderators`, or any role name, lights up for
+  everyone holding the role and pings them like an @mention. The `@` picker
+  offers roles to anyone with the Mention everyone permission, the server disarms
+  role pings from anyone without it, and a switch under Settings, Sounds turns
+  role pings off for people who would rather not get them. Requested by
+  Raidenphantom and @birdcrazy.
+- **Private can be switched after creation (#5563).** Channel Functions has a
+  Private toggle. Going private keeps the current members; going public opens
+  the channel to the whole server, history included. Requested by @birdcrazy.
+- **Forums read as forums (#144).** The Reply action on a topic opens its thread
+  instead of quoting it as a new topic, every topic carries a Reply to this topic
+  button, the composer says it starts topics, and an empty forum explains how it
+  works.
+- **A timestamp picker (#5580).** The clock button in the input bar, or `/time` on
+  its own, opens a date and time chooser with a 24-hour or AM/PM toggle that
+  follows your own clock and every style previewed live, each with its own Insert
+  button. Thanks to @Bo0sted.
+- **Channel Scrolling setting (#5582).** Settings, Layout now offers separate
+  scrollbars for channels and DMs or one for the whole sidebar. Short windows use
+  the combined layout so the channel controls stay reachable. Thanks to @birdcrazy.
+- **Image Display settings live together (#5584).** Image Display Mode, Animated
+  Profile Pictures and Animated Images in Chat are one section now. Thanks to
+  @birdcrazy.
+- **Timestamps that follow the reader.** A message can carry an instant instead
+  of a wall-clock time, so everyone sees it on their own clock, which is the
+  thing that stops people turning up an hour late when a group is spread across
+  timezones. `/time 8pm` puts a token in your message box, and it accepts
+  `20:00`, `tomorrow 9am`, `2026-09-06 20:30`, `+2h` and a raw unix timestamp.
+  Seven display styles, including a relative one that counts itself down, and
+  hovering any of them spells out the full date. The syntax is Discord's, so
+  tokens survive the Ferry bridge in both directions and existing generators
+  keep working. Requested by test2.
+
+### Changed
+- **Forum feeds run newest first (#144).** The most recently active topic sits at
+  the top of a forum channel, a new topic or a fresh reply moves to the top, and
+  older topics load as you scroll down. Replies inside a topic's thread still read
+  top to bottom.
+
+### Fixed
+- **Invite links grant only the channels that were ticked (#5569, #5583).** An
+  invite made by someone who could not see every public channel used to drop the
+  invitee into all of them anyway, and unticking every box meant the same. Links
+  made before this release keep meaning what they meant. One thing changes for
+  new links: a channel created later is not added to them automatically. Thanks
+  to @birdcrazy.
+- **Deleting an account no longer hands its invite use back (#5562).** Uses are
+  counted on the link itself now, so a single-use link stays used.
+- **A nickname cleared on one device stopped coming back from another (#5560).**
+  Server-stored nicknames are the record; the old per-connect merge re-pushed
+  whatever a device still had cached, ghost self-nicknames included.
+- **Enlarging an image in an encrypted DM showed only the dark backdrop (#5568).**
+  The decrypted preview gives its memory back once painted, so the lightbox
+  decrypts the image again when you open it.
+- **Wide images no longer lose their edges in thumbnails (#5581).** Thanks to
+  @birdcrazy.
+- **A new forum channel showed as a plain # in the creator's sidebar** until the
+  next list refresh.
+- **The startup banner prints your LAN address** instead of a YOUR_IP placeholder
+  that read like a broken config (#5572).
+
+---
+
+## [4.4.1] - 2026-09-05
+
+One fix, for anyone hosting Haven without a certificate. Update if your friends
+see a plain white page with buttons that do nothing.
+
+### Fixed
+- **A Haven running without a certificate served a broken page to everyone but the
+  person who set it up.** With no certificate present, Haven falls back to plain
+  HTTP but still sent the header telling browsers to fetch every stylesheet and
+  script over HTTPS, on a port with nothing answering HTTPS. Visitors got an
+  unstyled page whose buttons did nothing, while the host saw a perfect page,
+  because browsers exempt localhost from that upgrade. The two headers that assume
+  HTTPS are now sent only when Haven is actually serving it. The Windows installer
+  produces this state whenever OpenSSL is missing, so it hit a self-hoster. Note
+  that microphone and camera still require HTTPS on any address other than
+  localhost, so voice needs a certificate or a tunnel.
+
+---
+
+## [4.4.0] - 2026-09-05
+
+A contributor-heavy release. The server side of native screen sharing for Haven
+Desktop lands off by default, invites can be copied as a ready-to-send email card,
+markdown formatting has keyboard shortcuts, and the Cloudflare tunnel finally works
+on a fresh Windows install. Promo popups now remember their dismissal on the account
+rather than in the browser. No migration steps.
+
+### Added
+- **Native screen sharing groundwork for Haven Desktop (#5555).** The server can
+  now negotiate a native, hardware-encoded screen share path with a Desktop build
+  that carries the helper. Off by default, opt-in from Settings, and the switch
+  only appears inside such a build. Browser sharing and per-app audio are
+  untouched. Thanks to @bernardokcosta.
+- **Copy an invite as an email card (#5559).** Each invite link has an envelope
+  button that copies a formatted invitation, in your theme and language and with
+  the server's branding, ready to paste into an email. Thanks to @birdcrazy.
+- **Markdown keyboard shortcuts (#5571).** With text selected, Ctrl/Cmd+I, Ctrl/Cmd+B,
+  Ctrl/Cmd+Shift+C, Ctrl/Cmd+Shift+X and Ctrl/Cmd+Shift+P wrap it in italic, bold,
+  code, strikethrough and spoiler markers. Works in the message box, threads, PiP
+  DMs and the message editor, which also gets the paste-a-link-over-text shortcut.
+  Thanks to @birdcrazy.
+
+### Fixed
+- **Cloudflare Tunnel on Windows never worked out of the box (#5575).** The installer's Cloudflare
+  option says "auto-downloads cloudflared", but nothing downloaded it and the tunnel module
+  only ever ran `cloudflared` from PATH, so a fresh install that picked Cloudflare always
+  ended in "cloudflared binary not found in PATH" (reported by a self-hoster 2026-09-05).
+  The tunnel module now looks on PATH, then in `<data dir>/bin`, and fetches the official
+  release binary into that folder on first start when neither has it (Windows and Linux;
+  macOS gets a `brew install cloudflared` hint). A failed download says exactly which file
+  to drop where. The installer pre-fetches the same file when Cloudflare is chosen.
+- **A refused port on Windows now says why.** `EACCES` on Windows is almost always a port
+  inside a Hyper-V/WSL reserved range rather than a privilege problem; the startup error
+  now points at `netsh interface ipv4 show excludedportrange protocol=tcp` and the
+  `winnat` restart instead of only mentioning ports below 1024.
+- **Replying to a bot showed [Deleted User] as the author (#5564, #5566).** Reply
+  banners now name webhook bots, imported messages and personas the same way the
+  message itself does. Thanks to @delenda-delenda.
+- **Emoji in soundboard names vanished after saving (#5565, #5567).** Upload and
+  rename stripped everything outside ASCII. Names now keep letters in any script,
+  emoji, flags and keycaps. Thanks to @delenda-delenda.
+- **Picking a Messages sound previewed nothing while the Notifications toggle was
+  off,** which is the default, so a new account could not try the sounds out. The
+  settings preview plays regardless of the toggle; the toggle still decides what
+  plays for real messages.
+- **Stream and video announcement bots bridged through Ferry lost their link and
+  thumbnail (#5557).** CouchBot-style promotion bots type the ping line ("X is now live")
+  and put the stream link, title, and thumbnail in a rich embed. Ferry only read
+  the embed when the Discord message had no text, so Haven got the ping line and
+  nothing to click or look at. Rich (bot-composed) embeds are now read alongside
+  the typed text: the Twitch / YouTube / Kick link and the thumbnail come through
+  with it. The promoted link is checked against the link policy on its own, so an
+  allowlist server that has not added a host (kick.com is not in the starter list)
+  drops just that link and still relays the announcement and its picture. Discord's
+  own unfurl of a typed link is still ignored so Haven does not preview it twice.
+  Thanks to @Amnibro.
+
+### Changed
+- **Promo popups and the recovery-codes notice remember Don't show again on your
+  account (#5570),** not in the browser, so privacy-hardened browsers that wipe
+  storage stop re-showing them. Closing a popup without ticking the box brings it
+  back next login. Dismissals recorded by older builds are carried over once, so
+  nobody sees a popup they already closed. Thanks to @Bo0sted.
+- **Login no longer re-asks for the 18+ and Terms checkboxes (#5570).** They are
+  captured when an account is created, which the server already records. The
+  login form carries a note that signing in accepts the current Terms, with a
+  link to read them. Thanks to @Bo0sted.
+- **Admin settings visibility comes from one access table (#5558).** Which
+  sections a moderator sees is now decided in one place instead of a dozen
+  special cases, and Auto-Mod, Guest Access and Stickers have their own entries
+  in the admin navigation. Thanks to @birdcrazy.
+- **Website:** desktop download links point at Desktop 1.4.30.
+
+---
+
+## [4.3.0] - 2026-09-03
+
+Forum channels and self-serve Groups are the big two, the whole interface is
+translatable now, and a large batch of contributor work landed alongside them: a
+Compact theme and layout, listening presence from your music player, the encryption
+groundwork for group DMs, GIPHY back as the GIF provider, and images that phones could
+see but desktops could not. No migration steps: the one new database column is added
+on first start.
+
+### Added
+- **Forum channels (#144).** Any channel can be a forum: tick Forum when creating it,
+  or flip it in Channel Functions. Every message in a forum channel is a topic, replies
+  go in that message's thread with a reply count shown on the topic, and a new reply
+  bumps the topic back to the newest end of the channel, right above the message box,
+  so old topics resurface instead of sinking. Requested by @ArtyDaSmarty and shaped in
+  the community chat.
+- **Groups, roles people join themselves (#5548).** A role at level 0 is a Group.
+  Members pick their own Groups from their profile settings, see which channels each
+  one grants, and can leave again, with no moderator involved. Thanks to @birdcrazy.
+- **The whole interface is translatable (#5551).** Every hardcoded string in the client
+  now goes through the language files, with Portuguese carried along and the other
+  languages falling back to English one string at a time. The tests treat English as
+  the base, so adding an English string no longer requires writing the Portuguese for
+  it. Thanks to @bernardokcosta.
+- **Compact theme and Compact Layout plugin (#5549, #5552).** A dense graphite Theme
+  API v1 theme, and an optional plugin that folds the server rail into the sidebar and
+  docks account and voice controls in its footer, switchable with Ctrl+Alt+C. Both are
+  off by default. Structural plugins now share one layout owner, so Braid and Compact
+  hand the layout back and forth cleanly. Thanks to @bernardokcosta.
+- **Theme safe mode (#5545).** If a theme or plugin makes the page unusable, open
+  `/app.html?haven-safe-mode=1` to load without them and reset your choices.
+  Thanks to @bernardokcosta.
+- **Listening presence (#5523).** Your profile card can show what you are playing. A
+  music player that can run a plugin or a script (Havidrome for Navidrome is the first)
+  posts to a personal webhook URL from Settings, Activity, and the card shows the track
+  with cover art and a live progress bar. The contract is in `docs/listening-api.md`.
+  Thanks to @Bo0sted.
+- **Group DM encryption groundwork (#5499).** The crypto core and key distribution for
+  end to end encrypted group DMs, with a test suite written as attacks rather than happy
+  paths. No interface yet. Thanks to @Amnibro.
+- **Voice connectivity test (#5542).** Admin settings can now test the STUN and TURN
+  servers Haven will use and say which ones answer, and the TURN troubleshooting notes
+  point there first.
+- **Paste a link over selected text to make a markdown link (#5553).** Works in
+  channels, threads and DM windows. Thanks to @birdcrazy.
+- **One right-click menu for people (#5554).** Right-clicking a name in the member list
+  or on a message opens one menu with the profile actions and, for moderators, the
+  role, channel and moderation actions behind a divider. Clicking an avatar on a profile
+  card opens it full size. The hover preview card stays, with a switch under Settings,
+  Chat to turn it off, and the gear buttons stay and open the same menu. Thanks to
+  @Bo0sted.
+- **Braid spacing levels (#5494).** Compact, Cozy and Spacious, plus readable ink on the
+  Android badge. Thanks to @Amnibro.
+
+### Changed
+- **Full image mode uses the whole message width.** The largest image setting was
+  capped at well under half of a desktop chat pane, so it never read as large.
+- **invite_users opens the Admin tab (#5470).** Holders of that permission saw an Admin
+  tab that did nothing when clicked. The three places that gated it now share one check.
+- **GIPHY is the supported GIF provider again (#5546).** Tenor is no longer offered for
+  new setups; an existing Tenor key keeps working if no GIPHY key is set. Thanks to
+  @Amnibro.
+- **`npm test` runs the suite serially,** so a green run means what it says.
+- **Website:** desktop download links point at Desktop 1.4.29.
+
+### Fixed
+- **Images that showed on Haven Mobile were blank on desktop (#5550).** Signed Discord
+  links from Ferry and bots were escaped before the media proxy fetched them, so they
+  404ed. Thanks to @Amnibro.
+- **Screen share and webcam teardown on leaving voice (#5426).** Leaving voice used to
+  fire renegotiations at peers that were about to close, and a stale continuation could
+  wipe out a share started right after rejoining. Per-peer work also runs concurrently
+  now instead of one viewer at a time. For anyone still seeing stutter through a TURN
+  relay there is an opt-in Debug toggle, Gentler screen share for relay connections, to
+  try and report back on.
+- **Braid grouped main channels into the wrong sub-channel card (#5507).** Thanks to
+  @Amnibro.
+- **A direct message with someone you also share a group DM with** always opens the
+  direct message, not the group.
+- **Profile saves no longer clear your Groups, and Group channel lookups no longer leak
+  private channel names (#5548).**
+- **The listening webhook checks its token before reading the upload (#5523),** and the
+  open profile card only redraws when something on it actually changed.
+
+---
+
+## [4.2.0] - 2026-09-01
+
+Voice connectivity is the theme. A server whose admin had set their own STUN server
+could lose calls between browsers entirely from one typo, with nothing anywhere saying
+why, and it took the people who reported it days to work out what was happening. Also
+a written contract for theme authors, a way for bots to clear messages in bulk, and a
+dependency sweep that clears everything npm audit was flagging. No migration steps.
+
+### Added
+- **Themes have a written contract now (#5544).** Custom themes kept breaking on Haven
+  updates because nothing said which parts were safe to build on. Theme API v1 names the
+  variables and hooks that will not change without a major version, with an authoring
+  guide and a test that fails the build if the contract drifts.
+- **Bots can clear messages in bulk (#5541).** One call deletes up to 100 recent messages
+  in the bot's channel instead of a request per message, with attachments and thread
+  replies cleaned up properly. Thanks to @bernardokcosta.
+- **Haven checks the STUN servers an admin configures (#5542).** Only the built-in ones
+  were ever tested, so a list of your own was taken on trust. Dead entries are named in
+  the browser console, and if every one is unreachable with no TURN set, the existing
+  connectivity warning says so.
+
+### Fixed
+- **One wrong STUN server no longer takes out voice between browsers (#5542).** Setting
+  your own STUN servers replaces Haven's built-in ones rather than adding to them, so a
+  single bad entry left browsers unable to find each other across networks while phone
+  clients carried on working. That combination reads as Haven breaking web calls rather
+  than as a wrong address, which is exactly how it was reported. If every configured
+  server is unreachable and there is no TURN relay, Haven now falls back to its own for
+  that session. Your setting is left exactly as you saved it, and the warning still names
+  what to fix. Found by @Vinylwalk3r, @birdcrazy and @dronostyka between them.
+- **eturnal and coturn setup notes,** with the one setting people miss called out in both.
+
+### Security
+- **Cleared 12 dependency advisories, 7 of them high.** Two sit directly under the chat
+  transport rather than off in build tooling: the websocket library could disclose
+  uninitialised memory and be driven to exhaust memory, and the Socket.IO parser could be
+  exhausted through binary attachments. Every Haven message travels through both. Lockfile
+  only, and nothing crossed a major version.
+
+---
+
+## [4.1.0] - 2026-08-30
+
+Mostly hardening and follow-through on 4.0.0, plus bots can play audio in voice now.
+Two of the fixes below are worth updating for on their own: deleted attachments were
+still downloadable, and bot message deletion was throwing where nobody could see it.
+No migration steps.
+
+### Added
+- **Bots can play audio into a voice channel (#5540).** A bot with voice permission can
+  upload an MP3, WAV or OGG through the webhook API and have it played to everyone in the
+  channel it is sitting in, with a queue, skip and stop. Files are checked by their actual
+  bytes rather than their extension, capped at 10 MB and 5 minutes, served only through a
+  short-lived link tied to the current track, and deleted as soon as they finish playing.
+  Nothing is kept across a restart. Thanks to @bernardokcosta.
+- **Gentler screen share for relay connections (Settings, Debug).** For the long-running
+  screen-share desync over TURN in #5426. Lowers the video bitrate and lets the encoder
+  drop frames rather than hold framerate and build a backlog, which is the wrong tradeoff
+  once a relay falls back to TCP. Off by default and only the person sharing needs it, so
+  please try it and say whether it holds.
+- **eturnal documented as a TURN alternative,** with the setting people miss called out in
+  both it and coturn (#5542).
+
+### Security
+- **Deleted attachments were still downloadable (#5540 review).** Moving a file into
+  deleted-attachments is how Haven takes it away, and the guard could be walked past with
+  three different spellings of the same path. Filenames do not change when a file is moved
+  there, so anyone who saw an attachment while it was posted could still fetch it
+  afterwards. Deleting a message now actually revokes the file.
+- **Registration could hand out admin on a server that already had one (#5539).**
+  `ADMIN_USERNAME` is meant to bootstrap the first admin and nothing more, which is how
+  login already treated it, but registration promoted on the username alone. Rename the
+  admin account or remove it while another admin holds the server, and the next person to
+  register the old name arrived as a second admin. First-run setup and genuine
+  re-bootstrapping are unchanged.
+
+### Fixed
+- **Attachment cleanup was throwing on every path that ran it from `server.js`.** A missing
+  import meant the retention sweep and the orphaned-channel cleanup silently never
+  relocated anything, and a bot deleting one of its own messages with an attachment
+  returned a 500 with the message already gone from the database but still on everyone's
+  screen until they reloaded.
+- **Screen shares that stopped reaching other people (#5543).** Renegotiation offers above
+  16 KB were rejected without a word, and a sender whose answer went missing stayed stuck
+  until it rejoined the call. Offers and answers are now correlated, an unanswered one
+  rolls back and retries with a budget, and the size limit is raised while staying clear of
+  the transport's own frame limit. Thanks to @bernardokcosta.
+- **An SSO admin could not hand over admin at all (#5539).** Transfer Admin asks for a
+  Haven password, and an account that signs in through OIDC has none, so on an SSO-only
+  server the feature was closed rather than awkward. Those accounts confirm with their
+  authenticator code instead, with two-factor required first.
+- **Two memory leaks in the client (#5426).** Decrypted images in DMs never released their
+  blobs, so scrolling a media-heavy conversation locked up memory for the life of the tab,
+  and the custom dropdowns added a document listener per open that was never removed. Both
+  found by @RCCore.
+- **Ferry relayed image-bot posts as links instead of pictures.** SaucyBot and similar post
+  the image as an embed, and only the summary was coming across, so Haven had a link to
+  unfurl rather than a picture to show. Reported by Raidenphantom.
+- **Theme picker inconsistencies (#5536, #5537).** Several bundled themes were missing from
+  the admin Default Theme list, the login page showed a different set again, and the button
+  for the active theme did not read as active. Thanks to @birdcrazy. The login page also
+  stopped pinning whichever default a visitor happened to see first, so changing the server
+  default now reaches people who have not signed in.
+- **"Automatic" in the language picker now names the language it resolved to (#5538),** so
+  a server default that is being applied correctly no longer looks like it is being ignored.
+
+## [4.0.0] - 2026-08-27
+
+This is a big release, and the version reflects that. There are no migration steps and
+nothing to reconfigure: the database changes only add to what is already there, and the new
+Discord bridge arrives switched off, so a server that updates keeps working the way it did.
+It does touch shared ground, including the path every message takes on its way out, so take
+a backup before you update (Settings, Server Admin Settings, Backup) the way you would with
+any large release. Ferry in particular is brand new and has not been through a real
+deployment yet, so please report anything that looks off.
+
+### Added
+- **Ferry, a two-way bridge between Haven and Discord.** Haven channels can now be paired
+  with Discord channels, and messages cross in both directions. A relayed message shows up
+  on Discord under the Haven author's own name and picture rather than as one anonymous
+  bot, and Discord messages arrive in Haven with the sender's name and avatar. Each pairing
+  picks its own direction, either two-way or one-way, and whether it mirrors every message
+  in the channel or only the ones a member deliberately addresses with the `=>` prefix, with
+  autocomplete for picking a destination. There is also an opt-in one-way Discord DM. Set it
+  up in Settings, Server Admin Settings, Ferry: it walks you through creating the Discord
+  bot, and the whole thing runs inside Haven, so nothing new has to be exposed to the
+  internet. Sending is gated behind a new Send to Discord role permission which starts off
+  for everyone, so nobody can reach another server's Discord until you say so. Pings are off
+  by default, and `@everyone` stays blocked even when you turn them on. Set `PUBLIC_URL` in
+  your `.env` if you want Haven avatars and images to appear on the Discord side.
+- **Search is now a panel instead of a takeover.** Results open over the member list the way
+  Discord does it, the panel survives channel switches and closes only when you close it,
+  public channels share one panel, and each DM keeps its own.
+- **A secure voice gateway for bots (#5531).** Bots can join voice with access that is
+  scoped and granted deliberately rather than assumed.
+- **A RepoCloud deploy button (#5532).** One more hosting route for people who would rather
+  not run the server themselves.
+
+### Fixed
+- **The welcome screen no longer hides behind the server banner.** On the no-channel-selected
+  view, "Welcome to Haven" was rendering underneath the banner image. It had been that way
+  since banners shipped.
+- **Steam and Spotify linking works for accounts that have changed their password.** Linking
+  failed with "Link session expired" for anyone who had changed their password, had an admin
+  reset it, or used a recovery code. New accounts were unaffected, which is why it looked
+  random rather than broken.
+- **Channel code rotation leaves clients in a working state (#5521, #5525).** Rotating a
+  channel's code could leave the people already in it holding a stale one, and voice now
+  recovers properly afterwards too.
+- **The docked soundboard handle points the right way.** Its arrow was mirrored against the
+  members handle directly above it, and its position on mobile was wrong.
+- **Invite link refinements (#5524).** An invite whose uses are all spent now reads as used
+  rather than sitting there saying Active until it expires, and the expiry dropdown is wide
+  enough for its longest option.
+
+### Changed
+- **Admin settings are grouped.** The admin sidebar was twenty entries in one flat run while
+  the user side already had headings. It is now sorted into Server, People & Access, Content,
+  Integrations, and Maintenance, with related entries sitting together. Nothing was removed.
+- **Admins can clear an integration key, not just overwrite it (#5529).**
+- Added josolanes to the donor credits.
+
+---
+
+## [3.50.0] - 2026-08-25
+
+### Fixed
+- **Steam and Spotify account linking works again (#5527).** Clicking Link opened a window that said "Internal server error" and nothing else, on every server. Two files had ended up requiring each other in a loop, so one of them started up holding an empty copy of the other and the token check it needed was simply missing. It has been broken since 3.45.0, which went unnoticed because the failure only appears at the moment somebody clicks Link, not at startup. Existing API keys and settings need no changes. Reported by @birdcrazy.
+- **Images and GIFs stop vanishing on a tab left open for days.** Remote images are fetched through Haven rather than directly, so the sender's link cannot see who viewed it, and that used a pass that expires after about two days. It was collected once when the page loaded and never renewed, so a browser tab left open over a weekend quietly lost the ability to load any new remote image, GIFs from the picker included, leaving a blank gap where the picture should be. Reloading fixed it, which is exactly why it looked random. The pass now renews on a timer, on reconnect, and one more time automatically if an image fails anyway.
+- **Automatic language selection (#5522).** Haven did not reliably pick up the language your browser is set to. Contributed by @bernardokcosta.
+
+### Added
+- **Find someone in the member list without scrolling.** There is now a search box above the member list in the right sidebar. It filters as you type, Escape or the small cross clears it, and the Online and Offline counts show how many people matched rather than the full total.
+- **Members are ordered by role instead of purely alphabetically.** Admins and moderators now sit at the top of the member list, with names ordered alphabetically inside each role level, so the people who can actually help are where you would look for them. Online and offline stay separated as before, and anyone who has hidden their role badge is not given away by their position. Suggested by @birdcrazy.
+- **See what is signed in to your account, and sign the rest out.** Settings has a Sessions pane listing the devices with Haven open right now, showing the browser, the address it is connected from and how long it has been there, with your current one marked. Alongside it is a button that signs out every other device, which asks for your password first so someone at your unlocked screen cannot lock you out of your own account. Because a device that is signed in but closed will not appear in the list, that button is the thing to use if you think somebody else has your account. Suggested by TGS.
+- **Freeze animated images in chat (#5526).** Looping GIFs in a busy channel can be hard to read past. Settings now has Animated Images in Chat, with the same three choices as the animated avatar setting: leave them looping, play only while you point at one, or show the first frame and nothing more. It affects only what you see. It is set to leave them looping unless you change it, on the grounds that a GIF is something a person chose to post rather than background decoration. Requested by @birdcrazy.
+- **Profile picture borders, and a say in whether avatars animate (#5510).** Contributed by @Bo0sted.
+
+### Security
+- **Signing out really signs out.** Changing your password disconnected your other devices and looked like it had worked, but the old sign-in stayed valid for direct requests to the server, so someone who had got hold of it could keep using it. Anyone who changed their password *because* their account was compromised would have watched the intruder disappear and still left them a way in. Both halves are now checked in the same place, so an old sign-in stops working everywhere at once. Found while building the sessions pane above.
+
+### Documentation
+- **Voice over a shared-device Tailscale setup (#5518 follow-up).** The Tailscale method shares one machine, but Haven voice is peer-to-peer and needs a path between every pair of people in the call, not just to the host. The result is one-directional audio: everyone hears the host, the host hears nobody. The guide now explains why and gives the two fixes, adding a TURN server or putting everyone on the same tailnet, along with the tradeoff between them.
+- **Spotify rich presence needs a Premium account (#5528).** Spotify restricted its Web API to paid accounts, and Haven's setup steps still told people a free account was fine, so anyone following them hit a wall several steps in with no explanation. The steps and the README now say so up front. Last.fm remains the recommended music source and has no such requirement. Reported by @birdcrazy.
+
+## [3.49.0] - 2026-08-22
+
+### Added
+- **Haven speaks Brazilian Portuguese (#5516).** The eighth language out of the box, and the only one currently translated in full: every one of the 1,634 phrases in the interface, where the other locales still fall back to English in places. The first pass was machine-generated and then reviewed line by line by a native speaker, which is the part that matters. Contributed by @bernardokcosta.
+- **See how much upload storage each member is using.** Admins had no way to tell who was filling the disk short of going through the uploads folder by hand, which meant a server could not answer the simple question of whether one person was using more than their share. All Members now shows a size per member, with a breakdown of channels, DMs and avatars behind a tooltip, a filter that ranks everyone by storage used, and a running total for the server. Sizes are read from disk when the list is built, so deleting a file drops it from the count with no bookkeeping to fall out of step. Moderator-only, and files uploaded before this show as an unattributed total rather than being guessed at. Direct message attachments are encrypted, so only their size is known, never their contents. Suggested by TGS and bo0sted.
+- **Google can be taken out of the picture (#5514).** Two connections nobody could opt out of are gone. The fonts are now bundled with Haven instead of being fetched from Google Fonts on every visit, and the Content-Security-Policy has been tightened so they cannot quietly come back. The Google STUN servers have been dropped from the voice fallback pool, which now runs on three independent providers. Mobile push is a separate matter, since Google is what wakes an Android phone, so it gets a switch instead: Settings, Security, FCM Privacy. Turning it off skips FCM entirely and leaves browser notifications alone, so only turn it off if everyone on your server has a UnifiedPush app installed. Contributed by @Bo0sted.
+- **Invite links can stand in for the registration token (#5508).** On a server with the registration token switched on, an invite link still left the recipient facing a box asking for a code they did not have. There is now an admin switch that lets a valid invite link register on its own, off by default. An invite link arriving at the sign-in page opens the registration tab straight away, and a link that turns out to be expired or used up puts the token box back rather than leaving the person stuck. New links now default to a single use and 30 days rather than unlimited and never. Contributed by @birdcrazy.
+- **Bots on your own network can be called back (#5518).** Haven refuses to send webhook callbacks to private addresses, which is right by default but blocked the ordinary case of a bot running on the same LAN or in a neighbouring Docker container. Setting `HAVEN_ALLOW_PRIVATE_CALLBACKS=true` allows them. It is deliberately an environment variable and not a switch in the admin panel, because setting a callback URL only needs the webhook permission rather than full admin, so a switch in the interface could be flipped by the very account the guard exists to contain. Cloud metadata addresses stay blocked either way. Reported by @josolanes.
+- **Admins are told when the disk reserve runs out (#5505).** The reserve added in 3.48.0 keeps a server recoverable, but the only sign it had kicked in was a line in the server log and an error for whoever happened to try an upload, so an admin not watching either found out when people started complaining. Admins now get a warning in the header the moment uploads start being refused, with the free space and the reserve size behind it, and it clears itself once there is room again. Admins only, and it does not nag: it appears when the state changes, not on a timer. Reported by @KentuckyFriedBlyat.
+
+### Fixed
+- **Banned users no longer turn up in @mention autocomplete.** The list feeding autocomplete joined users to channel membership without checking for a ban, and banning deliberately leaves those rows alone so that unbanning restores membership, so a banned person kept appearing as a suggestion. They now disappear the moment the ban lands, for people already sitting in the channel rather than only after switching away and back.
+- **Channel lists refresh after a main channel is deleted (#5519).** Every other change to a channel told everyone's sidebar to update, and deletion was the one that did not, so a deleted channel sat there until something else happened to refresh it. Contributed by @birdcrazy.
+- **Last.fm album art loads again (#5515).** Last.fm began serving cover images from a subdomain that was not on the allowlist, so the art came back blank for anyone using it for music presence. Contributed by @Bo0sted.
+
+### Security
+- **Webhook callbacks are much harder to point somewhere they should not go (#5520).** The old check read the callback address as text, which meant it could be walked around by writing the same address a different way, and it never looked at what a hostname actually resolved to. It now rejects addresses written in decimal, hexadecimal or octal, the IPv4-in-IPv6 forms, and URLs carrying credentials; it inspects every address a hostname resolves to and refuses the lot if any of them is private; it pins the connection to the address that passed the check, so a second DNS answer cannot swap in a private one after the fact; and it does not follow redirects. One deadline now covers name lookup and delivery together. Contributed by @bernardokcosta.
+  - **Worth knowing if you run Haven in Kubernetes or Docker:** because hostnames are now resolved and checked, a callback pointing at something like `http://mybot.default` that lands on an internal address will be refused where it previously went through. Set `HAVEN_ALLOW_PRIVATE_CALLBACKS=true` to keep it working.
+
+### Documentation
+- **Point `SSL_CERT_PATH` at `fullchain.pem`, not `cert.pem`.** With Let's Encrypt or certbot, `cert.pem` holds only your own certificate and leaves out the intermediate one above it. Browsers quietly paper over the gap by fetching the missing piece themselves, so the site looks fine in Chrome while curl, link checkers and various mobile and API clients reject it. Haven's own setup script already copies the right file, so this only affects anyone setting the path by hand.
+- **Background images in custom themes.** Documented how to set one, which was possible but not written down anywhere.
+
+## [3.48.0] - 2026-08-19
+
+### Added
+- **Every thread in a channel, in one list (#5506).** Threads were only reachable from the message that started them, so finding one again meant scrolling the channel back to wherever it began. There is now a thread button beside the files and media button in the channel header. It lists every thread in the channel with who started it, how many replies it has, when it was last active and a preview of the opening message, and a search box filters on the text or the author. Picking one jumps to the message and opens the thread. Sorted by most recent reply, so whatever is still alive sits at the top. Not shown in DMs, since that content is encrypted and the server has nothing readable to list. Collected and mocked up by @birdcrazy.
+- **Display names in any script (#5509).** Display names were limited to English letters and digits, so anyone whose name is not written in Latin script had to transliterate it. They now accept letters, numbers and accent marks from any script, so Chinese, Japanese, Korean, Cyrillic, Arabic, Hebrew and the rest all work, and the 2 to 20 limit counts characters as you see them rather than as the computer stores them. What the old rule was quietly protecting is kept: no dots or slashes, so a display name still cannot be a working link, and no invisible characters, so two names cannot look identical while being different and nobody can flip the sidebar backwards. Requested by @Amatsutsumi.
+- **A role permission for seeing every channel (#5512).** Linking channels to a role only covers the channels you remember to tick, so a server-wide Mod role still needed adding to each new channel by hand. There is now a permission that means exactly what it says: holders see every channel, including ones created later, without anyone keeping a list. Only the server owner can grant it, since it reveals private channels, and taking it away takes the access back rather than leaving a former moderator sitting in every private channel. Contributed by @Amnibro, asked for by a self-hoster running a community server.
+- **Haven now keeps disk space in reserve (#5505).** A full disk did not just stop uploads, it wedged the server: deleting a message is itself a write, so an admin could not clear the files that filled the disk, and the way out was closed. Haven now refuses to hand out the last of the space, keeping 512 MB free by default so there is always room to delete things. Set `HAVEN_DISK_RESERVE_MB` if that does not suit your setup. Chat is deliberately unaffected, since a server that stops accepting messages is a poor way to learn your disk is full. Reported by @KentuckyFriedBlyat.
+- **Invite buttons on the member lists (#5496).** Inviting someone used to mean finding the invite section in Settings. There are now buttons in the user list and All Members, shown only to people who are actually allowed to invite. Contributed by @birdcrazy.
+- **A cancel button on uploads in progress.** The progress bar above the composer had no way to stop an upload once it started, so a wrong or oversized file had to finish before anything else could be sent. Cancelling now aborts every file in flight, including the rest of a queued batch, and reports as a plain notice rather than an upload failure.
+
+### Fixed
+- **Signing in through Authentik and other providers that keep the trailing slash (#5501, #12).** Haven was stripping the trailing slash off the identity provider address when it read the setting back, so what you typed was stored correctly but never matched what the provider published, and sign-in failed with the provider unreachable. It now works whether or not the address ends in a slash, and the sign-in token is checked against the provider's own spelling. Existing accounts are unaffected either way: editing that slash no longer stops Haven recognising people who have already signed in with it. Found and fixed by @birdcrazy, reported by @RCCore and @jesjhoward.
+- **A role editor button that did nothing, with no error (#5511).** On a server whose files were updated without the server itself being restarted, the newer buttons in Role Management quietly did nothing: no toast, no error, no saved change. The reporter spent 45 minutes on an Admin role Save before finding out why. Those actions now say plainly when the server has not answered and point at the real cause. Contributed by @Amnibro.
+- **Haven refuses to start on a half-updated install rather than misbehaving later (#5513).** Updating by copying a new release over an old folder never deletes anything, so a file that Haven split into a folder years ago can still be sitting there, and it wins. One self-hoster had been running months-old chat code underneath completely current files, which explained a long trail of unrelated-looking problems. Haven now checks for this at startup and stops with the file to delete, instead of booting a mix of versions. Contributed by @Amnibro.
+- **A double divider in the channel right-click menu (#5502).** The separator above Rename Channel and Create Sub-channel stayed put even when neither was shown, so people without those permissions saw two lines with nothing between them. Contributed by @birdcrazy.
+- **Moderators who can ban can now unban.** Undoing a ban was the last thing in the ban family still restricted to admins, so a moderator could ban someone, see them in the list, turn down their appeal, and then be told only an admin could reverse it, which left the person who made the mistake unable to fix it. It carries the same rank rule as banning: you can lift your own bans and those of anyone below you, but not an admin's and not a peer's.
+- **Nesting a channel under a parent needed the wrong permission (#5500, #5492).** Anyone allowed to create channels could make a top-level channel and move it under a parent they had nothing to do with, which is what the manage-sub-channels permission exists to prevent. Moving a channel in now costs the same permission on the same parent as moving it out, in both directions, so the two halves of the same job stop disagreeing. Reported and fixed with @birdcrazy.
+- **Braid Layout: Join and Create a Channel came back, and the Encryption entry works (#5497).** In the Braid layout those two sections could not be reopened once collapsed, and the Encryption menu entry did nothing at all. Contributed by @Amnibro, reported by @birdcrazy.
+- **The new invite buttons could not be translated.** They pointed at text that did not exist in the English file, and English is what every other language falls back to per phrase, so no locale could pick them up.
+
+### Documentation
+- **A design for end-to-end encrypted group DMs (#5498).** Group DMs do not exist yet, so this is a written plan rather than a feature: one encryption key per group per period, handed to each member over the private channel that already exists between them, replaced whenever the membership changes. Written by @Amnibro.
+
+## [3.47.0] — 2026-08-13
+
+### Added
+- **The emoji picker is now built from Unicode's own list instead of a hand-written one.** The old list was maintained by hand and had gaps. The server now builds the whole categorised set from Unicode's published `emoji-test.txt` and serves it, and your device draws the glyphs with its own font, so they look the way they do everywhere else on your machine. A copy of the current standard ships with Haven, so this works with no internet at all. There is also an optional monthly check for a newer standard under Settings → Admin → Emojis, off by default, which you can pin on or off for the whole server with `UNICODE_EMOJI_AUTO_UPDATE` if you would rather it never reached out. Custom emojis are untouched either way, and the bundled flag images stay, since Unicode's own flags do not render on every system. Thanks to @Bo0sted.
+
+### Fixed
+- **Giving a role a new permission did nothing until everyone reconnected.** Ticking a box in Role Management saved correctly but never reached the people who held that role, so a moderator granted, say, the IP-ban permission kept the old set and the option stayed missing from their ban menu until they signed out and back in. Everyone holding an edited role now gets their permissions refreshed on the spot. The same event was also throwing an error in the background, which stopped the Role Management window refreshing for any other admin watching it.
+- **Sending a message could push a notification of it back to your own phone.** If a device had ever been signed into a second account, the earlier account's notification registration stayed behind pointing at that same device. Notifications skip whoever sent the message, but that leftover registration counted as somebody else, so it was a valid target that happened to be your own phone. Signing in now takes the device over from any previous account, and existing duplicates are cleared once on startup. This mattered most on the Android app, where the registration never expires on its own, so it would not have sorted itself out with time. Thanks to @Bo0sted.
+- **White button text on light themes.** Buttons like Join and Send draw their label in white on the theme's accent colour, which is fine on the default purple but close to invisible on the lighter themes. Tron, Ice, CRT, Nord, Dracula, Minecraft, Zelda, HALO, LoTR, Elden Ring, Dark Souls, Scripture, FFX and Daylight now use a dark label taken from their own palette, as does the bundled Braid theme, which was the worst of them. Custom themes can set `--accent-text` to do the same. Matrix and Fallout are unchanged, since their buttons were already dark with a glowing outline by design.
+- **The Voice & Connectivity settings had no entry in the sidebar (#5493).** The STUN and TURN section was reachable only by scrolling past Limits and noticing it, unlike every other admin section. It now has its own sidebar entry. The guide also explains it, including the part that catches people out: a TURN server set in Settings wins, and your `TURN_*` environment variables are ignored while it is filled in. Thanks to @josolanes.
+- **Clearing a message while editing it now offers to delete it** rather than quietly cancelling the edit. Thanks to @Bo0sted.
+- **Spoilers no longer leak their contents.** Custom emojis, inline code and code blocks all showed straight through an unrevealed spoiler, and a link wrapped in a spoiler hid its own text while its preview card sat below showing the title, description and image in full. All of them are now hidden until the spoiler is opened. Thanks to @Bo0sted.
+- **Typing `::` to pick a persona no longer fights the emoji autocomplete**, and the persona avatar in that list is cropped to a small circle instead of rendering full size. Right-clicking a misspelled word while editing a message now opens the browser's own spell-check menu instead of Haven's. Thanks to @Bo0sted.
+- **Emoji with a skin tone were not being enlarged** when sent on their own, because the tone counted as leftover text. Thanks to @Bo0sted.
+
+### Documentation
+- The bundled Braid themes and the two bundled plugins are now covered in the guide. They ship switched off, so an admin has to publish a theme before it appears in the picker, which is the usual reason one looks missing after an update. The Docker note explains that themes and plugins live in the image rather than the data volume. Thanks to @birdcrazy.
+
+## [3.46.0] — 2026-08-10
+
+### Added
+- **A "Flag after" list of accounts that sit online and silent.** New Settings → Moderation section. An account can stay connected and showing green for hours doing nothing — no messages, no voice, no status change — which is what a script parked to watch a server looks like, since a real client trips auto-away when the person steps away. The list shows accounts that have been online and idle past a threshold you set (default 4 hours), longest-idle first. It is read-only, something to look at rather than an automatic action, and it is available to admins and to moderators who can act on it (ban, kick, audit, or view members). A moderator sees only this section, none of the admin-only ones.
+- **An invite-users permission.** Handing out invite links used to require admin or manage-server, so letting someone bring people in meant handing over the whole server. There is now a permission that covers exactly that. Holders see and edit only the links they made, capped at 25, and cannot touch the server-wide code or vanity link. Redeeming a link only ever joins public, top-level channels, same as before.
+- **The admin panel now says which settings come from an environment variable.** Server name, STUN, TURN and the GIF keys can be set in the panel or through the environment, with the stored value winning. Each of those fields now shows the environment value as a placeholder and a note saying which variable it comes from, so an admin who set `SERVER_NAME` in their compose file no longer opens Settings to a blank box with no idea whether it took. Secrets are reported as present without showing the value.
+- **A short identity reminder the first time you open a DM.** Haven does not verify who anyone is, and on an open server someone can register a name matching a person you trust and message you as them. A small dismissable notice at the top of a DM reminds people to check before sharing anything. Shows once, on both the popped-out and full-pane DM views, with a "don't show again" button.
+
+### Fixed
+- **Pasting a file into a thread posted it instantly.** A stray Ctrl+V dropped an image straight into the thread with no chance to cancel. Threads now hold pasted and dropped files as removable previews and only send them when you send the reply, like the main and DM composers already do. Reported by test1.
+- **Channel management leaked outside the channel it was granted on (#5467).** Creating a sub-channel accepted a global create-channels permission, so anyone allowed to start their own channel could add rooms inside channels they had nothing to do with. It now requires manage-sub-channels on that specific parent, and the menu only offers the Channel Functions and Create Sub-channel buttons in channels where you actually hold the permission, instead of showing buttons whose saves would be refused.
+- **Attachments outlived the messages that pointed at them.** Deleting a channel dropped its messages but left every file ever posted there orphaned in uploads. And in DMs, deleting an image you had just posted left the file behind, because the client read attachment URLs out of the last rendered batch and a just-posted image was never in it. Both now clean up the files, skipping any that another surviving message still links to.
+
+## [3.45.0] — 2026-08-10
+
+### Added
+- **Sign in with your own identity provider (#12).** Members can now sign in with an account from Authentik, Keycloak, Authelia, Auth0 or anything else that speaks OpenID Connect, instead of a Haven password. Set the issuer address and client ID under Settings → Security, put the client secret in your `.env` as `OIDC_CLIENT_SECRET`, and a sign-in button appears on the login page. The secret is deliberately kept out of the database so your backups never carry an identity-provider credential around with them.
+
+  Encrypted DMs are unlocked by a key derived from what you type when you sign in, and someone signing in through a provider never types a password into Haven. Those accounts are asked to set a separate encryption passphrase the first time they sign in, and for it again on each new device. It never reaches the server in any form, so nobody can reset it, including the server admin, and the setup page says so rather than leaving it to be discovered later. Getting it wrong is safe: the stored key is left alone instead of being overwritten, so your other devices keep working.
+
+  A federated account never inherits admin from the directory and never takes over an existing local account, so a directory user who names themselves after your admin gets an ordinary account with a suffixed name. Linking a provider sign-in to a Haven account you already have, and signing out of the provider when you sign out of Haven, are not included yet. Suggested by @Lordingard, with an implementation sketch from @Amnibro.
+
+### Fixed
+- **A channel setting the server refused would still look like it had changed.** Every row in the Channel Functions panel applies its new value the moment you click it so the switch feels instant, but when the server turned the change down, nothing put the row back. The result was a message saying the setting had not changed sitting next to a switch showing that it had. Reported against Welcome Messages, though it applied to every row in that panel.
+- **The blank bar under the debug footer in the desktop app.** Desktop builds before v1.4.26 drew their own footer bar and reserved a strip of space for it. Newer Haven versions hide that footer, but an out-of-date desktop install still reserves the space, leaving an empty bar pinned under the status bar. That reservation is made from inside the desktop app, which is why no amount of fixing it here ever worked. Haven now overrules it, so the debug footer is the last thing on screen whichever desktop version you are running.
+- **Follow-up messages did not line up with the message above them.** When you send several messages in a row, only the first shows your avatar and the rest indent to match it. The two indents were written out separately in five places and two of them disagreed, so on the Spacious density and under both Braid themes the follow-ups sat slightly to the left of the first message. One is now worked out from the other, so they cannot drift apart again, and a custom theme that follows the same convention gets it right for free.
+
+## [3.44.2] — 2026-08-09
+
+### Fixed
+- **Transferring admin now adds the new admin to every public channel.** Admins deliberately cannot leave channels, so that whoever runs the server can see what happens in all of them. That guarantee quietly broke on a transfer: the incoming admin only had whatever channels they had already joined as a member, and no way to add themselves to the rest. They are now joined to all of them automatically. Hiding a channel from your own sidebar is a personal view setting and still works.
+
+## [3.44.1] — 2026-08-08
+
+### Fixed
+- **YouTube embeds showed "Error 153" instead of playing.** Since 3.41.0 Haven has told browsers not to say which page a request came from when they load something on another site, which is what stopped X from refusing to play its videos. YouTube wants the opposite: with nothing to identify the page hosting it, its player refuses to start. The two embeds Haven creates (chat links and the Listen Together player) now pass along just the server address, with no page path and no invite code, which is enough for YouTube and still keeps invite links out of it. Reported by @BolVerK.
+- **Thread replies skipped every message check (#5483).** The thread handler grew up beside the normal one and never picked up its checks, so a reply in a thread ignored the link policy, went through even while the sender was muted, ignored a channel being read-only, and had no length limit. Caught by @birdcrazy.
+- **Popped-out DMs did not show the link warnings (#5483).** The check that decides whether a view is a DM was looking for a marker that does not exist in the page, so a DM popped out over a normal channel was never recognised as a DM and its links were left clickable. Full-screen DMs were unaffected. Also caught by @birdcrazy.
+
+## [3.44.0] — 2026-08-08
+
+### Fixed
+- **The "check direct messages" auto-mod setting did nothing for encrypted DMs (#5483).** DMs are end-to-end encrypted, so the server receives ciphertext and genuinely cannot read the links inside. The toggle existed anyway, which quietly promised protection it could not deliver. The check now runs in the recipient's app instead, after it decrypts and before anything is clickable: a link to a domain you have not allowed renders as plain text with a warning rather than a working link, and images from those domains are replaced with a click-to-load placeholder. Senders are told before the message goes out. The rules themselves moved into one file that both the server and the browser load, so the two cannot drift into disagreeing about what a link points at. The setting's description now explains what it actually does, including that it depends on the recipient's app implementing it. Thanks to @birdcrazy for catching it.
+- **Screen sharing could get stuck in a renegotiation loop (#5426).** When a share dropped frames, a watchdog asked the sharer to renegotiate after about six seconds. The renegotiation delivered a new stream, which restarted the watchdog with a fresh counter, so the give-up limit that was supposed to stop this was never reached. On a connection that was dropping frames for bandwidth reasons rather than signalling reasons, each renegotiation interrupted the stream and caused the next stall. Requests are now capped at three per sharer per two minutes with a widening gap between them, and the cap is cleared when a sharer deliberately starts a new share. Diagnosed by @RCCore from WebRTC-internals captures.
+- **Double-clicking the screen-share button started two shares at once (#5426).** The join-voice button has had a guard against this for a while; the screen-share button did not, so a double-click or a laggy UI could put two SDP negotiations in flight against each other and leave the stream stalled with garbled audio.
+- **Audio is now given priority over video during a screen share (#5426).** When a share ramps up to 1080p the encoder takes the whole uplink for a moment, audio packets queue behind it, and the browser fills the gap with synthesised samples, which is the robotic warble people hear. Audio is a fraction of video's bandwidth, so prioritising it costs the picture almost nothing and keeps speech intelligible through the ramp.
+- **Screen-share audio arriving before its video ended up in the voice mixer permanently.** Track order is not guaranteed, and the code meant to hold early audio until its video showed up was never actually reached, so that audio was filed as voice and stayed there. It is now held briefly and re-checked, falling back to voice if no video follows so nobody's speech can go missing.
+
+## [3.43.0] — 2026-08-07
+
+### Added
+- **Haven fetches remote images itself now, and clients never contact other sites.** Previously an image link in a message was loaded straight from wherever it was hosted, in every viewer's browser. That handed the owner of that link the IP address and browser details of everyone who scrolled past it, without anyone clicking anything and with nothing on screen to suggest a request had been made. Haven now fetches each image once, caches it on disk for 30 days, and serves it from your own server. Covers inline images, markdown images, link-preview thumbnails and revealed hidden images. A pleasant side effect, and the reason Discord does the same: an embed keeps working after the original link expires or the host goes offline, so old conversations stop rotting. On by default, with a size shown in Settings → Security and a switch to turn it off if bandwidth is tight. Thanks to @MutantRabbit767 for pushing on this.
+- **Link-preview videos no longer phone home on their own.** The poster image comes from the cache and the video itself does not preload, so the remote host is contacted only if someone actually presses play. Video is still streamed from the source rather than proxied; that is a deliberate limit, since relaying video needs range requests and considerably more bandwidth.
+- **Protections are on out of the box.** Auto-mod, allowlist link mode, the 24-hour hold on links from new accounts, and the image proxy all default to on, for new installs and existing ones alike. The two settings that can genuinely break something stay off and must be chosen deliberately: relay-only voice, which needs a TURN server, and automatic IP bans, which can catch bystanders on shared connections. If you turn any of this off, it stays off.
+
+### Fixed
+- **Moderators with the ban permission can ban from the sidebar.** The ⛔ option in the member gear menu was gated on being an admin, even though the server has always accepted the `ban_user` permission. Moderators could ban from the admin members list but not from the sidebar they actually work in, which made it look like their permission was not working.
+- **The "also ban IP" option can finally be granted to a role.** `ban_ip` was accepted by the server but missing from the role editor's permission list, so there was no way to tick it for anyone. That made the IP-ban checkbox on the ban dialog admin-only in practice, no matter what a moderator's role said. The permission now appears in the role editor, and the checkbox correctly reads server-wide permissions rather than only channel-scoped ones.
+
+## [3.42.0] — 2026-08-07
+
+### Added
+- **Auto-Mod: a configurable link policy for the whole server.** New section under Settings → Auto-Mod. Pick a mode (allowlist blocks everything you have not approved, blocklist only stops domains you name), manage the domain list from the same panel, and blocked content is rejected the moment it is sent, so it never reaches anyone else. It checks messages, edits, DMs, display names, status text, bios and channel topics, because a link parked in a profile reaches just as many people as one posted in a channel. Twenty common domains are added to the allowlist on first run to get you started, and the panel shows the most-blocked domains of the past week with one-click "allow" for anything caught by mistake. Off by default; existing servers see no change until an admin enables it.
+- **Link previews are now gated on the same domain policy.** This one is worth understanding even if you skip the rest: Haven renders linked images and preview thumbnails directly from the other site in every viewer's browser. That means a hostile link handed its author the IP address and browser details of everyone who scrolled past the message, with nobody clicking anything. With previews restricted to allowed domains, no client is ever told to fetch from a domain you have not approved.
+- **New accounts can be stopped from posting links for a set number of hours.** Applies even to allowed domains. This is the rule that breaks the register, post a link, get banned, register again loop, and it does it without needing to recognise the link.
+- **Warn, mute and ban escalation.** Blocked attempts accumulate as strikes over a rolling window, with configurable thresholds for each step and an optional matching IP ban. Admins are never escalated against, and strikes can be cleared per user.
+- **Relay-only voice, under Settings → Security.** Haven voice is peer-to-peer, which means that by default everyone in a call can see everyone else's IP address. It is simply how the connection gets made: no click, no prompt, no indication it happened. Turning this on routes voice through your TURN server so participants only ever see the TURN server's address. It needs a TURN server configured first and Haven will not let you enable it without one, since voice cannot work otherwise.
+- **IP bans accept CIDR ranges** (`203.0.113.0/24`, `2001:db8::/64`). An IPv6 subscriber is normally handed an entire /64, so banning one of their addresses accomplished nothing.
+
+### Fixed
+- **IP bans only half-applied.** The web gate and the voice/chat connection gate disagreed about what an address is: one saw `1.2.3.4`, the other saw the same address in its IPv6 form. Banning someone blocked their web requests while their live connection carried on working. Both now use one shared address format, and banning an IP disconnects anyone already connected from it, including everyone inside a banned range.
+- **IP bans behind a reverse proxy recorded the wrong address entirely.** If Haven runs behind nginx, Cloudflare or similar, every connection was logged under the proxy's address rather than the visitor's. Ticking "also ban IP" on a ban would therefore have banned the proxy and locked out every user on the server. Addresses now respect the same `TRUST_PROXY` setting the rest of Haven uses.
+- **The per-address connection limit did nothing behind a proxy,** for the same reason: every visitor shared a single bucket.
+- **Message rate limiting was per connection, not per person.** Two browser tabs bought twice the send rate, and reconnecting reset the limit outright. It now applies per account, so the cap means what it says.
+
+## [3.41.0] — 2026-08-05
+
+### Added
+- **A Security section in admin settings, starting with the Referrer-Policy header (#5475).** Haven used to hardcode how much of your page address browsers share with other sites. It is now a setting under Settings → Security, with the safe choices listed first and plain-language descriptions of what each one shares. Six of the eight standard policies are offered; the two that would send your full page address to other sites are deliberately left out, because Haven invite links live in that address. Thanks to @Bo0sted.
+- **Braid Layout v1.5 (#5477).** The in-call controls that stock Haven keeps in the right sidebar (camera, screen share, soundboard, listen together, and the settings panel with the stream quality pickers) now live in a dock at the bottom of the left sidebar, so a call has everything in reach without opening the People panel. The server strip handles any number of servers on one row instead of stacking them vertically, switching between Braid and the classic layout is one click in both directions (or Ctrl+Shift+B), and Mod Mode's drag handles no longer leak into the strip. Thanks to @Amnibro.
+- **Channel creators and channel moderators can invite people to private channels (#5466).** Previously this was admin-only, which meant the person who made a private channel could not add anyone to it.
+
+### Changed
+- **Twitter/X video embeds now play without any setup.** X refuses to serve its videos to anyone whose browser says where the request came from, and Haven's old default said exactly that, so every X video embed showed a still frame and a dead play button on every Haven server. The default is now Same-Origin, which sends nothing to other sites while still working normally inside your own server, so it shares strictly less than before. If some other site turns out to want a referrer and one of its images stops loading, Settings → Security has the old value at the top of the list, labelled as the pre-3.41.0 default.
+- **Read-only channels hide the message box instead of showing one that rejects you (#5468).** The composer is now hidden per channel when a read-only override applies.
+- **The desktop app banner can be dismissed, and no longer appears inside the desktop app itself.** Its X button now closes it for good rather than bringing it back on the next load.
+- **The update banner clears itself once the server is up to date**, instead of sitting there after you have already updated.
+
+### Fixed
+- **Web clients were kicking themselves out of voice every 60 seconds (#5463, #5444).** Haven watches for its own timers stalling, because that usually means the computer slept and the connection is dead. Chrome slows a background tab's timers to one tick per minute once the tab has been idle for a while, which looked exactly like a sleep, so the app dropped and rebuilt its connection once a minute for as long as the tab sat in the background. Everyone in the call heard a leave sound followed by a join sound each time. That signal is now only trusted while the tab is actually on screen; locking your PC, which is the case the check exists for, still works because Windows does not mark the page hidden. Tabbing away from a live call and back also no longer cycles the connection. Reported by @AlexT2803, whose logs pinned down the exact 60 second cadence.
+- **Haven Desktop burned CPU and GPU while sitting in an audio-only voice call (#5456).** Two frame loops started when the app opened and never stopped: the microphone level meter from the settings panel, which kept writing to the page on every frame even with settings closed, and the built-in performance counter. A frame loop that never ends keeps the renderer drawing on every screen refresh, which is what kept the GPU busy with nothing moving on screen. The meter now runs only while it is visible, and the counter samples in short bursts. Reported by Andalishious.
+- **File themes inherited the previous theme's effects, and an enabled theme could override the one you picked (#5476).** Switching from a built-in theme like FFX to a published file theme left the water and wave overlays running on top of it, which was very visible on a light theme. Separately, a published theme toggled on in Settings would win over whatever the theme picker had selected, so clicking a theme appeared to do nothing. Thanks to @Amnibro.
+- **The voice channel "..." menu no longer shifts the other users' icons** when it opens.
+- **The sidebar collapse button stays pinned to the panel edge.**
+- **Disconnects now record why they happened (#5463)**, so the log says something like "disconnected [ping timeout]" instead of just a name.
+
+### Security
+- **Updated adm-zip to 0.6.0 (CVE-2026-39244) (#5473).** A crafted ZIP file could make the old version try to allocate 4GB of memory. Haven uses that library to read Discord export files during an import. Thanks to @anupamme.
+
+---
+
+## [3.40.0] — 2026-08-03
+
+### Added
+- **GIF search works on new servers again (#5472).** GIPHY stopped issuing API keys to new applications, so the setup guide walked admins to a page that could never finish and GIF search stayed switched off forever. Tenor is now the preferred provider, with a setup guide to match, and it can be configured in the same place. Servers that already have a GIPHY key keep working exactly as before, and the picker footer tells you which service actually served the GIFs. Thanks to @Amnibro.
+- **Braid themes and the Braid Layout plugin.** An optional darker mint-on-slate theme (plus a light variant) and a simplified two-edge layout that folds the server rail into the sidebar and tucks header extras into a single menu. Both are opt-in and off by default: admins publish the themes under Settings → Custom Themes, and the layout is enabled per person under Plugins. Every control the layout hides stays reachable from its menu. Thanks to @Amnibro.
+
+### Changed
+- **The member list gives each name its own line.** A custom status and a game used to sit on the same row as the username, and both reserved width, so anyone doing both had their name squeezed down to a character and an ellipsis. Whatever someone is doing now shows on a smaller second line underneath, and only one thing appears there: a game outranks music, and any activity outranks a custom status. People with nothing to show keep a single-line row at the same height as before.
+- **The status bar shows an address worth sharing.** It used to display whatever address your own browser connected on, which for the person running the server meant "localhost:3000" behind a hide toggle and a click-to-copy, neither of which was any use. It now shows the address other people could actually connect on: an active tunnel if there is one, otherwise your configured public address. When there is nothing shareable to show, the whole thing is hidden rather than offering to copy an address that only works on one machine.
+- Haven now runs on Node 24 and 26. The launcher used to refuse to start on anything newer than Node 22 based purely on the version number; it now checks whether the database module actually loads, which is the thing that matters. Thanks to @Amnibro.
+
+### Fixed
+- **Haven could appear to crash silently on launch (#5471).** If the port was already taken, the failure was caught by the keep-alive handler and written to the crash log, leaving a process running that never got a network connection. There was no banner, no error and no exit, and the launcher's readiness check was satisfied by the older process still holding the port, so it reported that Haven was live. Every retry left another invisible copy behind. A failed start now says which port and why, then exits. Diagnosis and fix from @Amnibro.
+- **The profile card opened behind the member list on narrow windows (#5465).** Below 900px the member list becomes a slide-in panel that sits above the page, and the profile card was underneath it and its shading. Reported by @birdcrazy.
+
+---
+
+## [3.39.0] — 2026-08-02
+
+### Added
+- **Interface zoom (#5464).** The four fixed font-size tiers are replaced by a Zoom slider (70–150%) in Settings → Layout & Density that scales the **whole** interface, not just text: sidebars, the server rail, avatars, icons, spacing and headers all grow together, and the layout reflows instead of running off screen. Your old Small/Normal/Large/XL choice is migrated to the closest zoom level automatically, and the setting is applied before the first paint so nothing jumps on load. At 100% the UI is unchanged from before. Thanks to @Bo0sted for a meticulous conversion.
+- **Keyboard control for the emoji picker (#5459).** Ctrl+E opens and closes it, arrow keys move a highlight through the grid, Enter inserts the highlighted emoji and closes, Shift+Enter inserts without closing so you can pick several, and Escape closes. The first emoji is highlighted the moment the picker opens, so Enter works without arrowing first. Thanks to @Bo0sted.
+- **Sliding switches for on/off settings.** Settings that toggle something now render as switches instead of checkboxes, themed from your accent colour. Settings → Layout & Density has a **Toggle Style** control to switch back to classic boxes. Lists where you tick items — permissions, channel and media pickers, backup contents, polls — deliberately stay as checkboxes, since those are selections rather than settings.
+- **Activity toggles in the status menu.** Clicking your status dot now also offers Music Activity and Game Activity under a Share Activity heading, so you can flip what you broadcast without opening Settings. The full Activity section is unchanged and still holds the master switch and account connections. A toggle only reads as on when something would actually be shared; ticking one with no linked account takes you to Settings → Activity to set it up.
+
+### Changed
+- **The status dot is now a button.** It always opened the status menu, but an 8px dot did not look clickable. It now sits inside a proper button with hover and focus states, while keeping its own shapes for Do Not Disturb, Away and Invisible.
+
+### Fixed
+- **AI noise suppression failed after leaving and rejoining a call (#5458).** The worklet module is registered per AudioContext, but the check that decided whether to register it keyed on a value that survived teardown. Rejoining built a fresh AudioContext, skipped registration, and enabling Suppression (AI) threw an InvalidStateError. The check now keys on the AudioContext itself. Reported by @Serionard.
+- **AI noise suppression produced a constant crackle (#5458).** The worklet drained its output buffer with no headroom, and because RNNoise's 480-sample frames do not divide evenly into the browser's 128-sample audio blocks, the buffer periodically ran dry and emitted digital silence — measured at 5.07% of all output samples, in gaps recurring around 72 Hz, which is audible as broadband clicking. Output now goes through a ring FIFO with independent read and write cursors and two frames of pre-fill. This adds roughly 9–19 ms of latency and a one-off ~19 ms of silence when you switch suppression on. Diagnosis and approach from @Serionard.
+- **The member-list gear menu did nothing on narrow windows (#5462).** Below 900px the right sidebar becomes a slide-in overlay with a very high stacking order, and the gear menu was opening behind it. Reported by @birdcrazy.
+- **Channel-scoped delete permissions were ignored (#5461).** Someone granted "delete any message" through a channel's own role saw no Delete option, because the client decided from your level rather than your permissions. Separately, deleting a channel only ever consulted server-wide roles, so a channel creator holding delete_channel through the channel role could not delete the channel they had just made, nor its sub-channels. Both now honour channel-scoped grants, and a grant on a parent channel covers its sub-channels. Reported by @birdcrazy.
+- **Changing the Channel Creator Role reported "No changes to save" (#5461).** The setting saved correctly; only the confirmation was wrong. Reported by @birdcrazy.
+- **Hint text under a setting could overlap its control.** Hints sat 2px too high and ran the full panel width, so they slid underneath the control on the right. They now clear it and wrap before reaching it.
+- **The PiP thread panel lost its clamp to the viewport height** in the web client, so on a short window it could extend past the bottom of the screen.
+- **Admin action buttons no longer sit in ragged rows.** View Bans, View IP Bans, View Deleted Users and View All Members now share an even grid.
+
+---
+
+## [3.38.0] — 2026-07-28
+
+### Added
+- **Delete several messages at once (#5460).** The "Select messages" tool (mods/admins) now has a **Delete** button next to "Move to", so you can multi-select and remove a batch in one go with an "are you sure" confirm. Deletion runs through the same per-message permission rules as a single delete, so it can never remove more than you could delete one at a time.
+- **Configurable channel-creator role (#5461).** When a non-admin who has permission to create channels makes one, they are auto-granted a role inside that channel so they can manage it. That already happened for top-level channels using the highest channel-scoped role; it is now a setting in Admin → Roles (pick a specific role, keep the default, or turn it off) and also applies to sub-channels. Admins are never auto-assigned anything.
+- **Ban appeals (#5457).** A banned user who signs in with the correct password now sees the ban reason and a box to send the admins an appeal, instead of a dead-end error. Appeals show up next to the user in the Banned Users list with an option to unban or dismiss, and online admins get a heads-up when one arrives. The reason is only revealed after the password is verified, so it never leaks on a bare username guess.
+- **Opt-in Cloudflare Turnstile CAPTCHA on registration.** Admins can require a Turnstile challenge on the sign-up form (Admin → Settings) to slow down automated account creation. Off by default; needs a Turnstile site key and secret.
+- **Opt-in global registration rate limit.** A server-wide cap on how many new accounts can be created per hour, to blunt bot waves. Off by default and configurable in Admin → Settings.
+- **Admin bulk cleanup tool for bot-wave accounts.** A new admin utility to review and remove batches of recently-created spam/bot accounts at once instead of one at a time, with a vetting checklist before anything is deleted.
+
+### Fixed
+- **AI noise suppression (RNNoise) was a silent no-op.** The main thread posted a WebAssembly.Module into the AudioWorklet via postMessage, but Module does not survive structured clone into AudioWorkletGlobalScope (the port fires messageerror, never message). The worklet never initialised and permanently passed mic audio through unprocessed, while rnnoiseReady still reported healthy. The worklet now receives raw WASM **bytes**, compiles inside the worklet, and reports ready/error back to the main thread. Also: HTTP status check on rnnoise.wasm, messageerror logging, rnnoiseReady only true after worklet confirm, and AudioContext prefers sampleRate 48000 so a 96 kHz headset does not defeat the model. Thanks to @Serionard for the full diagnosis (#5458).
+- **Voice roster no longer strobes empty while you are still in voice.** Transient empty voice-users-update snapshots (prune/rejoin races) are ignored while you are in voice on that channel, and a follow-up poll refreshes the real list. The right VOICE panel still follows the **channel you are viewing** (not the channel you are connected to).
+- **Screen shares that appeared at join then vanished are recovered more aggressively.** renegotiate-screen retries if the peer is not ready yet; the viewer watchdog runs longer and re-checks live tiles; ICE heal / fast-path rejoin re-arms screen recovery; connectionState connected re-delivers screen tracks when ontrack does not re-fire.
+- **voice-rejoin while already bound on the same socket is a no-op.** It no longer fans out join/leave or forces peer rebuilds (which could look like a disconnect and kill stream tiles). voice-existing-users without skipRenegotiate will not tear down healthy peers either; only missing peers are created.
+- **Voice users are no longer pruned during their reconnect grace window (#5444).** A brief socket flap could evict someone from the voice roster before their reconnect landed, so others saw them drop and rejoin. The prune now respects the reconnect grace window and leaves them in place.
+
+### Changed
+- Desktop image copy from the lightbox uses main-process clipboard IPC more reliably (base64 payload, window focus, DOM decode fallback) and no longer shows a browser-only error toast inside the desktop app. (Desktop package change pairs with this.)
+
+---
+
+## [3.37.2] — 2026-07-25
+
+### Fixed
+- **`:emoji` autocomplete menu could stop working until a page refresh.** The `#emoji-dropdown` is a single shared node that gets re-parented next to whichever input is active (#5296). Opening the suggestions inside an inline message-edit box parked the node in that message; saving or cancelling the edit ran `innerHTML = originalHtml` and deleted it, so every later `:emoji` threw on the missing element and autocomplete died everywhere (including the main composer) until a full refresh. The node holds no state, so it is now recreated on demand when it has gone missing. Thanks to @Bo0sted (#5454).
+- **Admin password reset window rendered raw translation keys.** The reset modals were written as `t('key') || 'English fallback'`, but `t()` returns the raw key string for a missing key, so the fallback never fired and the whole window showed labels like `modals.admin_reset_pw.title` instead of real sentences (#5451). The missing text has been added to the locale file, and `t()` now falls back to English for any key a non-English locale is missing, so a gap shows readable English instead of a raw key across every language.
+
+### Changed
+- **Admin password reset now explains the 2FA requirement clearly.** Resetting another user's password requires that user to have two-factor authentication enabled first, so the temporary password alone cannot be used to take over their account. That requirement is intended, but it used to surface as a red error that looked like a malfunction. It now shows a calm informational popup that states it is a security requirement, explains why it exists, and tells you the user must enable 2FA before the reset will run (#5451).
+- **Channel ID, header icons, and the voice-channel user list now scale with Font Size.** These sidebar and header elements were fixed-size and ignored Settings → Layout & Density → Font Size, so raising the size left them small. They now scale across the Small/Large/Extra Large tiers with the rest of the UI (#5450).
+
+### Documentation
+- **Refined the remote-access guide.** The README now explains the risks of port forwarding and adds a safer alternative using Tailscale, with a locked-down ACL so friends can only reach Haven and nothing else on your machine. Thanks to @Bo0sted (#5452).
+
+---
+
+## [3.37.1] — 2026-07-25
+
+### Fixed
+- **Link-preview embeds no longer show up inconsistently.** Opening a channel full of links — most noticeably a freshly loaded screen of imported Discord history — fired one `/api/link-preview` request per link all at once, blew past the server's 60/min per-IP limit, and 429'd the overflow. A rejected request returned `null` and rendered no card, so embeds "sometimes popped up with all the images, sometimes with none." Fetches now go through a client-side scheduler that caps concurrency (3 at a time) and retries 429s with backoff, honouring a new `Retry-After` header the server sends on the rate-limited response, so every preview resolves instead of being silently dropped.
+- **Matrix theme: the edit-message box rendered as a blank solid-green block.** Matrix was the one built-in theme with no `::selection` override, so selected text fell through to the global rule (white text on the accent colour). Matrix's accent `#00ff41` is light enough that white-on-green is nearly invisible, and because mobile browsers auto-select a field's contents when it's focused, opening the editor on a message turned the whole textarea into an unreadable green rectangle. Matrix now uses dark, high-contrast selection text (matching the Fallout terminal theme's convention), so the editor — and any selected text — stays legible.
+
+---
+
+## [3.37.0] — 2026-07-23
+
+### Added
+- **Persistent welcome messages for new members.** Welcome messages used to be live-only: drawn on screen from the real-time join event and never saved, so they only appeared for whoever happened to be viewing that exact channel at that instant, vanished on reload, and re-fired every time a member reconnected (which made them look random and out of chronological order). A new member's welcome is now posted once, when they register, as a saved message in every channel flagged to show them, so it stays in history for everyone like Discord. A new per-channel **Welcome Messages** toggle lives in Channel Functions (admin only) and defaults on for the server's first/default channel; the existing admin welcome-message template still controls the text and doubles as the on/off switch (an empty template turns the feature off).
+- **Emoji picker overhaul (#5449).** The picker now renders every category as one continuous scrolling list with sticky headers, so scrolling past the end of one category flows into the next and clicking a category tab jumps to its section. Your server's custom emoji now sit first for quick access (unchanged if you have none), and there is full **skin tone** support: a hand button beside the search bar opens a tone picker, your choice is remembered, and it applies everywhere emoji appear — the picker, reactions and quick reactions. Contributed by Bo0sted.
+- **Right-click context menu for messages (#5446).** Right-clicking a message opens a themed, cursor-positioned menu mirroring the hover toolbar's actions (edit, reply, quote, pin, react, thread, copy link, protect, delete), gated on the same permissions. It defers to the image menu on images and to the browser's native copy when text is selected. Contributed by Bo0sted.
+- **Type-to-focus the message box (#5445).** Start typing anywhere with nothing focused and no popup or modal open, and the message box takes over so the first keystroke lands there. Modifier combos and keyboard shortcuts are left alone, and it stays out of the way during IME composition. Contributed by Bo0sted.
+- **`STEAM_API_KEY` documented (#5447).** Added to the README config table and `.env.example` with a link to the Steam dev portal, and `docker-compose.override.yml` is now gitignored. Contributed by KevonLin.
+
+### Fixed
+- **Steam account linking behind a CDN, proxy or tunnel (#5448).** When Haven ran behind a CDN → proxy → Docker chain on a non-standard port, the Steam OpenID callback could be built from the proxy's internal address and fail verification. `baseUrl()` now honours `X-Forwarded-Host` when trust proxy is enabled and only appends a genuine external port otherwise, and the project-root `.env` is loaded as a fallback so a manually set `PUBLIC_URL` always applies. Adds diagnostic logging on the failure path. Contributed by KevonLin.
+
+---
+
+## [3.36.0] — 2026-07-21
+
+### Added
+- **Opt-in "repair voice audio after a reconnect" toggle (Settings → Debug, #5444).** If you sometimes rejoin a voice call and still can't hear one or more people until you leave and rejoin, there's a new Debug toggle for it. When two people reconnect at the same moment, their connections can collide mid-repair (both sides ICE-restart every peer at once) and the losing offer's restart intent was dropped on rollback — so the media path never actually restarted, the two sides' ICE credentials crossed, and one direction of audio stayed dead until a manual rejoin. Turning this on carries the restart through so Haven re-runs it and the audio comes back on its own. Off by default while it's being verified in the field.
+
+### Changed
+- **The voice channel panel is less cluttered.** Mic and speaker icons now appear only when someone is actually muted or deafened, instead of every participant carrying two faded glyphs, so names are easier to read at a glance. The "you" tag next to your own name is gone (you know who you are), and the LIVE badge is now a compact red dot plus viewer count — hover it for the full "who's watching" detail.
+
+### Fixed
+- **Voice recovers audio more reliably after a brief disconnect (#5444).** After a reconnect Haven ICE-restarts each peer to repair the media path, but if that restart couldn't be issued the peer was silently abandoned with no retry, leaving that person's audio dead until a manual rejoin. The recovery now verifies each connection a few seconds after the restart and re-attempts it while the path is still broken.
+- **Fewer ICE servers handed to the browser (#5444).** With no custom STUN configured, Haven handed out four built-in STUN servers; adding a TURN relay made five, which Chrome warns slows down connection setup — and measurably delayed reconnecting after a socket flap. The list is now capped at four, always keeping your TURN relay, so connections establish faster.
+
+---
+
+## [3.35.0] — 2026-07-19
+
+### Added
+- **`PUBLIC_URL` for OAuth and OpenID callbacks (#5443).** When Haven runs behind Docker port mapping (8080→3000), a reverse proxy that strips the port out of the Host header, or a Cloudflare Tunnel, the server could not reliably work out its own public-facing address, so Steam and Spotify callback URLs came out wrong and linking failed. Setting `PUBLIC_URL` in `.env` makes `baseUrl()` use that value verbatim for every callback it builds (Steam OpenID `return_to` and `realm`, and the Spotify OAuth `redirect_uri`). Left unset, behaviour is exactly as before. It is deliberately *not* writable from the admin UI — a UI-settable callback base would be a redirect-hijack vector. Contributed by KevonLin.
+- **Integration keys can be replaced from Settings (#5442).** The key setup form only rendered while a provider was still unconfigured, so once `STEAM_API_KEY` (or the Spotify / Last.fm keys) had been set there was no way to swap a leaked or revoked key without hand-editing `.env` and restarting. Every configured integration now shows an admin-only "Change key" button that reveals the same form, with the hint reworded to make clear it replaces the current key. Saving a new `STEAM_API_KEY` also triggers a presence poll straight away, so a rotated key takes effect immediately instead of on the next 60-second tick. Contributed by KevonLin.
+
+---
+
+## [3.34.0] — 2026-07-19
+
+### Added
+- **Favorite GIFs.** The GIF picker now has two tabs: **Search** and **★ Favorites**. Hover any GIF and a star appears in its corner — click it to keep that GIF, click it again to drop it. The search box doubles as a filter on the Favorites tab, so a big collection stays usable. Favorites are stored in your own browser, so they never leave your machine, they are per-device, and the Favorites tab keeps working even on a server that has no GIPHY key set up.
+
+### Fixed
+- **The ping reading in the status bar was mostly fiction.** Two different places sent latency probes but both measured against one shared timestamp, so a probe's reply could be timed against an entirely different probe's send time. The result was a random number between 0 and 15 seconds — which is why even a server running on the same machine could report multi-second ping. Probes are now queued and paired with their own reply, and outstanding probes are discarded on disconnect instead of reporting the length of the outage as latency.
+- **"Everyone can see me in voice except me."** If the local in-voice flag got out of step with the actual call, the voice panel filtered you out of your own channel and nothing ever put you back. Haven now checks the live peer connections before trusting that flag, and a watchdog repairs the voice UI if it drifts — so you no longer end up staring at a "Join Voice" button while you are already in the call.
+- **Voice user rows no longer sprout a blank second line.** As soon as someone picked up a LIVE, camera or viewer badge, the status icons wrapped onto a row of their own and sat at the far right of it, looking like an empty row. Long names now truncate instead of wrapping.
+
+---
+
+## [3.33.0] — 2026-07-18
+
+### Added
+- **Rich presence — see what people are playing and listening to.** The member list shows one activity per person (games take precedence, so the sidebar stays scannable) and the profile card shows a line for each, so someone doing both gets both. Four sources: Haven's own voice-channel music player (works immediately, no setup), **Last.fm**, **Steam**, and **Spotify**.
+- **Last.fm is the recommended music source.** Linking is just your username — no sign-in redirect, nothing stored — and because Spotify, Apple Music, YouTube Music, Navidrome and Plex all scrobble to Last.fm, one connection covers whatever you actually listen with. Note that scrobbling has to be switched on in Last.fm's own settings first; the setup panel explains how for each service.
+- **Activity privacy controls** in Settings → Activity. Games and music can be hidden separately or sharing turned off entirely, and nothing is ever shared while your status is Invisible. Activity is never written to the database, so no listening history is kept.
+- **Admins can paste API keys directly into Settings** instead of editing `.env` by hand, with step-by-step instructions for each service. Keys apply immediately — no server restart.
+- **Settings navigation is grouped** into Appearance, Chat, Privacy & Presence, Account & Security and Advanced. Nine sections that previously had no nav entry are now one click away, and the highlighted entry follows what you are actually looking at as you scroll.
+- **The settings panel can be resized.** It still opens at its usual size, but the drag handle now works — previously it was capped at exactly the width it opened at.
+
+### Fixed
+- **`.mov` videos (and more audio formats) now play inline** instead of showing a download card. Also covers `.m4v`, `.ogv`, `.m4a`, `.aac`, `.flac` and `.opus`. If a file genuinely cannot be decoded by the browser, the attachment falls back to a download link rather than leaving a dead player.
+- **`@` mentions sometimes did nothing.** Three separate causes, all of which left the member list empty with no error anywhere. Typing `@` with an empty list now re-fetches it automatically.
+- **Copying an image from the viewer** could fail with "Write permission denied", and reported the wrong error when it did.
+- **The status bar could be shown once and then never hidden again** — the checkbox appeared to do nothing.
+- **The emoji customise panel covered the row of slots** you needed to click, if the full emoji picker was already open.
+- **Language selector showed "GB", "RU" and "ES"** instead of flags on Windows.
+- **Image Display settings section had no working nav link** (duplicate element id).
+
+---
+
+## [3.32.0] — 2026-07-13
+
+### Added
+- **Restore progress bar (#5438).** Restoring a backup now shows a real upload percentage as the file transfers, then a server-side extraction bar as the archive is unzipped to disk, so a large restore no longer sits with no feedback for many minutes.
+- **Notification pop-up cooldown.** Settings → Sounds has a new "Limit pop-up notifications" option (off by default) that throttles how often desktop/browser notification pop-ups appear, so a burst of messages or a flaky connection cannot keep popping the app up. Notification sounds and unread badges are unaffected.
+
+### Changed
+- **The status bar hides the server address by default every session.** It now starts hidden and is only shown after you click the eye toggle, and that choice is no longer remembered between sessions.
+
+### Fixed
+- **linux/arm64 Docker image restored (#5439).** Starting with 3.31.1 the published multi-arch image silently lost its arm64 variant, because the untagged per-arch child manifests from the push-by-digest build were being pruned from GHCR, forcing Apple Silicon Macs onto slow amd64 emulation. Each architecture is now published as its own persistent tag and merged into the multi-arch manifest, so both arches ship and survive, and the workflow now fails loudly if either is missing.
+- **Sidebar collapse arrows no longer leave a gap.** On narrow windows the voice/users panel can shrink below its requested width; the collapse arrows now snap to the panel's actual edge once its width settles instead of hovering to its left.
+
+## [3.31.2] — 2026-07-11
+
+### Fixed
+- **The manual "Download Backup" button now works on large servers (#5434).** Automatic backups were fixed in 3.31.0, but the manual download still built the entire zip to a temporary file before sending anything, so on a big server (30GB of files) it sat silent for minutes and a proxy in front of Haven returned a 502 before the download ever started. The download now streams the archive straight to the browser as it builds, so it starts immediately and stays alive for the whole transfer.
+
+## [3.31.1] — 2026-07-10
+
+### Fixed
+- **Restoring a large backup no longer fails with "failed to fetch" (#5436).** Restoring a full backup that included files broke on three separate limits: the server aborted any request that took longer than 30 seconds (which is the ~30s "failed to fetch" people saw), the upload itself was capped at 4GB, and the restore read the entire uploaded zip into memory the way the old backup path did, so a large archive ran the server out of memory. Restores now allow long uploads, accept large files, and stream the archive straight to disk, so a 15GB or larger backup restores without crashing. Slow-header (slowloris) protection is unchanged.
+
+### Changed
+- **The backup screen now spells out that only full backups can be restored in place (#5435).** A backup has to include both Messages and Uploaded files to be restorable from the Restore box; smaller channels/users/settings backups are meant to be re-imported by hand. That was always the case but wasn't stated, so a partial backup failing to restore looked like a bug.
+
+## [3.31.0] — 2026-07-10
+
+### Added
+- **Rich link preview cards for Bluesky and X/Twitter posts (#5429).** Social links now render as full embed cards with the author's avatar and name, the post text, sized media (a play badge marks videos), and engagement counts (replies / reposts / likes / views), bringing the desktop and web client in line with the mobile app's embeds. Embed size is now a single Off / Small / Medium / Full preference shared by the Settings ▸ Link Previews picker and a new per-embed ⤢ toggle, with a per-embed caret to collapse a single preview. Generic links and YouTube use the same card chrome. Older size values (Normal / Large) migrate automatically. Contributed by Amnibro.
+
+### Fixed
+- **Backups that include files no longer crash the server (#5434).** Server backups built the entire zip in memory before writing it out, so once the uploads folder grew large (reported around 30GB) the process ran out of memory and went down, while a structure-only backup stayed tiny and worked fine. Backups now stream straight to disk as they build, so memory stays flat no matter how much is stored, for both manual downloads and scheduled auto-backups. The archive format is unchanged, so existing backups still restore.
+
+### Changed
+- Refined the Russian wording on the password recovery screen (#5420). Contributed by CUBEEEK.
+
+## [3.30.3] — 2026-07-07
+
+### Fixed
+- **"Create Channel" sidebar section stayed visible for users who could only create sub-channels (#5433 follow-up).** The flat permissions list sent to the client for UI gating mixed server-wide and channel-scoped grants together, so a user with `create_channel` scoped to a single channel saw the always-on sidebar "Create Channel" section — a dead control, since every submission creates a top-level channel and gets denied by the (correctly scoped) server check. That section is now gated on a global-only permission check, so it only appears for admins and users with a genuine server-wide `create_channel` grant.
+
+## [3.30.2] — 2026-07-06
+
+### Fixed
+- **Betsy Ross and Gadsden flags didn't match the aspect ratio of the other Flags emoji.** They were noticeably flatter/wider than the rest of the set, since their source artwork wasn't 4:3 like the bundled country flags. Both are now cropped to the same 4:3 frame (canton preserved in full on Betsy Ross; snake and lettering preserved in full on Gadsden), so they sit consistently alongside every other flag.
+
+## [3.30.1] — 2026-07-06
+
+### Fixed
+- **Flags emoji category showed bare country codes on Windows.** Windows browsers don't render Unicode regional-indicator flags and fall back to the two-letter code ("US", "GB", "DE", …), so the new Flags category looked like a list of letters there. Every country flag is now a bundled SVG image, so flags render the same on every platform — in the picker, in messages, and in reactions.
+
+## [3.30.0] — 2026-07-06
+
+### Added
+- **Flags emoji category.** The emoji picker has a new Flags category with a broad set of country flags. The US flag leads the list, followed by two classic American flags — the Betsy Ross flag and the Gadsden ("Don't Tread on Me") flag — which ship built in and render inline in messages and reactions like any other emoji.
+- **Screen share pop-out maximize toggle (#5430).** The screen-share pop-out window now has a maximize/restore toggle so a shared stream can fill the pop-out.
+
+### Improved
+- **Smarter emoji search.** Typing an actual punctuation mark now finds the matching emoji — e.g. `?` surfaces ❓ and ⁉️, `!` surfaces ❗, and `#` or a digit matches its keycap emoji. Search also covers the new bundled flag emoji by name.
+
+### Fixed
+- **"New messages" divider and auto-scroll stopped appearing (#5432).** Opening a channel recorded it as fully read before its history finished loading, so the last-read divider from #5259 had nothing to anchor to. The read position is now saved after the history request, restoring the divider and the jump-to-unread scroll.
+- **Channel-scoped role permissions leaked server-wide (#5433).** Per-assignment permission checkboxes ticked on a role granted inside a specific channel (e.g. "create channel", "rename sub-channels") were being applied everywhere. They're now scoped to the channel they were granted in and its sub-channels; server-wide assignments still apply everywhere as before.
+
+### Changed
+- **README refresh (#5431).** Documented custom stickers and personas, the built-in backup tools, and the `::` persona shortcut, marked the Russian translation as human-reviewed, and updated roadmap statuses.
+
 ## [3.29.0] — 2026-06-29
 
 ### Added

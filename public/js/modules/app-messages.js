@@ -15,7 +15,35 @@ async _sendMessage() {
   if (!content && !hasImages && !hasFiles) return;
   if (!this.currentChannel) return;
   if (!this.socket.connected) {
-    this._showToast("Not connected — message not sent", 'error');
+    this._showToast(t('toasts.message_not_connected'), 'error');
+    return;
+  }
+
+  // In a forum, a picture and its text sent together are one topic, the way
+  // the New Post hint says, not an image topic next to a text topic. The
+  // pictures upload first so the topic lands whole (#5653).
+  if (hasImages && content && !content.startsWith('/') && this._isForumChannel?.(this.currentChannel)) {
+    const code = this.currentChannel;
+    const files = [...this._imageQueue];
+    this._clearImageQueue();
+    input.value = '';
+    input.style.height = 'auto';
+    input.focus();
+    this._clearReply();
+    this._hideMentionDropdown();
+    this._hideSlashDropdown();
+    const picker = document.getElementById('emoji-picker');
+    if (picker) picker.style.display = 'none';
+    this._uploadsCancelled = false;
+    const lines = [];
+    for (const file of files) {
+      const line = await this._uploadImage(file, code, true, '', false, { returnContent: true });
+      if (line) lines.push(line);
+      if (this._uploadsCancelled) break;
+    }
+    this.socket.emit('send-message', { code, content: [content, ...lines].join('\n') });
+    this.notifications.play('sent');
+    if (hasFiles) this._flushFileQueue?.();
     return;
   }
 
@@ -44,7 +72,7 @@ async _sendMessage() {
     // /tts:stop — cancel all speech synthesis immediately
     if (content.trim().toLowerCase() === '/tts:stop') {
       this.notifications?.stopTTS();
-      this._showToast('TTS stopped', 'info');
+      this._showToast(t('toasts.tts_stopped'), 'info');
       input.value = '';
       input.style.height = 'auto';
       this._hideMentionDropdown();
@@ -99,6 +127,43 @@ async _sendMessage() {
         this._hideSlashDropdown();
         return;
       }
+      if (cmd === 'time') {
+        // No argument opens the picker modal; the toast is kept for input
+        // that was typed but could not be parsed.
+        if (!arg) {
+          input.value = '';
+          input.style.height = 'auto';
+          this._hideMentionDropdown();
+          this._hideSlashDropdown();
+          this._openTimeModal();
+          return;
+        }
+        const token = this._buildTimeToken(arg);
+        if (!token) {
+          this._showToast(t('commands.time_usage'), 'error');
+        } else {
+          // Put the token in the box instead of posting it. The usual
+          // message is "let's meet at <time>", so people need to type
+          // around it, and they get to see what it resolved to first.
+          input.value = token;
+          input.style.height = 'auto';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.focus();
+          try { input.setSelectionRange(token.length, token.length); } catch { /* not a text input */ }
+        }
+        this._hideMentionDropdown();
+        this._hideSlashDropdown();
+        return;
+      }
+      if (cmd === 'schedule') {
+        // Send later (#5638): the text after the command is the message.
+        input.value = '';
+        input.style.height = 'auto';
+        this._hideMentionDropdown();
+        this._hideSlashDropdown();
+        this._openScheduleModal?.(arg);
+        return;
+      }
       if (cmd === 'poll') {
         input.value = '';
         input.style.height = 'auto';
@@ -111,6 +176,10 @@ async _sendMessage() {
   }
 
   const payload = { code: this.currentChannel, content };
+  // Discord display names are not unique, so a "=>@Name" DM has to carry the
+  // resolved Discord user id rather than leaving the server to guess.
+  const ferryDm = this._ferryPendingDm?.(content);
+  if (ferryDm) payload.ferryDiscordUserId = ferryDm;
   if (this.replyingTo) {
     payload.replyTo = this.replyingTo.id;
   }
@@ -158,24 +227,27 @@ async _sendMessage() {
           unflip:    () => `${arg ? arg + ' ' : ''}┬─┬ ノ( ゜-゜ノ)`,
           lenny:     () => `${arg ? arg + ' ' : ''}( ͡° ͜ʖ ͡°)`,
           disapprove:() => `${arg ? arg + ' ' : ''}ಠ_ಠ`,
-          bbs:       () => `🕐 ${displayName} will be back soon`,
+          bbs:       () => t('commands.output.bbs', { name: displayName }),
           boobs:     () => `( . Y . )`,
           butt:      () => `( . )( . )`,
-          brb:       () => `⏳ ${displayName} will be right back`,
-          afk:       () => `💤 ${displayName} is away from keyboard`,
+          brb:       () => t('commands.output.brb', { name: displayName }),
+          afk:       () => t('commands.output.afk', { name: displayName }),
           me:        () => arg ? `_${displayName} ${arg}_` : null,
-          flip:      () => `🪙 ${displayName} flipped a coin: **${Math.random() < 0.5 ? 'Heads' : 'Tails'}**!`,
+          flip:      () => t('commands.output.flip', {
+            name: displayName,
+            side: t(Math.random() < 0.5 ? 'commands.output.heads' : 'commands.output.tails')
+          }),
           roll:      () => {
             const m = (arg || '1d6').match(/^(\d{1,2})?d(\d{1,4})$/i);
-            if (!m) return `🎲 ${displayName} rolled: **${Math.floor(Math.random() * 6) + 1}**`;
+            if (!m) return t('commands.output.roll_simple', { name: displayName, result: Math.floor(Math.random() * 6) + 1 });
             const count = Math.min(parseInt(m[1] || '1'), 20);
             const sides = Math.min(parseInt(m[2]), 1000);
             const rolls = Array.from({ length: count }, () => Math.floor(Math.random() * sides) + 1);
             const total = rolls.reduce((a, b) => a + b, 0);
-            return `🎲 ${displayName} rolled ${count}d${sides}: [${rolls.join(', ')}] = **${total}**`;
+            return t('commands.output.roll', { name: displayName, count, sides, rolls: rolls.join(', '), total });
           },
-          hug:       () => arg ? `🤗 ${displayName} hugs ${arg}` : null,
-          wave:      () => `👋 ${displayName} waves${arg ? ' ' + arg : ''}`,
+          hug:       () => arg ? t('commands.output.hug', { name: displayName, target: arg }) : null,
+          wave:      () => t('commands.output.wave', { name: displayName, text: arg ? ' ' + arg : '' }),
         };
         if (clientSlash[cmd]) {
           const transformed = clientSlash[cmd]();
@@ -196,6 +268,28 @@ async _sendMessage() {
       }
       if (!partner) {
         this._showToast(t('toasts.encryption_key_unavailable'), 'warning');
+      }
+    }
+
+    // Warn before encrypting: once this is ciphertext the server cannot judge
+    // it, and the recipient's client will render the link inert. Telling the
+    // sender here saves them wondering why it arrived greyed out. This is a
+    // courtesy, not a control. Anyone running a patched client skips it, which
+    // is exactly why the enforcement that matters lives on the receiving side.
+    // (#5483)
+    if (partner) {
+      const verdict = this._dmLinkBlocked?.(content);
+      if (verdict) {
+        let message;
+        if (verdict.rule === 'link_obfuscated') {
+          message = t('automod.block.obfuscated');
+        } else if (verdict.rule === 'link_masked') {
+          message = t('automod.block.masked', { host: verdict.host });
+        } else {
+          const reason = t(`automod.reason.${verdict.reasonKey || 'blocked'}`);
+          message = t('automod.block.link', { host: verdict.host, reason });
+        }
+        this._showToast(t('toasts.dm_link_blocked', { message }), 'warning');
       }
     }
 
@@ -271,6 +365,26 @@ _renderMessages(messages, lastReadMessageId) {
   }
   const container = document.getElementById('messages');
   container.innerHTML = '';
+  container.classList.remove('forum-view', 'forum-gallery', 'forum-feed');
+  container.style.removeProperty('--forum-tile');
+  delete container.dataset.forumTile;
+  this._forumActive = false;
+  if (this._isForumChannel && this._isForumChannel(this.currentChannel)) {
+    this._renderForum(messages);
+    return;
+  }
+  // A forum feed runs newest first: the most recently active topic sits at
+  // the top, where a forum reader expects it. (#144)
+  const forumFeed = this._isForumFeed();
+  // An empty forum explains itself; an empty channel needs no help. (#144)
+  {
+    if (forumFeed && messages.length === 0) {
+      const hint = document.createElement('div');
+      hint.className = 'forum-empty-hint';
+      hint.textContent = t('app.messages.forum_empty_hint');
+      container.appendChild(hint);
+    }
+  }
   // Only render the last MAX_DOM_MESSAGES to prevent OOM on large histories
   const MAX_DOM_MESSAGES = 100;
   const start = messages.length > MAX_DOM_MESSAGES ? messages.length - MAX_DOM_MESSAGES : 0;
@@ -281,13 +395,20 @@ _renderMessages(messages, lastReadMessageId) {
   // Only show it when there are actually unread messages and the last message
   // isn't already "read" (i.e. the user isn't fully caught up).
   let newMsgDividerInserted = false;
-  const showDivider = lastReadMessageId && messages.length > 0
+  const showDivider = !forumFeed && lastReadMessageId && messages.length > 0
     && messages[messages.length - 1].id > lastReadMessageId
     // Don't show divider if ALL messages are unread (nothing before the line)
     && messages[start]?.id <= lastReadMessageId;
 
-  for (let i = start; i < messages.length; i++) {
-    const prevMsg = i > start ? messages[i - 1] : null;
+  // Chat feeds render oldest first; a forum feed renders its most recently
+  // active topic first.
+  const order = [];
+  for (let i = start; i < messages.length; i++) order.push(i);
+  if (forumFeed) order.reverse();
+  // Pinned topics head a forum feed whatever their activity. (#144)
+  if (forumFeed) order.sort((a, b) => (messages[b].pinned ? 1 : 0) - (messages[a].pinned ? 1 : 0));
+  for (const i of order) {
+    const prevMsg = (!forumFeed && i > start) ? messages[i - 1] : null;
 
     // Insert "NEW MESSAGES" divider before the first unread message
     if (showDivider && !newMsgDividerInserted && messages[i].id > lastReadMessageId
@@ -295,7 +416,7 @@ _renderMessages(messages, lastReadMessageId) {
       const divider = document.createElement('div');
       divider.className = 'new-messages-divider';
       divider.id = 'new-messages-divider';
-      divider.innerHTML = '<span>NEW MESSAGES</span>';
+      divider.innerHTML = `<span>${t('messages.new_messages')}</span>`;
       frag.appendChild(divider);
       newMsgDividerInserted = true;
     }
@@ -332,6 +453,11 @@ _renderMessages(messages, lastReadMessageId) {
     // Show jump-to-bottom button since we're not at the bottom
     const jumpBtn = document.getElementById('jump-to-bottom');
     if (jumpBtn) jumpBtn.classList.add('visible');
+  } else if (forumFeed) {
+    // The newest topic is at the top, and that is where a forum opens.
+    this._coupledToBottom = false;
+    container.scrollTop = 0;
+    requestAnimationFrame(() => { container.scrollTop = 0; });
   } else {
     this._scrollToBottom(true);
     // Re-scroll after images load, but only if user hasn't scrolled away.
@@ -355,6 +481,12 @@ _renderMessages(messages, lastReadMessageId) {
   this._decryptE2EImages(container);
   // Wire up decryption-on-click for E2E file attachments (#5310, #5308)
   this._decryptE2EFiles(container);
+  // DMs are ciphertext server-side, so their links can only be judged
+  // here, after decryption and before anyone can click. (#5483)
+  if (this._isDmContainer((container))) {
+    this._enforceDmLinkPolicy((container));
+    this._maybeShowDmSafetyNotice?.(container);
+  }
   // Wire burn-after-read placeholders + countdowns (#5280)
   this._wireBurnMessages?.(container);
   // Mark as read (last message ID)
@@ -494,6 +626,9 @@ _prependMessages(messages) {
     this._setupVideos(el);
     this._decryptE2EImages(el);
     this._decryptE2EFiles(el);
+    // DMs are ciphertext server-side, so their links can only be judged
+    // here, after decryption and before anyone can click. (#5483)
+    if (this._isDmContainer((el))) this._enforceDmLinkPolicy((el));
     this._wireBurnMessages?.(el);
   }
 },
@@ -556,6 +691,9 @@ _appendMessages(messages) {
   this._setupVideos(container);
   this._decryptE2EImages(container);
   this._decryptE2EFiles(container);
+  // DMs are ciphertext server-side, so their links can only be judged
+  // here, after decryption and before anyone can click. (#5483)
+  if (this._isDmContainer((container))) this._enforceDmLinkPolicy((container));
   this._wireBurnMessages?.(container);
 
   // Mark as read so the server-side read position advances
@@ -569,8 +707,81 @@ _appendMessages(messages) {
   requestAnimationFrame(() => { this._suppressCoupleCheck = false; });
 },
 
+// Forum channels (#144): a reply is its topic's newest activity, so the topic
+// moves to the newest end of the list, next to the composer, the way a fresh
+// message would. Topics never compact into each other, so moving the node is
+// safe. A topic that is not loaded (older than the current window) is fetched
+// by reloading the channel, which lands it at the end too.
+/** True while the open channel is a forum, whose feed runs newest first. */
+_isForumFeed() {
+  const ch = this.channels && this.channels.find(c => c.code === this.currentChannel);
+  return !!(ch && ch.is_forum);
+},
+
+/** Older (less recently active) topics arrive oldest first and belong at the
+ *  bottom of a forum feed, the most recent of the batch nearest the top. (#144) */
+_appendOlderForum(messages) {
+  const container = document.getElementById('messages');
+  if (!container) return;
+  this._suppressCoupleCheck = true;
+  const fragment = document.createDocumentFragment();
+  const added = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const el = this._createMessageEl(messages[i], null);
+    fragment.appendChild(el);
+    added.push(el);
+  }
+  container.appendChild(fragment);
+  for (const el of added) {
+    this._fetchLinkPreviews(el);
+    this._setupVideos(el);
+    this._decryptE2EImages(el);
+    this._decryptE2EFiles(el);
+  }
+  requestAnimationFrame(() => { this._suppressCoupleCheck = false; });
+},
+
+_bumpForumTopic(parentId) {
+  const ch = this.channels && this.channels.find(c => c.code === this.currentChannel);
+  if (!ch || !ch.is_forum) return;
+  if (this._forumActive && this._forumBump) { this._forumBump(parentId); return; }
+  const container = document.getElementById('messages');
+  if (!container) return;
+  const el = container.querySelector(`[data-msg-id="${parentId}"]`);
+  if (!el) {
+    if (!this._loadingHistory && !this._historyBefore && !this._historyAfter) {
+      this.socket.emit('get-messages', this._getMessagesParams ? this._getMessagesParams(this.currentChannel) : { code: this.currentChannel });
+    }
+    return;
+  }
+  const slot = this._forumFeedTopSlot(container, el);
+  if (slot === el) return;
+  const nearTop = container.scrollTop < 40;
+  // Newest activity goes on top, under the pinned block: a reply must never
+  // push a pinned topic down. (#144)
+  container.insertBefore(el, slot);
+  // The window's least active topic may have just moved; keep the pagination
+  // cursor on whatever is last now.
+  const all = container.querySelectorAll('[data-msg-id]');
+  const lastEl = all[all.length - 1];
+  if (lastEl) this._oldestMsgId = parseInt(lastEl.dataset.msgId);
+  if (nearTop) container.scrollTop = 0;
+},
+
+// Where a topic that just became the newest activity goes in a forum feed:
+// the very top when it is pinned itself, otherwise right under the pinned
+// block. Returns the node to insert before (null means the end).
+_forumFeedTopSlot(container, el) {
+  const isPinned = (n) => !!n && (n.classList.contains('pinned') || n.dataset.pinned === '1');
+  if (isPinned(el)) return container.firstElementChild;
+  let node = container.firstElementChild;
+  while (node && isPinned(node)) node = node.nextElementSibling;
+  return node;
+},
+
 _appendMessage(message, forceScroll = false) {
   const container = document.getElementById('messages');
+  if (this._forumActive && this._forumInsertTopic) { this._forumInsertTopic(message); return; }
   const lastMsg = container.lastElementChild;
 
   // Track persona name for @PersonaName mention resolution. (#5349)
@@ -596,21 +807,31 @@ _appendMessage(message, forceScroll = false) {
     };
   }
 
+  const forumFeed = this._isForumFeed();
   const wasAtBottom = forceScroll || this._coupledToBottom;
-  const msgEl = this._createMessageEl(message, prevMsg);
-  container.appendChild(msgEl);
+  const nearTop = container.scrollTop < 40;
+  const msgEl = this._createMessageEl(message, forumFeed ? null : prevMsg);
+  if (forumFeed) {
+    // A new topic is the newest activity, so it goes on top, under the pinned
+    // block. (#144)
+    container.querySelector('.forum-empty-hint')?.remove();
+    container.insertBefore(msgEl, this._forumFeedTopSlot(container, msgEl));
+  } else {
+    container.appendChild(msgEl);
+  }
 
-  // ── DOM trimming: remove oldest messages when the list grows too large ──
-  // This prevents unbounded memory growth that causes OOM crashes.
+  // ── DOM trimming: drop the least recent messages when the list grows too large ──
+  // This prevents unbounded memory growth that causes OOM crashes. The least
+  // recent end is the top of a chat feed and the bottom of a forum feed.
   const MAX_DOM_MESSAGES = 100;
   const trimmed = container.children.length > MAX_DOM_MESSAGES;
   while (container.children.length > MAX_DOM_MESSAGES) {
-    container.removeChild(container.firstElementChild);
+    container.removeChild(forumFeed ? container.lastElementChild : container.firstElementChild);
   }
   // Keep _oldestMsgId in sync with the DOM after trimming
-  const firstEl = container.firstElementChild;
-  if (firstEl && firstEl.dataset && firstEl.dataset.msgId) {
-    this._oldestMsgId = parseInt(firstEl.dataset.msgId);
+  const edgeEl = forumFeed ? container.lastElementChild : container.firstElementChild;
+  if (edgeEl && edgeEl.dataset && edgeEl.dataset.msgId) {
+    this._oldestMsgId = parseInt(edgeEl.dataset.msgId);
   }
   // Re-enable backward pagination since we trimmed old messages
   if (trimmed) this._noMoreHistory = false;
@@ -620,8 +841,13 @@ _appendMessage(message, forceScroll = false) {
   this._setupVideos(msgEl);
   this._decryptE2EImages(msgEl);
   this._decryptE2EFiles(msgEl);
+  // DMs are ciphertext server-side, so their links can only be judged
+  // here, after decryption and before anyone can click. (#5483)
+  if (this._isDmContainer((msgEl))) this._enforceDmLinkPolicy((msgEl));
   this._wireBurnMessages?.(msgEl);
-  if (wasAtBottom) {
+  if (forumFeed) {
+    if (forceScroll || nearTop) container.scrollTop = 0;
+  } else if (wasAtBottom) {
     this._scrollToBottom(true);
   }
   // Scroll after images/gifs load, but only if still coupled to bottom.
@@ -643,15 +869,32 @@ _appendMessage(message, forceScroll = false) {
 },
 
 _createMessageEl(msg, prevMsg) {
+  // Persisted welcome message (new-member greeting). Rendered as a simple,
+  // non-interactive system line reusing the .welcome-message styling — no
+  // avatar, toolbar, reactions, or grouping. Covers history load and live
+  // append alike. Uses textContent so the name/template can't inject HTML.
+  if (msg && msg.type === 'welcome') {
+    const el = document.createElement('div');
+    el.className = 'welcome-message';
+    el.dataset.type = 'welcome';
+    if (Number.isInteger(msg.id) && msg.id > 0) el.dataset.msgId = msg.id;
+    el.textContent = msg.content;
+    return el;
+  }
   const isImage = this._isImageUrl(msg.content);
   const curCh = this.channels && this.channels.find(c => c.code === this.currentChannel);
   const isAnnouncement = curCh && curCh.notification_type === 'announcement';
+  // Forum topics never fold into each other: every topic keeps its own header,
+  // which also keeps _bumpForumTopic's node move safe. (#144)
+  const isForum = !!(curCh && curCh.is_forum);
   // Threads were intentionally removed from DMs entirely. The PiP appenders
   // mark their messages with `_isDmRender`; main-pane DM views are caught by
   // `curCh.is_dm`. Either signal suppresses the thread button + preview so
   // there is no entry point left in any DM surface.
   const isDmContext = !!(msg && msg._isDmRender) || !!(curCh && curCh.is_dm);
-  const isCompact = prevMsg &&
+  const isCompact = prevMsg && !isForum &&
+    // A preceding welcome/system line never folds the next message into it.
+    (prevMsg.type || 'user') === 'user' &&
     prevMsg.user_id === msg.user_id &&
     // Persona / webhook / Discord-imported messages must each break the
     // grouping chain so a different persona under the same account doesn't
@@ -672,11 +915,14 @@ _createMessageEl(msg, prevMsg) {
 
   const reactionsHtml = this._renderReactions(msg.id, msg.reactions || []);
   const pollHtml = msg.poll ? this._renderPollWidget(msg.id, msg.poll) : '';
-  const threadHtml = (msg.thread && !isDmContext) ? this._renderThreadPreview(msg.id, msg.thread) : '';
-  const editedHtml = msg.edited_at ? `<span class="edited-tag" title="${t('app.messages.edited_at', { date: new Date(msg.edited_at).toLocaleString() })}">${t('app.messages.edited')}</span>` : '';
+  const roleMenuHtml = msg.roleMenu ? this._renderRoleMenu(msg.id, msg.roleMenu) : '';
+  const threadHtml = isDmContext ? ''
+    : (msg.thread ? this._renderThreadPreview(msg.id, msg.thread, { forum: isForum })
+      : (isForum ? this._renderThreadPreview(msg.id, { count: 0 }, { forum: true }) : ''));
+  const editedHtml = msg.edited_at ? `<span class="edited-tag" title="${t('app.messages.edited_at', { date: this._fmtDateTime(msg.edited_at) })}">${t('app.messages.edited')}</span>` : '';
   const pinnedTag = msg.pinned ? `<span class="pinned-tag" title="${t('app.messages.pinned')}">📌</span>` : '';
   const archivedTag = msg.is_archived ? `<span class="archived-tag" title="${t('app.messages.protected')}">🛡️</span>` : '';
-  const ephemeralTag = msg.ephemeral ? '<span class="ephemeral-tag" title="Only visible to you">Only visible to you</span>' : '';
+  const ephemeralTag = msg.ephemeral ? `<span class="ephemeral-tag" title="${t('app.messages.only_visible_to_you')}">${t('app.messages.only_visible_to_you')}</span>` : '';
   const e2eTag = msg._e2e ? `<span class="e2e-tag" title="${t('app.messages.e2e_encrypted')}">🔒</span>` : '';
   const needsStatusSlot = !!e2eTag || !!(msg.burn_seconds && msg.burn_seconds > 0);
   const statusSlotHtml = needsStatusSlot ? `<span class="message-inline-status">${e2eTag}</span>` : '';
@@ -701,9 +947,9 @@ _createMessageEl(msg, prevMsg) {
     // Threads are not available in DMs - omit the button entirely so there is
     // no entry point. Server-side `send-thread-message` and `get-thread-messages`
     // also reject DM channels as a defence in depth.
-    ...(isDmContext ? [] : [{ key: 'thread', html: `<button data-action="thread" title="Thread">${iThread}</button>` }]),
+    ...(isDmContext ? [] : [{ key: 'thread', html: `<button data-action="thread" title="${t('msg_toolbar.thread')}">${iThread}</button>` }]),
     // Message links contain the DM channel code - never expose them in DM context.
-    ...(canShareLink ? [{ key: 'copy-link', html: `<button data-action="copy-link" title="${t('msg_toolbar.copy_link') || 'Copy link to message'}">${iLink}</button>` }] : [])
+    ...(canShareLink ? [{ key: 'copy-link', html: `<button data-action="copy-link" title="${t('msg_toolbar.copy_link')}">${iLink}</button>` }] : [])
   ];
   // Gate pin/unpin on the explicit `pin_message` permission so granting it via
   // a role (without making the user a moderator) actually shows the button.
@@ -711,7 +957,12 @@ _createMessageEl(msg, prevMsg) {
   // toggle look broken because users with only `pin_message` saw nothing.
   const canPin = this.user.isAdmin || this._hasPerm('pin_message');
   const canArchive = this.user.isAdmin || this._hasPerm('archive_messages');
-  const canDelete = msg.user_id === this.user.id || this.user.isAdmin || this._canModerate();
+  // _canModerate() is a level check (effectiveLevel >= 25), so on its own it
+  // ignored the delete_message permission entirely: someone granted "delete any
+  // message" through a channel role but sitting below level 25 got no delete
+  // button, even though the server would have allowed it. (#5461)
+  const canDelete = msg.user_id === this.user.id || this.user.isAdmin ||
+                    this._canModerate() || this._hasPerm('delete_message');
   if (canPin) {
     toolbarActions.push({
       key: 'pin',
@@ -762,7 +1013,7 @@ _createMessageEl(msg, prevMsg) {
   const coreToolbarBtns = visibleActions.map(a => a.html).join('');
   const overflowToolbarBtns = overflowActions.map(a => a.html).join('');
   const moreMenuHtml = overflowActions.length
-    ? `<div class="msg-toolbar-more"><button class="msg-toolbar-more-btn" type="button" aria-label="More actions">${iMore}</button><div class="msg-toolbar-overflow">${overflowToolbarBtns}</div></div>`
+    ? `<div class="msg-toolbar-more"><button class="msg-toolbar-more-btn" type="button" aria-label="${t('users.more_actions')}">${iMore}</button><div class="msg-toolbar-overflow">${overflowToolbarBtns}</div></div>`
     : '';
   const toolbarHtml = `<div class="msg-toolbar"><div class="msg-toolbar-group">${coreToolbarBtns}</div>${moreMenuHtml}</div>`;
   const replyHtml = msg.replyContext ? this._renderReplyBanner(msg.replyContext) : '';
@@ -777,7 +1028,7 @@ _createMessageEl(msg, prevMsg) {
     el.dataset.userId = msg.user_id;
     el.dataset.username = msg.username;
     el.dataset.time = msg.created_at;
-    el.dataset.timeShort = new Date(msg.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    el.dataset.timeShort = this._fmtTime(msg.created_at);
     if (Number.isInteger(msg.id) && msg.id > 0) el.dataset.msgId = msg.id;
     el.dataset.rawContent = msg.content;
     if (msg.persona_id) el.dataset.personaId = String(msg.persona_id);
@@ -798,11 +1049,14 @@ _createMessageEl(msg, prevMsg) {
     // even when the author is not in the online users list (e.g. offline).
     if (msg.avatar) el.dataset.avatar = msg.avatar;
     if (msg.avatar_shape) el.dataset.avatarShape = msg.avatar_shape;
+    if (msg.border) el.dataset.border = msg.border;
+    if (msg.borderTransform) el.dataset.borderTransform = JSON.stringify(msg.borderTransform);
+    if (msg.animateProfile) el.dataset.animateProfile = msg.animateProfile;
     el.innerHTML = `
-      <span class="compact-time">${new Date(msg.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</span>
+      <span class="compact-time">${this._fmtTime(msg.created_at)}</span>
       <div class="message-body">
         <div class="message-content">${pinnedTag}${archivedTag}${ephemeralTag}${this._formatContent(msg.content)}${editedHtml}${statusSlotHtml}</div>
-        ${pollHtml}
+        ${pollHtml}${roleMenuHtml}
         ${reactionsHtml}
         ${threadHtml}
       </div>
@@ -826,13 +1080,13 @@ _createMessageEl(msg, prevMsg) {
   if (msg.imported_from === 'discord') {
     const discordAvatar = msg.webhook_avatar;
     if (discordAvatar) {
-      avatarHtml = `<img class="message-avatar message-avatar-img ${shapeClass}" src="${this._escapeHtml(discordAvatar)}" loading="lazy" alt="${initial}"><div class="message-avatar ${shapeClass}" style="background-color:${color};display:none">${initial}</div>`;
+      avatarHtml = `<img class="message-avatar message-avatar-img ${shapeClass}"${this._animAttr(msg.animateProfile)} src="${this._escapeHtml(discordAvatar)}" loading="lazy" alt="${initial}"><div class="message-avatar ${shapeClass}" style="background-color:${color};display:none">${initial}</div>`;
     } else {
       // Generic Discord-style avatar (colored circle with initial)
       avatarHtml = `<div class="message-avatar ${shapeClass} discord-import-avatar" style="background-color:#5865f2">${initial}</div>`;
     }
   } else if (msg.avatar) {
-    avatarHtml = `<img class="message-avatar message-avatar-img ${shapeClass}" src="${this._escapeHtml(msg.avatar)}" loading="lazy" alt="${initial}"><div class="message-avatar ${shapeClass}" style="background-color:${color};display:none">${initial}</div>`;
+    avatarHtml = `<img class="message-avatar message-avatar-img ${shapeClass}"${this._animAttr(msg.animateProfile)} src="${this._escapeHtml(msg.avatar)}" loading="lazy" alt="${initial}"><div class="message-avatar ${shapeClass}" style="background-color:${color};display:none">${initial}</div>`;
   } else {
     avatarHtml = `<div class="message-avatar ${shapeClass}" style="background-color:${color}">${initial}</div>`;
   }
@@ -868,13 +1122,20 @@ _createMessageEl(msg, prevMsg) {
 
   // Persona badge (#86, #5349) — shown when message was sent via a user persona
   const personaBadge = msg.persona_id
-    ? `<span class="persona-msg-badge" title="${this._escapeHtml((window.t && t('app.messages.via_persona', { name: msg.real_username || '' })) || `Sent via ${msg.real_username || 'real account'}`)}">persona</span>`
+    ? `<span class="persona-msg-badge" title="${this._escapeHtml(t('app.messages.via_persona', { name: msg.real_username || t('app.messages.real_account') }))}">${this._escapeHtml(t('app.messages.persona_badge'))}</span>`
+    : '';
+
+  // Ferry badge: where this message was sent on Discord. The routing prefix
+  // is stripped before storage, so without this the channel would show people
+  // apparently talking to nobody.
+  const ferryBadge = msg.ferry_target
+    ? `<span class="ferry-badge" title="${this._escapeHtml(t('app.messages.relayed_to_discord'))}">🛶 ${this._escapeHtml(msg.ferry_target === 'dm' ? t('app.messages.discord_dm') : msg.ferry_target)}</span>`
     : '';
 
   // (#5381) Guest badge — shown next to the username when the author is
   // an ephemeral guest account.
   const guestBadge = (onlineUser && onlineUser.isGuest)
-    ? '<span class="guest-msg-badge" style="background:rgba(136,136,136,0.18);color:#aaa;font-size:0.62rem;padding:1px 5px;border-radius:3px;margin-left:4px;letter-spacing:0.04em" title="Temporary guest account">GUEST</span>'
+    ? `<span class="guest-msg-badge" style="background:rgba(136,136,136,0.18);color:#aaa;font-size:0.62rem;padding:1px 5px;border-radius:3px;margin-left:4px;letter-spacing:0.04em" title="${t('app.messages.temporary_guest')}">${t('app.messages.guest_badge')}</span>`
     : '';
 
   const el = document.createElement('div');
@@ -892,7 +1153,7 @@ _createMessageEl(msg, prevMsg) {
   el.dataset.userId = msg.user_id;
   el.dataset.username = msg.username;
   el.dataset.time = msg.created_at;
-  el.dataset.timeShort = new Date(msg.created_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  el.dataset.timeShort = this._fmtTime(msg.created_at);
   if (Number.isInteger(msg.id) && msg.id > 0) el.dataset.msgId = msg.id;
   el.dataset.rawContent = msg.content;
   if (msg.persona_id) el.dataset.personaId = String(msg.persona_id);
@@ -912,7 +1173,7 @@ _createMessageEl(msg, prevMsg) {
   if (msg.poll && msg.poll.anonymous) el.dataset.pollAnonymous = '1';
   el.innerHTML = `
     <div class="message-row">
-      ${avatarHtml}
+      ${this._avatarWithBorder(avatarHtml, msg)}
       <div class="message-body">
         ${replyHtml}
         <div class="message-header">
@@ -921,6 +1182,7 @@ _createMessageEl(msg, prevMsg) {
           ${msgRoleIconAfter}
           ${botBadge}
           ${personaBadge}
+          ${ferryBadge}
           ${guestBadge}
           ${msgRoleBadge}
           <span class="message-time">${this._formatTime(msg.created_at)}</span>
@@ -931,7 +1193,7 @@ _createMessageEl(msg, prevMsg) {
           <span class="message-header-spacer"></span>
         </div>
         <div class="message-content">${this._formatContent(msg.content)}${editedHtml}</div>
-        ${pollHtml}
+        ${pollHtml}${roleMenuHtml}
         ${reactionsHtml}
         ${threadHtml}
       </div>
@@ -974,8 +1236,13 @@ _promoteCompactToFull(compactEl) {
   const msgShape = compactEl.dataset.avatarShape || (onlineUser && onlineUser.avatarShape) || 'circle';
   const shapeClass = 'avatar-' + msgShape;
   const avatar = compactEl.dataset.avatar || (onlineUser && onlineUser.avatar) || null;
+  // Border fit stored on the compact element (offline-safe), same as avatar above.
+  const border = compactEl.dataset.border || (onlineUser && onlineUser.border) || null;
+  let borderTransform = (onlineUser && onlineUser.borderTransform) || null;
+  try { if (compactEl.dataset.borderTransform) borderTransform = JSON.parse(compactEl.dataset.borderTransform); } catch {}
+  const animateProfile = compactEl.dataset.animateProfile || (onlineUser && onlineUser.animateProfile) || 'trigger';
   const avatarHtml = avatar
-    ? `<img class="message-avatar message-avatar-img ${shapeClass}" src="${this._escapeHtml(avatar)}" loading="lazy" alt="${initial}"><div class="message-avatar ${shapeClass}" style="background-color:${color};display:none">${initial}</div>`
+    ? `<img class="message-avatar message-avatar-img ${shapeClass}"${this._animAttr(animateProfile)} src="${this._escapeHtml(avatar)}" loading="lazy" alt="${initial}"><div class="message-avatar ${shapeClass}" style="background-color:${color};display:none">${initial}</div>`
     : `<div class="message-avatar ${shapeClass}" style="background-color:${color}">${initial}</div>`;
 
   // Multi-role aware (compact-to-full path) — mirror of _createMessageEl above.
@@ -1008,7 +1275,7 @@ _promoteCompactToFull(compactEl) {
   if (isPinned) compactEl.dataset.pinned = '1';
   compactEl.innerHTML = `
     <div class="message-row">
-      ${avatarHtml}
+      ${this._avatarWithBorder(avatarHtml, { border, borderTransform, animateProfile })}
       <div class="message-body">
         <div class="message-header">
           ${msgRoleIconBefore2}
@@ -1027,6 +1294,11 @@ _promoteCompactToFull(compactEl) {
       <button class="msg-dots-btn" aria-label="${t('app.actions.message_actions')}">⋯</button>
     </div>
   `;
+  // A compact row is usually promoted while hovered; mark its pfp as playing so
+  // the freeze observer leaves it animating until the pointer actually leaves.
+  if (compactEl.matches(':hover')) {
+    compactEl.querySelectorAll('img[data-animate="trigger"]').forEach((i) => { i.dataset.animPlaying = '1'; });
+  }
 },
 
 _appendSystemMessage(text) {
@@ -1034,16 +1306,6 @@ _appendSystemMessage(text) {
   const wasAtBottom = this._coupledToBottom;
   const el = document.createElement('div');
   el.className = 'system-message';
-  el.textContent = text;
-  container.appendChild(el);
-  if (wasAtBottom) this._scrollToBottom(true);
-},
-
-_appendWelcomeMessage(text) {
-  const container = document.getElementById('messages');
-  const wasAtBottom = this._coupledToBottom;
-  const el = document.createElement('div');
-  el.className = 'welcome-message';
   el.textContent = text;
   container.appendChild(el);
   if (wasAtBottom) this._scrollToBottom(true);
@@ -1143,7 +1405,7 @@ _openPinsPiP(pins) {
   const titleEl = document.getElementById('pins-pip-title');
   if (titleEl) {
     const ch = (this.channels || []).find(c => c.code === this.currentChannel);
-    titleEl.textContent = ch ? `# ${ch.name}` : (this.currentChannel || 'Channel');
+    titleEl.textContent = ch ? `# ${ch.name}` : (this.currentChannel || t('status_bar.channel'));
   }
 
   this._renderPinsPiPList(pins || []);
@@ -1251,14 +1513,29 @@ _bindPinsPiPDrag() {
 
 // ── Link Previews ─────────────────────────────────────
 
-/** Wire up fullscreen button and PiP seek support for uploaded video elements */
+/**
+ * Wire up fullscreen button and PiP seek support for uploaded video elements,
+ * plus the undecodable-media download fallback for both video and audio.
+ */
 _setupVideos(containerEl) {
+  containerEl.querySelectorAll('.file-audio').forEach(audio => {
+    if (audio.dataset.havenSetup) return;
+    audio.dataset.havenSetup = '1';
+    audio.addEventListener('error', () => this._fallbackToDownload(audio), { once: true });
+  });
+
   containerEl.querySelectorAll('.file-video').forEach(video => {
     if (video.dataset.havenSetup) return;
     video.dataset.havenSetup = '1';
 
     // ── Generate thumbnail poster from first frame ──
     this._generateVideoThumbnail(video);
+
+    // Container extension is only a hint at what's inside: a .mov carrying
+    // ProRes/HEVC, or an .mp4 with an exotic codec, decodes nowhere. When the
+    // element gives up, collapse the whole attachment back to a download link
+    // rather than leaving a broken player sitting in the message.
+    video.addEventListener('error', () => this._fallbackToDownload(video), { once: true });
 
     // PiP: wire up MediaSession so the PiP window shows a seek bar
     const updatePos = () => {
@@ -1307,6 +1584,53 @@ _setupVideos(containerEl) {
       video.removeEventListener('playing', updatePos);
     });
   });
+},
+
+/**
+ * Replace a media element that failed to decode with a plain download link.
+ * The extension told us the container looked playable but the codecs inside
+ * weren't (ProRes/HEVC .mov being the common case), so the user still gets the
+ * file — just not inline. Built with DOM nodes rather than innerHTML because
+ * the filename is attacker-controlled.
+ */
+_fallbackToDownload(mediaEl) {
+  const box = mediaEl.closest('.file-attachment');
+  if (!box || box.dataset.havenFallback) return;
+  box.dataset.havenFallback = '1';
+
+  const url = mediaEl.currentSrc || mediaEl.src;
+  if (!url) return;
+
+  // Prefer the real filename off any existing download control; the .file-info
+  // label is the fallback, and it's already the name we rendered.
+  const name = box.querySelector('.file-download-link[download]')?.getAttribute('download')
+    || box.querySelector('.file-name')?.textContent
+    || 'file';
+  const size = box.querySelector('.file-size')?.textContent || '';
+  const isVideo = mediaEl.tagName === 'VIDEO';
+
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = name;
+  link.className = 'file-download-link';
+  link.title = t('app.messages.cannot_play_file', { name });
+  if (!url.startsWith('blob:')) { link.target = '_blank'; link.rel = 'noopener noreferrer'; }
+
+  const parts = [
+    ['file-icon', isVideo ? '🎬' : '🎵'],
+    ['file-name', name],
+    ['file-size', size],
+    ['file-download-arrow', '⬇'],
+  ];
+  for (const [cls, text] of parts) {
+    if (!text) continue;
+    const span = document.createElement('span');
+    span.className = cls;
+    span.textContent = text;
+    link.appendChild(span);
+  }
+
+  box.replaceChildren(link);
 },
 
 /** Generate a poster thumbnail for a video element by capturing its first visible frame */
@@ -1387,29 +1711,53 @@ _fetchLinkPreviews(containerEl) {
   // - this._linkPreviewInflight: url -> Promise<data>  (dedupe concurrent fetches)
   if (!this._linkPreviewCache) this._linkPreviewCache = new Map();
   if (!this._linkPreviewInflight) this._linkPreviewInflight = new Map();
+  if (!this._collapsedEmbeds) this._collapsedEmbeds = new Set();
+  if (!/\bembed-size-/.test(document.body.className)) this._applyEmbedSize(this._embedSize());
   const PREVIEW_CLIENT_TTL = 10 * 60 * 1000;
 
-  const links = containerEl.querySelectorAll('.message-content a[href]');
+  // Thread replies keep their body in .thread-msg-content, and until now no
+  // preview card was ever drawn there (#5620).
+  const links = containerEl.querySelectorAll('.message-content a[href], .thread-msg-content a[href]');
   const seen = new Set();
   links.forEach(link => {
     const url = link.href;
     if (seen.has(url)) return;
     seen.add(url);
+    // Search results defer embeds behind a per-link Load button so a page of
+    // 25 results never fires 25 preview fetches. The button clears this flag on
+    // the one link it owns, then re-runs this pass. Channel/DM views never set
+    // the attribute, so their behaviour is unchanged. (search-overhaul phase 3)
+    if (link.dataset.embedDeferred) return;
     // Skip image URLs (already rendered inline) and internal URLs
     if (/\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i.test(url)) return;
     if (/^https:\/\/media\d*\.giphy\.com\//i.test(url)) return;
+    if (/^https:\/\/(media|c)\.tenor\.com\//i.test(url)) return;
     if (url.startsWith(window.location.origin)) return;
 
-    // ── Inline YouTube embed ────────────────────────────
+    // ── Inline YouTube embed (wrapped in the shared embed chrome) ──
     const ytVideoId = this._extractYouTubeVideoId(url);
     if (ytVideoId) {
-      const msgContent = link.closest('.message-content');
+      const msgContent = link.closest('.message-content, .thread-msg-content');
       if (!msgContent) return;
-      if (msgContent.querySelector(`.link-preview-yt[data-url="${CSS.escape(url)}"]`)) return;
+      if (msgContent.querySelector(`.link-preview[data-url="${CSS.escape(url)}"]`)) return;
+      const ytCollapsed = this._collapsedEmbeds.has(url);
       const wrapper = document.createElement('div');
-      wrapper.className = 'link-preview-yt';
+      wrapper.className = 'link-preview link-preview--yt' + (ytCollapsed ? ' lp-collapsed' : '');
       wrapper.dataset.url = url;
-      wrapper.innerHTML = `<iframe src="https://www.youtube.com/embed/${this._escapeHtml(ytVideoId)}?rel=0" width="100%" height="270" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen loading="lazy"></iframe>`;
+      wrapper.style.setProperty('--lp-accent', '#ff0000');
+      wrapper.innerHTML =
+        this._embedHeaderHtml('YouTube', ytCollapsed) +
+        // referrerpolicy is set per-iframe on purpose. Haven's document-level
+        // Referrer-Policy has defaulted to same-origin since 3.41.0, which
+        // sends NOTHING cross-origin. YouTube's embed player treats a missing
+        // referrer as a configuration failure and shows "Error 153" instead of
+        // the video. strict-origin-when-cross-origin gives it just the origin
+        // (scheme + host, no path and no query), which is enough for YouTube
+        // and still keeps invite codes out of the referrer, since those live
+        // in the query string. That was the whole reason for same-origin.
+        `<div class="lp-content"><div class="link-preview-yt"><iframe src="https://www.youtube.com/embed/${this._escapeHtml(ytVideoId)}?rel=0" width="100%" height="270" frameborder="0" referrerpolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen loading="lazy"></iframe></div></div>`;
+      this._wireEmbedControls(wrapper, url);
+      this._applyEmbedSpoiler(wrapper, link);
       msgContent.appendChild(wrapper);
       if (this._coupledToBottom) this._scrollToBottom(true);
       return; // skip generic link preview for YouTube
@@ -1423,10 +1771,13 @@ _fetchLinkPreviews(containerEl) {
     } else if (this._linkPreviewInflight.has(url)) {
       dataPromise = this._linkPreviewInflight.get(url);
     } else {
-      const p = fetch(`/api/link-preview?url=${encodeURIComponent(url)}`, {
-        headers: { 'Authorization': `Bearer ${this.token}` }
-      })
-        .then(r => r.ok ? r.json() : null)
+      // Route through the scheduler instead of firing a raw fetch. A channel
+      // full of links (e.g. freshly loaded imported history) used to emit one
+      // request per link all at once, blow past the server's 60/min limit, and
+      // 429 the rest — which returned null and rendered no card, so embeds
+      // "sometimes showed, sometimes didn't". The scheduler caps concurrency
+      // and retries 429s with backoff so every preview eventually resolves.
+      const p = this._scheduleLinkPreview(url)
         .then(data => {
           if (data) this._linkPreviewCache.set(url, { data, ts: Date.now() });
           // Light cap so the cache can't grow unbounded over a long session.
@@ -1444,57 +1795,85 @@ _fetchLinkPreviews(containerEl) {
 
     dataPromise
       .then(data => {
-        if (!data || (!data.title && !data.description)) return;
-        const msgContent = link.closest('.message-content');
+        if (!data || (!data.title && !data.description && !data.text)) return;
+        const msgContent = link.closest('.message-content, .thread-msg-content');
         if (!msgContent) return;
 
         // Don't add duplicate previews
         if (msgContent.querySelector(`.link-preview[data-url="${CSS.escape(url)}"]`)) return;
 
-        // ── Inline video embed (og:video MP4/WebM) ──
-        if (data.video && (data.videoType || /\.(mp4|webm|ogg)(\?[^#]*)?$/i.test(data.video))) {
-          const videoCard = document.createElement('div');
-          videoCard.className = 'link-preview link-preview--video';
-          videoCard.dataset.url = url;
-          let vInner = '<video controls preload="metadata" playsinline style="max-width:100%;max-height:400px;border-radius:8px;display:block"';
-          if (data.image) vInner += ` poster="${this._escapeHtml(data.image)}"`;
-          vInner += `><source src="${this._escapeHtml(data.video)}" type="${this._escapeHtml(data.videoType || 'video/mp4')}"></video>`;
-          vInner += '<div class="link-preview-text">';
-          if (data.siteName) vInner += `<span class="link-preview-site">${this._escapeHtml(data.siteName)}</span>`;
-          if (data.title) vInner += `<a class="link-preview-title" href="${this._escapeHtml(url)}" target="_blank" rel="noopener noreferrer nofollow">${this._escapeHtml(data.title)}</a>`;
-          vInner += '</div>';
-          videoCard.innerHTML = vInner;
-          const wasAtBottom = this._coupledToBottom;
-          msgContent.appendChild(videoCard);
-          if (wasAtBottom) this._scrollToBottom(true);
-          return;
-        }
-
-        const card = document.createElement('a');
+        // Unified rich embed card — social posts (Bluesky / X) gain an author
+        // row, avatar and engagement stats; everything else renders the same
+        // chrome (accent header, size toggle, collapse) with title/text/media.
+        const collapsed = this._collapsedEmbeds.has(url);
+        const accent = (typeof data.accentColor === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(data.accentColor)) ? data.accentColor : null;
+        const isSocial = !!(data.author || data.handle);
         const hasGallery = Array.isArray(data.images) && data.images.length >= 2;
-        card.className = hasGallery ? 'link-preview link-preview--gallery' : 'link-preview';
-        card.href = url;
-        card.target = '_blank';
-        card.rel = 'noopener noreferrer nofollow';
-        card.dataset.url = url;
+        const isInlineVideo = data.video && (data.videoType || /\.(mp4|webm|ogg)(\?[^#]*)?$/i.test(data.video));
 
-        let inner = '';
+        const card = document.createElement('div');
+        card.className = 'link-preview link-preview--rich'
+          + (isSocial ? ' link-preview--social' : '')
+          + (hasGallery ? ' link-preview--gallery' : '')
+          + (collapsed ? ' lp-collapsed' : '');
+        card.dataset.url = url;
+        if (accent) card.style.setProperty('--lp-accent', accent);
+
+        // Author row (social) or title (generic) + post text
+        let meta = '';
+        if (isSocial) {
+          meta += '<div class="lp-author">';
+          if (data.avatar) meta += `<img class="lp-avatar" src="${this._escapeHtml(data.avatar)}" alt="" loading="lazy">`;
+          if (data.author) meta += `<span class="lp-author-name">${this._escapeHtml(data.author)}</span>`;
+          if (data.handle) meta += `<span class="lp-handle">${this._escapeHtml(data.handle)}</span>`;
+          meta += '</div>';
+        } else if (data.title) {
+          meta += `<span class="link-preview-title">${this._escapeHtml(data.title)}</span>`;
+        }
+        const textContent = data.text || data.description;
+        if (textContent) meta += `<span class="lp-text">${this._escapeHtml(textContent)}</span>`;
+
+        // Media — gallery grid, inline player, or image (with play badge if a
+        // non-inline video is linked, e.g. a Bluesky video post).
+        let media = '';
         if (hasGallery) {
           const count = Math.min(data.images.length, 4);
-          inner += `<div class="link-preview-gallery" data-count="${count}">`;
+          media += `<div class="link-preview-gallery" data-count="${count}">`;
           data.images.slice(0, 4).forEach(imgUrl => {
-            inner += `<img class="link-preview-gallery-img" src="${this._escapeHtml(imgUrl)}" alt="">`;
+            media += `<img class="link-preview-gallery-img" ${this._imgSrcAttr(imgUrl)} alt="" loading="lazy">`;
           });
-          inner += '</div>';
+          media += '</div>';
+        } else if (isInlineVideo) {
+          // Video is NOT proxied — streaming it through Haven would need Range
+          // support and a lot of bandwidth. Instead the poster comes from the
+          // proxy and preload drops to "none" when proxying is on, so the
+          // remote host is contacted only if the viewer actually presses play.
+          // That turns a silent leak into a deliberate act.
+          const vidPreload = (this._mediaProxyEnabled === false) ? 'metadata' : 'none';
+          const posterAttr = data.image ? ` poster="${this._escapeHtml(this._proxyMediaUrl(data.image) || '')}"` : '';
+          media += `<video class="lp-video" controls preload="${vidPreload}" playsinline${posterAttr}><source src="${this._escapeHtml(data.video)}" type="${this._escapeHtml(data.videoType || 'video/mp4')}"></video>`;
         } else if (data.image) {
-          inner += `<img class="link-preview-image" src="${this._escapeHtml(data.image)}" alt="">`;
+          media += `<a class="lp-media" href="${this._escapeHtml(url)}" target="_blank" rel="noopener noreferrer nofollow"><img class="lp-image" ${this._imgSrcAttr(data.image)} alt="" loading="lazy">${data.video ? '<span class="lp-play"></span>' : ''}</a>`;
         }
-        inner += '<div class="link-preview-text">';
-        if (data.siteName) inner += `<span class="link-preview-site">${this._escapeHtml(data.siteName)}</span>`;
-        if (data.title) inner += `<span class="link-preview-title">${this._escapeHtml(data.title)}</span>`;
-        if (data.description) inner += `<span class="link-preview-desc">${this._escapeHtml(data.description).slice(0, 200)}</span>`;
-        inner += '</div>';
-        card.innerHTML = inner;
+
+        // Engagement stats (Bluesky / X) — skip any the source didn't provide.
+        let stats = '';
+        if (data.stats) {
+          const parts = [['💬', data.stats.replies], ['🔁', data.stats.reposts], ['❤️', data.stats.likes], ['👁', data.stats.views]]
+            .map(([icon, v]) => { const c = this._cnt(v); return c == null ? null : `<span>${icon} ${c}</span>`; })
+            .filter(Boolean);
+          if (parts.length) stats = `<div class="lp-stats">${parts.join('')}</div>`;
+        }
+
+        card.innerHTML =
+          this._embedHeaderHtml(data.siteName, collapsed) +
+          '<div class="lp-content">' +
+            (meta ? `<a class="lp-meta" href="${this._escapeHtml(url)}" target="_blank" rel="noopener noreferrer nofollow">${meta}</a>` : '') +
+            media +
+            stats +
+          '</div>';
+        this._wireEmbedControls(card, url);
+        this._applyEmbedSpoiler(card, link);
 
         const wasAtBottom = this._coupledToBottom;
         msgContent.appendChild(card);
@@ -1505,6 +1884,120 @@ _fetchLinkPreviews(containerEl) {
       })
       .catch(() => {});
   });
+},
+
+// ── Link-preview fetch scheduler ──────────────────────────────────────
+// Caps how many /api/link-preview requests are in flight at once and retries
+// 429s with backoff, so a screen full of links resolves reliably instead of
+// stampeding the server's per-IP limit and dropping the overflow. Returns a
+// Promise that resolves to the preview data (or null on hard failure).
+_scheduleLinkPreview(url) {
+  if (!this._lpQueue) this._lpQueue = [];
+  if (this._lpActive == null) this._lpActive = 0;
+  return new Promise(resolve => {
+    this._lpQueue.push({ url, resolve, attempt: 0 });
+    this._pumpLinkPreviewQueue();
+  });
+},
+
+_pumpLinkPreviewQueue() {
+  const MAX_CONCURRENT = 3;
+  while (this._lpActive < MAX_CONCURRENT && this._lpQueue.length) {
+    this._runLinkPreviewTask(this._lpQueue.shift());
+  }
+},
+
+_runLinkPreviewTask(task) {
+  const MAX_ATTEMPTS = 4;
+  this._lpActive++;
+  const done = (data) => {
+    this._lpActive--;
+    task.resolve(data);
+    this._pumpLinkPreviewQueue();
+  };
+  fetch(`/api/link-preview?url=${encodeURIComponent(task.url)}`, {
+    headers: { 'Authorization': `Bearer ${this.token}` }
+  })
+    .then(r => {
+      // Rate limited — free the slot and re-queue after a backoff so the rest
+      // of the batch can proceed. Honour Retry-After when the server sends it,
+      // otherwise exponential backoff, both with jitter to avoid a thundering
+      // herd when several messages retry at once.
+      if (r.status === 429 && task.attempt < MAX_ATTEMPTS) {
+        const ra = parseFloat(r.headers.get('retry-after'));
+        const waitMs = (Number.isFinite(ra) && ra > 0
+          ? ra * 1000
+          : Math.min(1200 * Math.pow(2, task.attempt), 8000)) + Math.random() * 400;
+        task.attempt++;
+        this._lpActive--;
+        setTimeout(() => { this._lpQueue.push(task); this._pumpLinkPreviewQueue(); }, waitMs);
+        this._pumpLinkPreviewQueue();
+        return;
+      }
+      if (r.ok) r.json().then(done, () => done(null));
+      else done(null);
+    })
+    .catch(() => done(null));
+},
+
+// ── Shared embed chrome (size toggle + per-message collapse) ──────────
+// Mirrors the Haven mobile app's embed controls. The global Full/Medium/Small/Off
+// size preference is the shared one driven by the Settings picker (_embedSize /
+// _applyEmbedSize live in app-media.js); the per-card ⤢ button is a quick cycle
+// through Full→Medium→Small (Off stays Settings-only so the button can't hide
+// itself), and the ▾/▸ caret collapses a single embed for this session.
+
+// A link wrapped in a || spoiler || carries that spoiler onto its embed
+// card: the card is blurred behind the same tag used for spoiler images
+// until it is clicked to reveal (handled by _maybeRevealConcealed). We read
+// the rendered DOM — the <a> sits inside the .spoiler span — so detection
+// stays in sync with however the message was marked up (auto-link, masked
+// [text](url), YouTube, etc.).
+_applyEmbedSpoiler(embedEl, link) {
+  if (!link || !link.closest('.spoiler')) return;
+  embedEl.classList.add('lp-spoiler');
+  const tag = document.createElement('span');
+  tag.className = 'spoiler-media-tag';
+  tag.textContent = '\u{1F441}\u{FE0F} ' + t('app.messages.spoiler');
+  embedEl.appendChild(tag);
+},
+
+/** Header row markup: site name (accent), size cycle button, collapse caret. */
+_embedHeaderHtml(siteName, collapsed) {
+  const size = this._embedSize();
+  const label = t(`settings.embed_display.${size}`);
+  return '<div class="lp-header">'
+    + `<span class="lp-site">${this._escapeHtml(siteName || t('app.messages.link'))}</span>`
+    + `<button type="button" class="lp-size" title="${t('app.messages.embed_size_hint')}">⤢ ${label}</button>`
+    + `<button type="button" class="lp-collapse" title="${t('app.messages.collapse')}">${collapsed ? '▸' : '▾'}</button>`
+    + '</div>';
+},
+
+/** Wire the size + collapse buttons on a freshly-built embed card. */
+_wireEmbedControls(card, url) {
+  const sizeBtn = card.querySelector('.lp-size');
+  if (sizeBtn) sizeBtn.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    const order = ['full', 'medium', 'small'];
+    this._applyEmbedSize(order[(order.indexOf(this._embedSize()) + 1) % order.length]);
+  });
+  const colBtn = card.querySelector('.lp-collapse');
+  if (colBtn) colBtn.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    const isCol = card.classList.toggle('lp-collapsed');
+    isCol ? this._collapsedEmbeds.add(url) : this._collapsedEmbeds.delete(url);
+    colBtn.textContent = isCol ? '▸' : '▾';
+  });
+},
+
+/** Compact engagement count (1.2K / 3.4M); null for missing/negative values. */
+_cnt(n) {
+  if (n == null || n < 0) return null;
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+  return String(n);
 },
 
 /**
@@ -1569,7 +2062,7 @@ _toggleMoveSelect(msgEl) {
     msgEl.classList.remove('move-selected');
   } else {
     if (this._moveSelectedIds.size >= 200) {
-      this._showToast('Maximum 200 messages can be moved at once', 'error');
+      this._showToast(t('modals.move_messages.max_messages', { max: 200 }), 'error');
       return;
     }
     this._moveSelectedIds.add(id);
@@ -1581,9 +2074,11 @@ _toggleMoveSelect(msgEl) {
 _updateMoveCount() {
   const countEl = document.getElementById('move-msg-count');
   const moveBtn = document.getElementById('move-msg-move-btn');
+  const deleteBtn = document.getElementById('move-msg-delete-btn');
   const n = this._moveSelectedIds.size;
   if (countEl) countEl.textContent = t('modals.move_messages.selected', { n });
   if (moveBtn) moveBtn.disabled = n === 0;
+  if (deleteBtn) deleteBtn.disabled = n === 0;
 },
 
 _showMoveChannelPicker() {
@@ -1602,7 +2097,7 @@ _showMoveChannelPicker() {
   );
 
   if (channels.length === 0) {
-    list.innerHTML = '<div class="move-msg-empty">No other channels available</div>';
+    list.innerHTML = `<div class="move-msg-empty">${t('modals.move_messages.no_channels')}</div>`;
   } else {
     for (const ch of channels) {
       const item = document.createElement('button');
@@ -1631,7 +2126,48 @@ _executeMoveMessages(toCode, toName) {
     if (resp && resp.error) {
       this._showToast(resp.error, 'error');
     } else if (resp && resp.success) {
-      this._showToast(`Moved ${resp.moved} message${resp.moved === 1 ? '' : 's'} to #${toName}`, 'success');
+      this._showToast(t(resp.moved === 1 ? 'modals.move_messages.moved_one' : 'modals.move_messages.moved_many', { n: resp.moved, name: toName }), 'success');
+    }
+    this._exitMoveSelectionMode();
+  });
+},
+
+async _executeDeleteMessages() {
+  const n = this._moveSelectedIds.size;
+  if (n === 0) return;
+  const ok = await this._showConfirmModal(
+    t(n === 1 ? 'modals.move_messages.delete_confirm_one' : 'modals.move_messages.delete_confirm_many', { n }),
+    t('modals.move_messages.delete_confirm_warn'),
+    { danger: true, confirmLabel: t('msg_toolbar.delete') }
+  );
+  if (!ok) return;
+
+  const ids = [...this._moveSelectedIds];
+  const code = this.currentChannel;
+  // For E2E DMs the server can't read attachment URLs out of ciphertext, so
+  // hand it the URLs per message the same way single-delete does. The move
+  // selector is mod/non-DM gated today, but keep this future-proof.
+  const attachmentsByMessage = {};
+  for (const id of ids) {
+    const urls = this._getMessageAttachments?.(id);
+    if (Array.isArray(urls) && urls.length) attachmentsByMessage[id] = urls;
+  }
+
+  this.socket.emit('delete-messages', {
+    code,
+    messageIds: ids,
+    attachmentsByMessage
+  }, (resp) => {
+    if (resp && resp.error && !resp.deleted) {
+      this._showToast(resp.error, 'error');
+    } else if (resp && resp.success) {
+      const deleted = resp.deleted || 0;
+      const skipped = resp.skipped || 0;
+      if (skipped > 0) {
+        this._showToast(t('modals.move_messages.deleted_partial', { n: deleted, skipped }), 'warning');
+      } else {
+        this._showToast(t(deleted === 1 ? 'modals.move_messages.deleted_one' : 'modals.move_messages.deleted_many', { n: deleted }), 'success');
+      }
     }
     this._exitMoveSelectionMode();
   });
@@ -1649,6 +2185,10 @@ _initMoveMessages() {
   const moveBtn = document.getElementById('move-msg-move-btn');
   if (moveBtn) moveBtn.addEventListener('click', () => this._showMoveChannelPicker());
 
+  // "Delete" button in toolbar (#5460)
+  const deleteBtn = document.getElementById('move-msg-delete-btn');
+  if (deleteBtn) deleteBtn.addEventListener('click', () => this._executeDeleteMessages());
+
   // Cancel button in toolbar
   const cancelBtn = document.getElementById('move-msg-cancel-btn');
   if (cancelBtn) cancelBtn.addEventListener('click', () => this._exitMoveSelectionMode());
@@ -1664,6 +2204,146 @@ _initMoveMessages() {
   if (modal) modal.addEventListener('click', (e) => {
     if (e.target === modal) modal.style.display = 'none';
   });
+},
+
+/* ── Message right-click context menu (main #messages pane) ───────────
+   A right-click twin of the hover toolbar carrying the same set of actions
+   (edit, reply, quote, pin, react, thread, copy-link, archive, delete). It
+   calls the exact same underlying methods the toolbar dispatch does (no new
+   API surface), gates each item on the same permissions the toolbar uses, and
+   borrows the channel context menu's CSS classes (.channel-ctx-menu /
+   .channel-ctx-item / .channel-ctx-sep / .danger) so it inherits every
+   theme — including win95 — for free. Cursor-positioned and self-closing,
+   modelled on _showImageContextMenu. */
+_showMessageContextMenu(e, msgEl) {
+  this._hideMessageContextMenu();
+  const msgId = parseInt(msgEl.dataset.msgId, 10);
+  if (!msgId) return;
+
+  const curCh      = this.channels?.find(c => c.code === this.currentChannel);
+  const isDm       = !!curCh?.is_dm;
+  const isOwn      = String(msgEl.dataset.userId) === String(this.user?.id);
+  const isPinned   = msgEl.dataset.pinned === '1'  || msgEl.classList.contains('pinned');
+  const isArchived = msgEl.dataset.archived === '1' || msgEl.classList.contains('archived');
+  const canPin       = !!(this.user?.isAdmin || this._hasPerm('pin_message'));
+  const canArchive   = !!(this.user?.isAdmin || this._hasPerm('archive_messages'));
+  const canShareLink = !isDm && !!this._canShareChannelLink?.(this.currentChannel);
+  // Same level-vs-permission gap as the toolbar above (#5461).
+  const canDelete    = isOwn || this.user?.isAdmin || this._canModerate() ||
+                       this._hasPerm('delete_message');
+
+  // Layout: the actions defined first (Edit, Reply, Quote, Pin) — separator —
+  // the remaining hover-toolbar actions (React, Thread, Copy Link, Protect) —
+  // separator — Delete. Every item carries the same data-action the toolbar
+  // uses, and each action is gated on the same permission, so the two menus
+  // stay behaviourally identical.
+  const items = [];
+  // First group (as originally defined)
+  if (isOwn) items.push(`<button class="channel-ctx-item" data-action="edit">✏️ <span>${t('msg_toolbar.edit')}</span></button>`);
+  items.push(`<button class="channel-ctx-item" data-action="reply">↩️ <span>${t('msg_toolbar.reply')}</span></button>`);
+  items.push(`<button class="channel-ctx-item" data-action="quote">💬 <span>${t('msg_toolbar.quote')}</span></button>`);
+  if (canPin) {
+    items.push(isPinned
+      ? `<button class="channel-ctx-item" data-action="unpin">📌 <span>${t('msg_toolbar.unpin')}</span></button>`
+      : `<button class="channel-ctx-item" data-action="pin">📌 <span>${t('msg_toolbar.pin')}</span></button>`);
+  }
+  // Separator, then the rest of the hover-toolbar actions
+  items.push('<hr class="channel-ctx-sep">');
+  items.push(`<button class="channel-ctx-item" data-action="react">😀 <span>${t('msg_toolbar.react')}</span></button>`);
+  if (!isDm) items.push(`<button class="channel-ctx-item" data-action="thread">🧵 <span>${t('msg_toolbar.thread')}</span></button>`);
+  if (canShareLink) items.push(`<button class="channel-ctx-item" data-action="copy-link">🔗 <span>${t('msg_toolbar.copy_link')}</span></button>`);
+  if (canArchive) {
+    items.push(isArchived
+      ? `<button class="channel-ctx-item" data-action="unarchive">🛡️ <span>${t('app.messages.unprotect_btn')}</span></button>`
+      : `<button class="channel-ctx-item" data-action="archive">🛡️ <span>${t('app.messages.protect_btn')}</span></button>`);
+  }
+  // A posted role menu's roles, emojis and text can be changed later (#5644).
+  const canEditRoleMenu = !!msgEl.querySelector('.role-menu-widget') &&
+                          !!(this.user?.isAdmin || this._hasPerm('manage_roles') || this._hasPerm('promote_user'));
+  if (canEditRoleMenu) items.push(`<button class="channel-ctx-item" data-action="edit-role-menu">🎭 <span>${t('settings.admin.role_menu.edit')}</span></button>`);
+  // Separator right above Delete
+  if (canDelete) {
+    items.push('<hr class="channel-ctx-sep">');
+    items.push(`<button class="channel-ctx-item danger" data-action="delete">🗑️ <span>${t('msg_toolbar.delete')}</span></button>`);
+  }
+
+  const menu = document.createElement('div');
+  menu.id = 'message-context-menu';
+  menu.className = 'channel-ctx-menu';
+  menu.innerHTML = items.join('');
+  menu.style.left = e.clientX + 'px';
+  menu.style.top  = e.clientY + 'px';
+  document.body.appendChild(menu);
+
+  // Clamp inside the viewport (same as the image/channel menus).
+  const rect = menu.getBoundingClientRect();
+  if (rect.right  > window.innerWidth)  menu.style.left = (window.innerWidth  - rect.width  - 8) + 'px';
+  if (rect.bottom > window.innerHeight) menu.style.top  = (window.innerHeight - rect.height - 8) + 'px';
+
+  menu.addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('[data-action]');
+    if (!btn) return;
+    const action = btn.dataset.action;
+    this._hideMessageContextMenu();
+    if (action === 'edit') {
+      this._startEditMessage(msgEl, msgId);
+    } else if (action === 'reply') {
+      this._setReply(msgEl, msgId);
+    } else if (action === 'quote') {
+      this._quoteMessage(msgEl);
+    } else if (action === 'react') {
+      this._showReactionPicker(msgEl, msgId);
+    } else if (action === 'thread') {
+      // Defence in depth — threads never exist in DMs.
+      if (this.channels?.find(c => c.code === this.currentChannel)?.is_dm) {
+        this._showToast?.(t('thread_list.unavailable_in_dm'), 'info');
+      } else {
+        this._openThread(msgId);
+      }
+    } else if (action === 'copy-link') {
+      this._copyChannelLink(this.currentChannel, msgId);
+    } else if (action === 'pin') {
+      if (await this._showConfirmModal(t('confirm.pin_message'), '')) {
+        this.socket.emit('pin-message', { messageId: msgId });
+      }
+    } else if (action === 'unpin') {
+      this.socket.emit('unpin-message', { messageId: msgId });
+    } else if (action === 'archive') {
+      this.socket.emit('archive-message', { messageId: msgId });
+    } else if (action === 'unarchive') {
+      this.socket.emit('unarchive-message', { messageId: msgId });
+    } else if (action === 'edit-role-menu') {
+      this._openRoleMenuBuilder?.({ messageId: msgId });
+    } else if (action === 'delete') {
+      if (await this._showConfirmModal(t('confirm.delete_message'), '', { danger: true, confirmLabel: t('msg_toolbar.delete') })) {
+        this.socket.emit('delete-message', { messageId: msgId, attachments: this._getMessageAttachments?.(msgId) });
+      }
+    }
+  });
+
+  // Dismiss on outside click, another right-click, or scroll of the pane —
+  // mirrors the image context menu's self-closing lifecycle.
+  const closer = (ev) => {
+    if (ev && ev.type !== 'scroll' && menu.contains(ev.target)) return;
+    this._hideMessageContextMenu();
+  };
+  this._msgCtxCloser = closer;
+  setTimeout(() => {
+    document.addEventListener('click', closer, true);
+    document.addEventListener('contextmenu', closer, true);
+    document.getElementById('messages')?.addEventListener('scroll', closer, true);
+  }, 0);
+},
+
+_hideMessageContextMenu() {
+  const existing = document.getElementById('message-context-menu');
+  if (existing) existing.remove();
+  if (this._msgCtxCloser) {
+    document.removeEventListener('click', this._msgCtxCloser, true);
+    document.removeEventListener('contextmenu', this._msgCtxCloser, true);
+    document.getElementById('messages')?.removeEventListener('scroll', this._msgCtxCloser, true);
+    this._msgCtxCloser = null;
+  }
 },
 
 };

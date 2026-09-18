@@ -5,10 +5,18 @@
 # for public repos, no account caps, no manual steps needed.
 #
 # Builds amd64 and arm64 on separate NATIVE runners (no QEMU),
-# pushes each as a digest, then merges into a multi-arch manifest.
+# pushes each as its OWN tag, then merges into a multi-arch manifest.
 # Native builds are required because better-sqlite3 compiles a
 # native C++ addon — QEMU emulation is too resource-constrained
 # and causes intermittent SIGILL/OOM failures during npm ci.
+#
+# Each arch is published under a persistent tag (…:<version>-amd64 /
+# …:<version>-arm64) instead of an untagged push-by-digest image. GHCR
+# prunes untagged child manifests, which silently dropped linux/arm64
+# from the multi-arch image starting v3.31.1 (#5439). Tagged images are
+# never treated as untagged, so both arches survive. Referencing those
+# tags in the merge step (instead of an expiring digest artifact) also
+# means a manual re-run of the merge keeps working long after release.
 # ─────────────────────────────────────────────────────────────
 
 name: Docker Publish
@@ -35,12 +43,17 @@ jobs:
         include:
           - platform: linux/amd64
             runner: ubuntu-latest
+            arch: amd64
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
+            arch: arm64
 
     steps:
       - name: Lowercase image name
         run: echo "IMAGE_NAME=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
+      - name: Resolve release version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -61,30 +74,18 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
-      - name: Build and push image digest
-        id: build
+      # Push each architecture as its own persistent tag so GHCR never prunes
+      # it as an untagged child manifest (#5439). provenance:false keeps each
+      # arch a clean single-platform manifest for the merge step below.
+      - name: Build and push ${{ matrix.arch }} image
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: ${{ matrix.platform }}
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          provenance: false
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}-${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
-
-      - name: Export digest
-        run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
-
-      - name: Upload digest artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: digest-${{ matrix.runner }}
-          path: /tmp/digests/*
-          if-no-files-found: error
-          retention-days: 1
 
   merge:
     name: Merge multi-arch manifest
@@ -98,12 +99,8 @@ jobs:
       - name: Lowercase image name
         run: echo "IMAGE_NAME=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
 
-      - name: Download digests
-        uses: actions/download-artifact@v4
-        with:
-          path: /tmp/digests
-          pattern: digest-*
-          merge-multiple: true
+      - name: Resolve release version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -125,9 +122,23 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
 
+      # Combine the two per-arch tags into the public multi-arch tags
+      # (<version>, <major>.<minor>, latest).
       - name: Create and push multi-arch manifest
-        working-directory: /tmp/digests
         run: |
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}-amd64 \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}-arm64
+
+      # Confirm the pushed manifest actually advertises BOTH arches, so a
+      # future regression fails loudly here instead of silently shipping a
+      # single-arch image again (#5439).
+      - name: Verify multi-arch manifest
+        run: |
+          echo "Inspecting ${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+          out=$(docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${VERSION}")
+          echo "$out"
+          echo "$out" | grep -q "linux/amd64" || { echo "::error::amd64 missing from manifest"; exit 1; }
+          echo "$out" | grep -q "linux/arm64" || { echo "::error::arm64 missing from manifest"; exit 1; }
+          echo "Multi-arch manifest verified: amd64 + arm64 present."

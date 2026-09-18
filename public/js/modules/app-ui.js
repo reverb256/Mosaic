@@ -70,11 +70,33 @@ _handleAutocompleteKeydown(e) {
     }
     if (e.key === 'Escape') { this._hidePersonaDropdown(); return true; }
   }
+  const ferryDd = document.getElementById('ferry-dropdown');
+  if (ferryDd && ferryDd.style.display !== 'none') {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      this._navigateFerryDropdown(e.key === 'ArrowDown' ? 1 : -1);
+      return true;
+    }
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      const active = ferryDd.querySelector('.mention-item.active');
+      if (active) { e.preventDefault(); active.click(); return true; }
+    }
+    if (e.key === 'Escape') { this._hideFerryDropdown(); return true; }
+  }
   return false;
 },
 
 _setupUI() {
   const msgInput = document.getElementById('message-input');
+
+  // A Discord emote whose picture cannot be fetched (bridge off, emote deleted,
+  // offline) shows its :name: instead of a broken image. Error events do not
+  // bubble, so this listens in the capture phase.
+  document.addEventListener('error', (e) => {
+    const img = e.target;
+    if (!(img instanceof HTMLImageElement) || !img.classList.contains('discord-emote')) return;
+    img.replaceWith(document.createTextNode(img.alt || ''));
+  }, true);
 
   // Shorter placeholder on narrow screens to prevent wrapping
   if (window.innerWidth <= 480) {
@@ -164,9 +186,30 @@ _setupUI() {
       if (e.key === 'Escape') { this._hidePersonaDropdown(); return; }
     }
 
+    // Ferry target dropdown takes the same keys as the persona one above.
+    const ferryDd = document.getElementById('ferry-dropdown');
+    if (ferryDd && ferryDd.style.display !== 'none') {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        this._navigateFerryDropdown(e.key === 'ArrowDown' ? 1 : -1);
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        const active = ferryDd.querySelector('.mention-item.active');
+        if (active) { e.preventDefault(); active.click(); return; }
+      }
+      if (e.key === 'Escape') { this._hideFerryDropdown(); return; }
+    }
+
+    // Ctrl + Enter opens scheduled send modal
+    // Just Enter sends the message
     if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      this._sendMessage();
+      if (e.ctrlKey) {
+        this._openScheduleModal();
+      } else {
+        e.preventDefault();
+        this._sendMessage();
+      }
     }
 
     // Up arrow on empty input → edit last own message (toggleable)
@@ -181,6 +224,12 @@ _setupUI() {
           break;
         }
       }
+    }
+
+    // Markdown Formatting shortcuts
+    if (this._handleMarkdownShortcuts(msgInput, e)) {
+      e.preventDefault();
+      return;
     }
   });
 
@@ -205,9 +254,40 @@ _setupUI() {
     this._checkSlashTrigger();
     // Check for >>persona trigger (#86, #5349)
     this._checkPersonaTrigger();
+    // Check for =>Discord ferry target trigger
+    this._checkFerryTrigger();
+  });
+
+  // insert a markdown link when a link is pasted over selected text
+  msgInput.addEventListener('paste', (event) => {
+    if (this._handleMarkdownLinkPaste(msgInput, event)) {
+      event.preventDefault();
+    }
   });
 
   document.getElementById('send-btn').addEventListener('click', () => this._sendMessage());
+  // Right-click on Send: send later (#5638). /schedule does the same.
+  document.getElementById('send-btn').addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    this._openScheduleModal();
+  });
+  document.getElementById('schedule-cancel')?.addEventListener('click', () => { document.getElementById('schedule-modal').style.display = 'none'; });
+  document.getElementById('schedule-save')?.addEventListener('click', () => this._submitSchedule());
+  document.getElementById('schedule-modal')?.addEventListener('click', (e) => { if (e.target.id === 'schedule-modal') e.target.style.display = 'none'; });
+
+  const sendLaterText = document.getElementById('schedule-text');
+  sendLaterText.addEventListener('keydown', (e) => {
+    // Markdown Formatting shortcuts
+    if (this._handleMarkdownShortcuts(sendLaterText, e)) {
+      e.preventDefault();
+    }
+  });
+  sendLaterText.addEventListener('paste', (e) => {
+    // insert a markdown link when a link is pasted over selected text
+    if (this._handleMarkdownLinkPaste(sendLaterText, e)) {
+      e.preventDefault();
+    }
+  });
 
   // Join channel
   const joinBtn = document.getElementById('join-channel-btn');
@@ -228,8 +308,10 @@ _setupUI() {
       const temporary = document.getElementById('new-channel-temporary')?.checked || false;
       const duration = parseInt(document.getElementById('new-channel-duration')?.value, 10) || 24;
       const addAllMembers = document.getElementById('new-channel-add-all')?.checked || false;
+      const isForum = document.getElementById('new-channel-forum')?.checked || false;
       if (name) {
-        this.socket.emit('create-channel', { name, isPrivate, temporary, duration, addAllMembers });
+        this.socket.emit('create-channel', { name, isPrivate, temporary, duration, addAllMembers, isForum, ...this._channelTemplateExtras() });
+        this._resetChannelTemplate();
         nameInput.value = '';
         const pvt = document.getElementById('new-channel-private');
         if (pvt) pvt.checked = false;
@@ -291,6 +373,19 @@ _setupUI() {
       { danger: true }
     );
     if (!ok) return;
+    // A parent takes its sub-channels with it. Say so, name them, and point
+    // at the way out for anyone who wants to keep some of them.
+    const ch = this.channels.find(c => c.code === code);
+    const subs = ch ? this.channels.filter(c => c.parent_channel_id === ch.id) : [];
+    if (subs.length) {
+      const names = subs.map(s => '#' + s.name).join(', ');
+      const okSubs = await this._showConfirmModal(
+        '⚠️ ' + t('confirm.delete_channel_subs_title'),
+        t('confirm.delete_channel_subs', { names }),
+        { danger: true, confirmLabel: t('confirm.delete_channel_subs_btn') }
+      );
+      if (!okSubs) return;
+    }
     this.socket.emit('delete-channel', { code });
   });
   // Mark channel as read
@@ -322,7 +417,7 @@ _setupUI() {
     if (!code) return;
     if (!this._canShareChannelLink?.(code)) {
       this._closeChannelCtxMenu();
-      this._showToast?.(t('toasts.channel_link_unavailable') || 'Channel not available on this server', 'error');
+      this._showToast?.(t('toasts.channel_link_unavailable'), 'error');
       return;
     }
     this._closeChannelCtxMenu();
@@ -413,9 +508,19 @@ _setupUI() {
     if (!code) return;
     const ch = this.channels.find(c => c.code === code);
 
-    // Helper: optimistically update ch, re-render panel
+    // Helper: optimistically update ch, re-render panel.
+    // The server can still refuse the change — a permission it doesn't grant,
+    // or a rule like "enable voice first" — and it answers a refusal with
+    // error-msg and no new channel state. Remember what the row held before
+    // the click so _revertPendingChannelToggle can put it back; without that
+    // the switch sat on its new value while the toast said it hadn't moved.
     const optimistic = (patch) => {
-      if (ch) Object.assign(ch, patch);
+      if (ch) {
+        const prev = {};
+        for (const key of Object.keys(patch)) prev[key] = ch[key];
+        this._cfnPendingToggle = { code, prev, at: Date.now() };
+        Object.assign(ch, patch);
+      }
       this._updateChannelFunctionsPanel(ch);
     };
 
@@ -439,6 +544,26 @@ _setupUI() {
       const newVal = ch && ch.read_only ? 0 : 1;
       optimistic({ read_only: newVal });
       this.socket.emit('toggle-channel-permission', { code, permission: 'read_only' });
+    } else if (fn === 'forum') {
+      const newVal = ch && ch.is_forum ? 0 : 1;
+      optimistic({ is_forum: newVal });
+      this.socket.emit('toggle-channel-permission', { code, permission: 'forum' });
+      // The ordering rule just changed under the open channel; reload it so
+      // the topics re-sort now instead of on the next visit.
+      if (code === this.currentChannel) {
+        setTimeout(() => this.socket.emit('get-messages', this._getMessagesParams ? this._getMessagesParams(code) : { code }), 400);
+      }
+    } else if (fn === 'private') {
+      const newVal = ch && ch.is_private ? 0 : 1;
+      optimistic({ is_private: newVal });
+      this.socket.emit('toggle-channel-permission', { code, permission: 'private' });
+    } else if (fn === 'nsfw') {
+      const newVal = ch && ch.is_nsfw ? 0 : 1;
+      optimistic({ is_nsfw: newVal });
+      this.socket.emit('toggle-channel-permission', { code, permission: 'nsfw' });
+    } else if (fn === 'forum-tags') {
+      document.getElementById('channel-functions-panel').style.display = 'none';
+      this._forumEditTags?.(code);
     } else if (fn === 'slow-mode') {
       const badge = row.querySelector('.cfn-badge');
       if (!badge || badge.tagName === 'INPUT') return;
@@ -462,6 +587,10 @@ _setupUI() {
       const newVal = ch && ch.cleanup_exempt === 1 ? 0 : 1;
       optimistic({ cleanup_exempt: newVal });
       this.socket.emit('toggle-cleanup-exempt', { code });
+    } else if (fn === 'welcome') {
+      const newVal = ch && ch.show_welcome === 1 ? 0 : 1;
+      optimistic({ show_welcome: newVal });
+      this.socket.emit('toggle-welcome-channel', { code });
     } else if (fn === 'voice') {
       const newVal = ch && ch.voice_enabled === 0 ? 1 : 0;
       // Disabling voice also disables streams and music
@@ -478,6 +607,10 @@ _setupUI() {
       const newType = isAnnouncement ? 'default' : 'announcement';
       optimistic({ notification_type: newType });
       this.socket.emit('set-notification-type', { code, type: newType });
+    } else if (fn === 'role-gate') {
+      this._openRoleGateModal(code);
+    } else if (fn === 'save-template') {
+      this._saveChannelAsTemplate(code);
     } else if (fn === 'default-role') {
       // (#5389) Dropdown of available server roles. Selecting one fires
       // set-channel-default-role; selecting "None" clears the default.
@@ -492,7 +625,7 @@ _setupUI() {
         select.className = 'cfn-select cfn-input';
         select.onclick = e2 => e2.stopPropagation();
         const noneOpt = document.createElement('option');
-        noneOpt.value = ''; noneOpt.textContent = 'None';
+        noneOpt.value = ''; noneOpt.textContent = t('channel_functions.none');
         select.appendChild(noneOpt);
         for (const r of roles) {
           const opt = document.createElement('option');
@@ -590,10 +723,10 @@ _setupUI() {
       modeSelect.className = 'cfn-input cfn-mode-select';
       const optDelete = document.createElement('option');
       optDelete.value = 'delete';
-      optDelete.textContent = t('channel_functions.self_destruct_mode_delete') || 'Delete channel';
+      optDelete.textContent = t('channel_functions.self_destruct_mode_delete');
       const optClear = document.createElement('option');
       optClear.value = 'clear';
-      optClear.textContent = t('channel_functions.self_destruct_mode_clear') || 'Clear messages';
+      optClear.textContent = t('channel_functions.self_destruct_mode_clear');
       modeSelect.appendChild(optDelete);
       modeSelect.appendChild(optClear);
       modeSelect.value = ch?.auto_delete_mode === 'clear' ? 'clear' : 'delete';
@@ -639,7 +772,7 @@ _setupUI() {
       select.className = 'cfn-select cfn-input';
       select.onclick = e2 => e2.stopPropagation();
       const noneOpt = document.createElement('option');
-      noneOpt.value = ''; noneOpt.textContent = 'None (disabled)';
+      noneOpt.value = ''; noneOpt.textContent = t('channel_functions.none_disabled');
       select.appendChild(noneOpt);
       for (const sub of subs) {
         const opt = document.createElement('option');
@@ -668,7 +801,7 @@ _setupUI() {
       const current = ch?.afk_timeout_minutes || 0;
       const input = document.createElement('input');
       input.type = 'number'; input.min = '0'; input.max = '1440';
-      input.value = current > 0 ? current : ''; input.placeholder = '1–1440 (0=off)'; input.className = 'cfn-input';
+      input.value = current > 0 ? current : ''; input.placeholder = t('channel_functions.afk_timeout_placeholder'); input.className = 'cfn-input';
       input.onclick = e2 => e2.stopPropagation();
       badge.replaceWith(input);
       input.focus(); input.select();
@@ -1094,7 +1227,7 @@ _setupUI() {
       const positionSeconds = durationSeconds > 0 ? (durationSeconds * pct) / 100 : 0;
       this._emitMusicSeek(positionSeconds, durationSeconds);
     });
-    this._setMusicActivityHint('You seeked.');
+    this._setMusicActivityHint(t('media.music_seeked'));
   });
   document.getElementById('music-link-input').addEventListener('input', (e) => {
     this._previewMusicLink(e.target.value.trim());
@@ -1342,6 +1475,18 @@ _setupUI() {
       this.voice.setScreenFrameRate(parseInt(e.target.value, 10));
     });
   }
+  const nativeScreenRow = document.getElementById('native-screen-share-row');
+  const nativeScreenHint = document.getElementById('native-screen-share-hint');
+  const nativeScreenToggle = document.getElementById('native-screen-share-enabled');
+  if (window.havenDesktop?.nativeScreen && nativeScreenToggle) {
+    nativeScreenRow.hidden = false;
+    nativeScreenHint.hidden = false;
+    nativeScreenToggle.checked = localStorage.getItem('haven_native_screen_share') === '1';
+    nativeScreenToggle.addEventListener('change', () => {
+      if (nativeScreenToggle.checked) localStorage.setItem('haven_native_screen_share', '1');
+      else localStorage.removeItem('haven_native_screen_share');
+    });
+  }
 
   // Wire up the voice manager's video callback
   this.voice.onScreenStream = (userId, stream) => this._handleScreenStream(userId, stream);
@@ -1355,16 +1500,16 @@ _setupUI() {
   // Wire up voice join/leave audio cues + Desktop OS notifications
   this.voice.onVoiceJoin = (userId, username) => {
     this.notifications.playDirect('voice_join');
-    if (window.havenDesktop?.notify && userId !== this.user?.id) {
+    if (window.havenDesktop?.notify && userId !== this.user?.id && this.notifications.popupAllowed()) {
       const name = this._getNickname(userId, username) || username;
-      window.havenDesktop.notify('Voice', `${name} joined voice`, { silent: true });
+      window.havenDesktop.notify(t('voice.notification_title'), t('voice.joined_notification', { name }), { silent: true });
     }
   };
   this.voice.onVoiceLeave = (userId, username) => {
     this.notifications.playDirect('voice_leave');
-    if (window.havenDesktop?.notify && userId !== this.user?.id) {
+    if (window.havenDesktop?.notify && userId !== this.user?.id && this.notifications.popupAllowed()) {
       const name = this._getNickname(userId, username) || username;
-      window.havenDesktop.notify('Voice', `${name} left voice`, { silent: true });
+      window.havenDesktop.notify(t('voice.notification_title'), t('voice.left_notification', { name }), { silent: true });
     }
   };
   // Wire up screen share start audio cue
@@ -1372,9 +1517,16 @@ _setupUI() {
     this.notifications.playDirect('stream_start');
   };
 
+  // Clear the per-sharer renegotiation budget when they deliberately start a
+  // new share, so the loop guard from #5426 does not carry a spent budget
+  // over from a previous stream.
+  this.voice.onScreenShareRestart = (userId) => {
+    if (this._renegBudget) delete this._renegBudget[userId];
+  };
+
   // Wire up AFK auto-move
   this.voice.onAfkMove = (channelCode) => {
-    this._showToast('Moved to AFK sub-channel due to inactivity', 'info');
+    this._showToast(t('voice.moved_to_afk'), 'info');
     this._updateVoiceButtons(false);
     this._updateVoiceStatus(false);
     this._updateVoiceBar();
@@ -1385,7 +1537,7 @@ _setupUI() {
 
   // Wire up voice-kicked (joined from another client/tab)
   this.voice.onVoiceKicked = (channelCode, reason) => {
-    this._showToast(reason || 'Voice disconnected — joined from another client', 'info');
+    this._showToast(reason || t('voice.disconnected_other_client'), 'info');
     this._updateVoiceButtons(false);
     this._updateVoiceStatus(false);
     this._updateVoiceBar();
@@ -1400,6 +1552,15 @@ _setupUI() {
   this.voice.onConnectivityWarning = (msg) => {
     this._showToast(msg, 'error', null, 12000);
   };
+  this.voice.onScreenShareWarning = () => {
+    const button = document.getElementById('screen-share-btn');
+    if (button) {
+      button.textContent = '🖥️';
+      button.title = t('voice.screen_share');
+      button.classList.remove('sharing');
+    }
+    this._showToast(t('voice.screen_share_cancelled'), 'error', null, 12000);
+  };
 
   // Wire up talking indicator
   this.voice.onTalkingChange = (userId, isTalking) => {
@@ -1411,6 +1572,11 @@ _setupUI() {
     // and the server gets a voice-activity ping for AFK tracking
     if (userId === 'self' && isTalking) this._resetIdle?.();
   };
+
+  // Watch for the voice UI drifting out of step with the actual session
+  // (see _reconcileVoiceUi) and repair it instead of stranding the user on a
+  // "Join Voice" button while they're still in the call.
+  this._startVoiceUiReconciler?.();
 
   // ── File video fullscreen: redirect to wrapper for proper controls ──
   // When a .file-video triggers fullscreen (via native controls), intercept and
@@ -1427,41 +1593,35 @@ _setupUI() {
     };
   }
 
-  // Search
+  // Search — the panel/cache/pager live in app-search.js. Here we just wire
+  // the header input to it. The panel persists across channel switches and
+  // only closes on its own X (or this input's close button).
+  this._searchInit();
   let searchTimeout = null;
   document.getElementById('search-toggle-btn').addEventListener('click', () => {
-    const sc = document.getElementById('search-container');
-    sc.style.display = sc.style.display === 'none' ? 'flex' : 'none';
-    if (sc.style.display === 'flex') document.getElementById('search-input').focus();
+    this._searchToggle();
   });
   document.getElementById('search-close-btn').addEventListener('click', () => {
-    document.getElementById('search-container').style.display = 'none';
-    document.getElementById('search-results-panel').style.display = 'none';
-    document.getElementById('search-input').value = '';
-  });
-  document.getElementById('search-results-close').addEventListener('click', () => {
-    document.getElementById('search-results-panel').style.display = 'none';
+    this._searchClose();
   });
   document.getElementById('search-input').addEventListener('input', (e) => {
     clearTimeout(searchTimeout);
     const q = e.target.value.trim();
-    if (q.length >= 2 && this.currentChannel) {
-      searchTimeout = setTimeout(() => {
-        const ch = (this.channels || []).find(c => c.code === this.currentChannel);
-        if (ch && ch.is_dm) {
-          this._searchDmCacheLocally(q);
-        } else {
-          this.socket.emit('search-messages', { code: this.currentChannel, query: q });
-        }
-      }, 400);
-    } else {
-      document.getElementById('search-results-panel').style.display = 'none';
+    // DMs match substrings locally (2 chars is fine); public search uses the
+    // server tokenizer's minimum (trigram needs 3). (search-overhaul phase 2)
+    const ch = (this.channels || []).find(c => c.code === this.currentChannel);
+    const min = (ch && ch.is_dm) ? 2 : (this._searchMinChars || 2);
+    if (q.length >= min && this.currentChannel) {
+      searchTimeout = setTimeout(() => this._searchRun(q), 400);
+    } else if (!q) {
+      document.getElementById('search-panel').style.display = 'none';
     }
   });
   document.getElementById('search-input').addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      document.getElementById('search-container').style.display = 'none';
-      document.getElementById('search-results-panel').style.display = 'none';
+    if (e.key === 'Escape') this._searchClose();
+    else if (e.key === 'Enter') {
+      const q = e.target.value.trim();
+      if (q) { this._searchSaveRecent(q); this._searchRun(q); }
     }
   });
 
@@ -1545,7 +1705,7 @@ _setupUI() {
       if (!this.currentChannel) return;
       const modal = document.getElementById('media-gallery-modal');
       const body = document.getElementById('media-gallery-body');
-      body.innerHTML = `<div class="media-gallery-empty muted-text">${(window.t && t('media_gallery.loading')) || 'Loading…'}</div>`;
+      body.innerHTML = `<div class="media-gallery-empty muted-text">${t('media_gallery.loading')}</div>`;
       // Reset tab counts
       ['photos','videos','audios','files','links'].forEach(k => {
         const el = document.getElementById(`media-count-${k}`);
@@ -1558,6 +1718,51 @@ _setupUI() {
       this.socket.emit('get-channel-media', { code: this.currentChannel });
     });
   }
+  // ── Channel thread list (#5506) ──
+  const threadsBtn = document.getElementById('threads-toggle-btn');
+  if (threadsBtn) {
+    threadsBtn.addEventListener('click', () => {
+      if (!this.currentChannel) return;
+      const modal = document.getElementById('threads-list-modal');
+      const body = document.getElementById('threads-list-body');
+      const search = document.getElementById('threads-list-search');
+      this._threadListData = null;
+      if (search) search.value = '';
+      body.innerHTML = `<div class="media-gallery-empty muted-text">${t('thread_list.loading')}</div>`;
+      modal.style.display = 'flex';
+      this.socket.emit('get-channel-threads', { code: this.currentChannel });
+      // Opened by pointer, so focusing the filter is a convenience, not a trap.
+      if (search) setTimeout(() => search.focus(), 50);
+    });
+  }
+  const threadsClose = document.getElementById('threads-list-close');
+  if (threadsClose) threadsClose.addEventListener('click', () => {
+    document.getElementById('threads-list-modal').style.display = 'none';
+  });
+  const threadsModal = document.getElementById('threads-list-modal');
+  if (threadsModal) threadsModal.addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) e.currentTarget.style.display = 'none';
+  });
+  const threadsSearch = document.getElementById('threads-list-search');
+  if (threadsSearch) threadsSearch.addEventListener('input', () => {
+    // Filtering client-side: the list is already capped server-side, and a
+    // round trip per keystroke would be worse than filtering 500 rows.
+    this._renderThreadList(threadsSearch.value);
+  });
+  const threadsBody = document.getElementById('threads-list-body');
+  if (threadsBody) threadsBody.addEventListener('click', (e) => {
+    const row = e.target.closest('.thread-list-row');
+    if (!row) return;
+    const parentId = parseInt(row.dataset.parentId, 10);
+    if (!parentId) return;
+    document.getElementById('threads-list-modal').style.display = 'none';
+    // Jump first: _openThread reads the parent's author and preview out of the
+    // rendered message, so opening a thread whose root sits far up the channel
+    // would otherwise show an empty header.
+    this._jumpToMessage?.(parentId);
+    setTimeout(() => this._openThread?.(parentId), 150);
+  });
+
   const galleryClose = document.getElementById('media-gallery-close');
   if (galleryClose) galleryClose.addEventListener('click', () => {
     document.getElementById('media-gallery-modal').style.display = 'none';
@@ -1571,6 +1776,7 @@ _setupUI() {
     btn.addEventListener('click', () => {
       document.querySelectorAll('#media-gallery-modal .media-tab').forEach(b => b.classList.toggle('active', b === btn));
       this._mediaGalleryActiveTab = btn.dataset.tab;
+      this._applyMediaTileSize();
       if (this._mediaGalleryData) this._renderMediaGalleryTab(this._mediaGalleryActiveTab);
       // Switching tabs clears selection — selecting items across tabs and
       // hitting Delete would be confusing since each tab has its own scope.
@@ -1592,6 +1798,28 @@ _setupUI() {
       this._mediaGallerySort = sortSel.value || 'date-desc';
       try { localStorage.setItem('mediaGallerySort', this._mediaGallerySort); } catch {}
       if (this._mediaGalleryData) this._renderMediaGalleryTab(this._mediaGalleryActiveTab || 'photos');
+    });
+  }
+
+  const tileSlider = document.getElementById('media-gallery-tile');
+  if (tileSlider) {
+    tileSlider.value = String(this._mediaTilePx());
+    this._applyMediaTileSize();
+    tileSlider.addEventListener('input', () => {
+      const px = this._mediaTilePx(tileSlider.value);
+      try { localStorage.setItem('mediaGalleryTile', String(px)); } catch {}
+      this._applyMediaTileSize(px);
+    });
+  }
+  // Tile shape, shared with the forum gallery (#5645).
+  const shapeSel = document.getElementById('media-gallery-shape');
+  if (shapeSel && this._tileShapeOptionsHtml) {
+    let saved = 'square';
+    try { saved = this._forumParseShape(localStorage.getItem('mediaGalleryShape')); } catch {}
+    shapeSel.innerHTML = this._tileShapeOptionsHtml(saved);
+    shapeSel.addEventListener('change', () => {
+      try { localStorage.setItem('mediaGalleryShape', this._forumParseShape(shapeSel.value)); } catch {}
+      this._applyMediaTileSize();
     });
   }
 
@@ -1625,10 +1853,7 @@ _setupUI() {
     if (!this._mediaGallerySelected || this._mediaGallerySelected.size === 0) return;
     if (!this.currentChannel) return;
     const count = this._mediaGallerySelected.size;
-    const ok = confirm(
-      (window.t && t('media_gallery.confirm_delete', { count })) ||
-      `Delete ${count} selected item${count === 1 ? '' : 's'}? The underlying messages will be removed for everyone. This cannot be undone.`
-    );
+    const ok = confirm(t('media_gallery.confirm_delete', { count }));
     if (!ok) return;
     // Build messageIds (one delete per message — bulk endpoint dedupes
     // server-side too). Group attachment URLs per message id so E2E DM
@@ -1649,11 +1874,13 @@ _setupUI() {
     }, (res) => {
       delBtn.disabled = false;
       if (!res || res.error) {
-        if (this._showToast) this._showToast(res?.error || 'Delete failed', 'error');
-        else alert(res?.error || 'Delete failed');
+        if (this._showToast) this._showToast(res?.error || t('media_gallery.delete_failed'), 'error');
+        else alert(res?.error || t('media_gallery.delete_failed'));
         return;
       }
-      if (this._showToast) this._showToast(`Deleted ${res.deleted || 0}${res.skipped ? ` (${res.skipped} skipped)` : ''}`, 'info');
+      if (this._showToast) this._showToast(res.skipped
+        ? t('media_gallery.deleted_with_skipped', { deleted: res.deleted || 0, skipped: res.skipped })
+        : t('media_gallery.deleted', { count: res.deleted || 0 }), 'info');
       // Clear selection, exit select mode, and refresh data
       if (this._mediaGallerySelected) this._mediaGallerySelected.clear();
       this._mediaGallerySelectMode = false;
@@ -1672,6 +1899,9 @@ _setupUI() {
     sidebarToggle.textContent = collapsed ? '\u276E' : '\u276F'; // ❮ or ❯
     window._updateSbToggleRight?.();
   }
+  // Exposed so the search panel can temporarily un-collapse the sidebar it
+  // overlays, then restore the user's preference on close. (search-overhaul)
+  this._applySidebarCollapsed = applySidebarCollapsed;
 
   // Default is expanded; only collapse if explicitly saved as '1'
   applySidebarCollapsed(localStorage.getItem('haven-sidebar-collapsed') === '1');
@@ -1735,6 +1965,24 @@ _setupUI() {
 
   // Global keyboard shortcuts
   document.addEventListener('keydown', (e) => {
+    // Type-to-focus: start typing anywhere and the message box takes over.
+    // No preventDefault, so the browser inserts the keystroke into the newly
+    // focused textarea — nothing is dropped.
+    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing) {
+      const ae = document.activeElement;
+      const tag = ae?.tagName;
+      const editing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || ae?.isContentEditable;
+      // getClientRects().length is 0 for hidden elements, incl. fixed overlays
+      const popupOpen = [...document.querySelectorAll(
+        '.modal-overlay, #quick-switcher-overlay, #theme-popup, #search-container, .context-menu'
+      )].some(el => el.getClientRects().length > 0);
+      const msgInput = document.getElementById('message-input');
+      const msgArea = document.getElementById('message-area');
+      if (!editing && !popupOpen && this.currentChannel && msgInput && msgArea && msgArea.style.display !== 'none') {
+        msgInput.focus();
+      }
+    }
+
     // Ctrl+F = search
     if ((e.ctrlKey || e.metaKey) && e.key === 'f' && this.currentChannel) {
       e.preventDefault();
@@ -1746,6 +1994,12 @@ _setupUI() {
     if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
       e.preventDefault();
       this._openQuickSwitcher();
+    }
+    // Ctrl+E = toggle emoji picker (open/close)
+    if ((e.ctrlKey || e.metaKey) && e.key === 'e' && this.currentChannel) {
+      e.preventDefault();
+      this._emojiPickerContext = 'main';
+      this._toggleEmojiPicker();
     }
     // Alt+ArrowUp/Down = navigate channels
     if (e.altKey && !e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
@@ -1760,12 +2014,52 @@ _setupUI() {
     // Escape = close modals, search, theme popup, quick switcher
     if (e.key === 'Escape') {
       document.getElementById('search-container').style.display = 'none';
-      document.getElementById('search-results-panel').style.display = 'none';
+      document.getElementById('search-panel').style.display = 'none';
       document.getElementById('theme-popup').style.display = 'none';
       document.getElementById('quick-switcher-overlay')?.remove();
       document.querySelectorAll('.modal-overlay').forEach(m => m.style.display = 'none');
+      // Close the emoji picker too. Reuse its toggle so the parent/anchor
+      // restore runs, and only when it's open so Escape can't open it.
+      const emojiPicker = document.getElementById('emoji-picker');
+      if (emojiPicker && emojiPicker.style.display === 'flex') this._toggleEmojiPicker();
+      // Close the GIF picker too, matching the emoji picker's Escape behavior.
+      const gifPicker = document.getElementById('gif-picker');
+      if (gifPicker && gifPicker.style.display === 'flex') gifPicker.style.display = 'none';
     }
   });
+
+  // Escape (no modifiers) with nothing else to close → jump to the latest
+  // message, same as the jump-to-bottom button. Runs in the CAPTURE phase so it
+  // inspects overlays/dropdowns *before* the bubble-phase handlers above (and
+  // the message-input dropdown handlers) close them. If any closeable UI is
+  // open we bail and let those handlers run, so Escape never both dismisses a
+  // popup and jumps. Gated on an active channel with the message view visible.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+    if (!this.currentChannel) return;
+    const msgArea = document.getElementById('message-area');
+    if (!msgArea || msgArea.style.display === 'none') return;
+    // An in-progress message edit owns Escape (it cancels the edit) and its
+    // handler sits on the textarea in the bubble phase, so this capture-phase
+    // listener would otherwise scroll away from — or, on a trimmed window,
+    // re-render out of existence — the box being typed into. Editing an old
+    // message is exactly the scrolled-up case, so check it first.
+    if (document.querySelector('.edit-textarea')) return;
+    // getClientRects().length is 0 for hidden/display:none nodes — same popup
+    // detection the type-to-focus guard uses above.
+    // The PiP DM, thread and pins panels each own Escape for their own input;
+    // jumping the main channel behind them is never what was meant. Haven's
+    // context menu is .channel-ctx-menu — there is no .context-menu element.
+    const somethingOpen = [...document.querySelectorAll(
+      '.modal-overlay, #quick-switcher-overlay, #theme-popup, #search-container, ' +
+      '#search-panel, #image-lightbox, .image-lightbox, #emoji-picker, ' +
+      '#gif-picker, .channel-ctx-menu, #emoji-dropdown, #slash-dropdown, ' +
+      '#mention-dropdown, #channel-dropdown, #persona-dropdown, #ferry-dropdown, #gif-slash-picker, ' +
+      '#dm-pip-panel, #thread-panel, #pins-pip-panel'
+    )].some(el => el.getClientRects().length > 0);
+    if (somethingOpen) return;
+    this._jumpToLatest();
+  }, true);
 
   // Theme popup toggle
   document.getElementById('theme-popup-toggle')?.addEventListener('click', () => {
@@ -1779,6 +2073,7 @@ _setupUI() {
   // Logout
   document.getElementById('logout-btn').addEventListener('click', () => {
     if (this.voice && this.voice.inVoice) this.voice.leave();
+    this._clearChannelCodeMap?.();
     localStorage.removeItem('haven_token');
     localStorage.removeItem('haven_user');
     localStorage.removeItem('haven_sync_key');
@@ -1788,13 +2083,13 @@ _setupUI() {
   // ── Games / Activities system ─────────────────────────────
   // Registry of available games — add new games here
   this._gamesRegistry = [
-    { id: 'flappy', name: 'Shippy Container', icon: '🚢', path: '/games/flappy.html', description: 'Dodge containers, chase high scores!' },
-    { id: 'flight', name: 'Flight', icon: '✈️', path: '/games/flash.html?swf=/games/roms/flight-759879f9.swf&title=Flight', description: 'Throw a paper plane as far as you can!', type: 'flash' },
-    { id: 'learn-to-fly-3', name: 'Learn to Fly 3', icon: '🐧', path: '/games/flash.html?swf=/games/roms/learn-to-fly-3.swf&title=Learn%20to%20Fly%203', description: 'Help a penguin learn to fly!', type: 'flash' },
-    { id: 'bubble-tanks-3', name: 'Bubble Tanks 3', icon: '🫧', path: '/games/flash.html?swf=/games/roms/Bubble%20Tanks%203.swf&title=Bubble%20Tanks%203', description: 'Bubble-based arena shooter', type: 'flash' },
-    { id: 'tanks', name: 'Tanks', icon: '🪖', path: '/games/flash.html?swf=/games/roms/tanks.swf&title=Tanks', description: 'Classic Armor Games tank combat', type: 'flash' },
-    { id: 'super-smash-flash-2', name: 'Super Smash Flash 2', icon: '⚔️', path: '/games/flash.html?swf=/games/roms/SuperSmash.swf&title=Super%20Smash%20Flash%202', description: 'Fan-made Smash Bros platformer fighter', type: 'flash' },
-    { id: 'io-games', name: '.io Games', icon: '🌐', path: '/games/io-games.html', description: 'Browse popular .io multiplayer games', type: 'browser' },
+    { id: 'flappy', name: 'Shippy Container', icon: '🚢', path: '/games/flappy.html', description: t('activities_registry.flappy') },
+    { id: 'flight', name: 'Flight', icon: '✈️', path: '/games/flash.html?swf=/games/roms/flight-759879f9.swf&title=Flight', description: t('activities_registry.flight'), type: 'flash' },
+    { id: 'learn-to-fly-3', name: 'Learn to Fly 3', icon: '🐧', path: '/games/flash.html?swf=/games/roms/learn-to-fly-3.swf&title=Learn%20to%20Fly%203', description: t('activities_registry.learn_to_fly'), type: 'flash' },
+    { id: 'bubble-tanks-3', name: 'Bubble Tanks 3', icon: '🫧', path: '/games/flash.html?swf=/games/roms/Bubble%20Tanks%203.swf&title=Bubble%20Tanks%203', description: t('activities_registry.bubble_tanks'), type: 'flash' },
+    { id: 'tanks', name: 'Tanks', icon: '🪖', path: '/games/flash.html?swf=/games/roms/tanks.swf&title=Tanks', description: t('activities_registry.tanks'), type: 'flash' },
+    { id: 'super-smash-flash-2', name: 'Super Smash Flash 2', icon: '⚔️', path: '/games/flash.html?swf=/games/roms/SuperSmash.swf&title=Super%20Smash%20Flash%202', description: t('activities_registry.super_smash'), type: 'flash' },
+    { id: 'io-games', name: '.io Games', icon: '🌐', path: '/games/io-games.html', description: t('activities_registry.io_games'), type: 'browser' },
   ];
 
   // Generic postMessage bridge for any game (scores + leaderboard)
@@ -1856,12 +2151,15 @@ _setupUI() {
 
   // Image click — open lightbox overlay (CSP-safe — no inline handlers)
   document.getElementById('messages').addEventListener('click', (e) => {
+    // A forum card handles its own clicks: the thumbnail opens the topic,
+    // not the lightbox (#5646).
+    if (e.target.closest('.forum-topic')) return;
     // Concealed media (hidden image / unrevealed spoiler) intercepts the click
     // before the lightbox opens.
     if (this._maybeRevealConcealed(e)) return;
     if (e.target.classList.contains('chat-image')) {
       this._lightboxContainer = document.getElementById('messages');
-      this._openLightbox(e.target.src);
+      this._openLightbox(this._lazyRealSrc ? this._lazyRealSrc(e.target) : e.target.src, e.target);
     }
     // Spoiler reveal toggle (text spoilers)
     if (e.target.closest('.spoiler')) {
@@ -1869,8 +2167,10 @@ _setupUI() {
     }
   });
 
-  // Image click in thread panel and DM PiP — same lightbox with container-aware navigation
-  for (const containerId of ['thread-messages', 'dm-pip-messages']) {
+  // Image click in thread panel, DM PiP, and the search results panel — same
+  // lightbox with container-aware navigation, spoiler reveal, and image
+  // right-click menu. Search reuses this wholesale. (search-overhaul phase 3)
+  for (const containerId of ['thread-messages', 'dm-pip-messages', 'search-panel-list']) {
     const el = document.getElementById(containerId);
     if (el) {
       el.addEventListener('click', (e) => {
@@ -1881,24 +2181,72 @@ _setupUI() {
         }
         if (e.target.classList.contains('chat-image')) {
           this._lightboxContainer = el;
-          this._openLightbox(e.target.src);
+          this._openLightbox(this._lazyRealSrc ? this._lazyRealSrc(e.target) : e.target.src, e.target);
         }
       });
       el.addEventListener('contextmenu', (e) => {
         if (e.target.classList.contains('chat-image')) {
           e.preventDefault();
-          this._showImageContextMenu(e, e.target.src);
+          this._showImageContextMenu(e, this._lazyRealSrc ? this._lazyRealSrc(e.target) : e.target.src, { sourceImg: e.target });
         }
+      });
+      // Middle click on a picture opens it in a new tab, like a link (#5663).
+      el.addEventListener('auxclick', (e) => {
+        if (e.button !== 1) return;
+        const img = e.target.closest('img.chat-image');
+        if (!img) return;
+        e.preventDefault();
+        this._openImageInNewTab(img);
       });
     }
   }
+  document.getElementById('messages').addEventListener('auxclick', (e) => {
+    if (e.button !== 1) return;
+    const img = e.target.closest('img.chat-image');
+    if (!img) return;
+    e.preventDefault();
+    this._openImageInNewTab(img);
+  });
 
-  // Image right-click — custom context menu for chat thumbnails
+  // Image right-click — custom context menu for chat thumbnails. Forum cards
+  // open their own menus, so both menus no longer stack up there (#5650).
   document.getElementById('messages').addEventListener('contextmenu', (e) => {
+    if (e.target.closest('.forum-topic')) return;
     if (e.target.classList.contains('chat-image')) {
       e.preventDefault();
-      this._showImageContextMenu(e, e.target.src);
+      this._showImageContextMenu(e, this._lazyRealSrc ? this._lazyRealSrc(e.target) : e.target.src, { sourceImg: e.target });
     }
+  });
+
+  // Message right-click — custom context menu (edit / reply / quote / pin / delete).
+  // Reuses the hover-toolbar actions; only opens over a real message row.
+  document.getElementById('messages').addEventListener('contextmenu', (e) => {
+    // Images have their own Save/Copy/Open menu (handled above) — leave them.
+    if (e.target.closest('.chat-image')) return;
+    // Inside the inline message-edit box, defer to the browser's native menu
+    // so spell-check suggestions work — none of our items apply while editing.
+    if (e.target.closest('.edit-textarea')) return;
+    // Don't hijack right-click while picking messages to move.
+    if (this._moveSelectionActive) return;
+    const msgEl = e.target.closest('.message, .message-compact');
+    if (!msgEl || !msgEl.dataset.msgId) return; // empty gutter / unsent rows → native menu
+    // Right-click directly on the author name or avatar → unified user menu,
+    // same as right-clicking the member list. Everything else on the row keeps
+    // the message context menu.
+    const authorTrigger = e.target.closest('.message-author, .message-avatar, .message-avatar-img');
+    if (authorTrigger && !e.target.closest('.msg-toolbar')) {
+      const userId = parseInt(msgEl.dataset.userId);
+      if (!isNaN(userId) && userId !== this.user.id) {
+        e.preventDefault();
+        this._showUserContextMenu(e, userId, msgEl.dataset.username);
+        return;
+      }
+    }
+    // Preserve native copy: if text is selected inside this message, defer.
+    const sel = window.getSelection?.();
+    if (sel && !sel.isCollapsed && msgEl.contains(sel.anchorNode)) return;
+    e.preventDefault();
+    this._showMessageContextMenu(e, msgEl);
   });
 
   // Risky file download warning — intercept clicks on potentially harmful files
@@ -1984,6 +2332,12 @@ _setupUI() {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       this._sendDMPiPMessage?.();
+      return;
+    }
+    // Markdown Formatting shortcuts
+    if (this._handleMarkdownShortcuts(dmPipInput, e)) {
+      e.preventDefault();
+      return;
     }
   });
   if (dmPipInput) dmPipInput.addEventListener('input', () => {
@@ -2001,19 +2355,68 @@ _setupUI() {
     if (!items) return;
     const targetCode = this._activeDMPip;
     if (!targetCode) return;
+    let handled = false;
     for (const item of items) {
-      if (item.kind === 'file') {
-        const file = item.getAsFile();
-        if (!file) continue;
-        e.preventDefault();
-        if (item.type.startsWith('image/')) {
-          this._queueImageForPiP(file, targetCode);
-        } else {
-          this._uploadGeneralFile(file, targetCode);
-        }
-        return;
+      if (item.kind !== 'file') continue;
+      const file = item.getAsFile();
+      if (!file) continue;
+      e.preventDefault();
+      handled = true;
+      if (item.type.startsWith('image/')) {
+        this._queueImageForPiP(file, targetCode);
+      } else {
+        this._uploadGeneralFile(file, targetCode);
       }
     }
+    if (handled) return;
+
+    // insert a markdown link when a link is pasted over selected text
+    if (this._handleMarkdownLinkPaste(dmPipInput, e)) {
+      e.preventDefault();
+    }
+  });
+
+  // A paperclip and drag-and-drop in the pop-out DM, since paste was the
+  // only way to send a picture from it, and middle-click opens a picture
+  // there and in a thread like it does in chat (#5663).
+  const dmPipUploadBtn = document.getElementById('dm-pip-upload-btn');
+  const dmPipFileInput = document.getElementById('dm-pip-file-input');
+  const dmPipTakeFiles = (files) => {
+    const targetCode = this._activeDMPip;
+    if (!files || !files.length || !targetCode) return false;
+    for (const file of files) {
+      if (file.type.startsWith('image/')) this._queueImageForPiP(file, targetCode);
+      else this._uploadGeneralFile(file, targetCode);
+    }
+    return true;
+  };
+  if (dmPipUploadBtn && dmPipFileInput) {
+    dmPipUploadBtn.addEventListener('click', (e) => { e.stopPropagation(); dmPipFileInput.click(); });
+    dmPipFileInput.addEventListener('change', () => {
+      dmPipTakeFiles(dmPipFileInput.files);
+      dmPipFileInput.value = '';
+    });
+  }
+  const dmPipPanel = document.getElementById('dm-pip-panel');
+  if (dmPipPanel) {
+    dmPipPanel.addEventListener('dragover', (e) => {
+      if (e.dataTransfer?.types?.includes('Files')) e.preventDefault();
+    });
+    dmPipPanel.addEventListener('drop', (e) => {
+      if (!e.dataTransfer?.files?.length) return;
+      e.preventDefault();
+      e.stopPropagation();
+      dmPipTakeFiles(e.dataTransfer.files);
+    });
+  }
+  ['dm-pip-messages', 'thread-messages'].forEach((id) => {
+    document.getElementById(id)?.addEventListener('auxclick', (e) => {
+      if (e.button !== 1) return;
+      const img = e.target.closest('img.chat-image');
+      if (!img) return;
+      e.preventDefault();
+      this._openImageInNewTab(img);
+    });
   });
 
   // PiP emoji button — positions the picker above the button and targets the PiP input
@@ -2091,7 +2494,7 @@ _setupUI() {
           // Threads are not available in DMs - swallow the click. The button
           // should already be filtered out at render time, this is defence
           // in depth in case an old cached element is still around.
-          this._showToast?.('Threads are not available in DMs', 'info');
+          this._showToast?.(t('thread_list.unavailable_in_dm'), 'info');
         }
         return;
       }
@@ -2148,6 +2551,12 @@ _setupUI() {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         this._sendThreadMessage();
+        return;
+      }
+      // Markdown Formatting shortcuts
+      if (this._handleMarkdownShortcuts(threadInput, e)) {
+        e.preventDefault();
+        return;
       }
     });
     threadInput.addEventListener('input', () => {
@@ -2161,34 +2570,30 @@ _setupUI() {
     threadInput.addEventListener('paste', (e) => {
       const items = e.clipboardData?.items;
       if (!items) return;
-      const parentId = this._activeThreadParent;
-      if (!parentId) return;
-      for (const item of items) {
-        if (item.kind === 'file') {
-          const file = item.getAsFile();
-          if (!file) continue;
-          e.preventDefault();
-          const maxMb = parseInt(this.serverSettings?.max_upload_mb) || 25;
-          if (file.size > maxMb * 1024 * 1024) {
-            this._showToast(`File too large (max ${maxMb} MB)`, 'error');
-            return;
-          }
-          const formData = new FormData();
-          formData.append('file', file);
-          this._uploadWithProgress('/api/upload-file', formData).then(data => {
-            if (data.error) { this._showToast(data.error, 'error'); return; }
-            let content;
-            if (data.isImage) {
-              content = data.url;
-            } else {
-              const sizeStr = this._formatFileSize(data.fileSize);
-              content = `[file:${data.originalName}](${data.url}|${sizeStr})`;
-            }
-            this.socket.emit('send-thread-message', { parentId, content });
-          }).catch(err => this._showToast(err.message || 'Upload failed', 'error'));
-          return;
-        }
+      if (!this._activeThreadParent) return;
+      // Hold them, don't post them. Flushed on send. (#thread-paste-instant)
+      const files = Array.from(items).filter(i => i.kind === 'file').map(i => i.getAsFile()).filter(Boolean);
+      if (files.length) {
+        e.preventDefault();
+        this._queueThreadFiles(files);
+        return;
       }
+
+      // insert a markdown link when a link is pasted over selected text
+      if (this._handleMarkdownLinkPaste(threadInput, e)) {
+        e.preventDefault();
+      }
+    });
+
+    // Drag & drop parity with the other composers — queue, never insta-post.
+    const threadArea = threadInput.closest('.thread-input-area') || threadInput;
+    threadArea.addEventListener('dragover', (e) => { e.preventDefault(); threadArea.classList.add('drag-over'); });
+    threadArea.addEventListener('dragleave', () => threadArea.classList.remove('drag-over'));
+    threadArea.addEventListener('drop', (e) => {
+      e.preventDefault();
+      threadArea.classList.remove('drag-over');
+      if (!this._activeThreadParent) return;
+      this._queueThreadFiles(e.dataTransfer?.files);
     });
   }
 
@@ -2338,40 +2743,7 @@ _setupUI() {
   // We set both `height` and `min-height` inline so the auto-grow `input`
   // handler (which sets `height = 'auto'` then caps at a small default) can't
   // collapse the textarea back down after the user has manually expanded it.
-  document.querySelectorAll('.pip-input-resizer').forEach(handle => {
-    let startY = 0;
-    let startHeight = 0;
-    let ta = null;
-    let cap = 600;
-
-    const onMove = (e) => {
-      if (!ta) return;
-      const delta = startY - e.clientY; // positive when dragging up
-      const newHeight = Math.max(34, Math.min(cap, startHeight + delta));
-      ta.style.height = `${newHeight}px`;
-      ta.style.minHeight = `${newHeight}px`;
-      ta.style.maxHeight = `${cap}px`;
-    };
-
-    const onUp = () => {
-      ta = null;
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-    };
-
-    handle.addEventListener('mousedown', (e) => {
-      ta = handle.parentElement?.querySelector('textarea');
-      if (!ta) return;
-      startY = e.clientY;
-      startHeight = ta.getBoundingClientRect().height;
-      // Cap manual expansion at ~60% of viewport so the textarea can never
-      // swallow the entire chat pane. Min 200px on tiny windows.
-      cap = Math.max(200, Math.floor(window.innerHeight * 0.6));
-      e.preventDefault();
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    });
-  });
+  document.querySelectorAll('.pip-input-resizer').forEach(handle => this._bindInputResizer(handle));
 
   // Emoji picker toggle
   document.getElementById('emoji-btn').addEventListener('click', () => {
@@ -2398,6 +2770,11 @@ _setupUI() {
   // Reply close button
   document.getElementById('reply-close-btn').addEventListener('click', () => {
     this._clearReply();
+  });
+
+  // Cancel whatever is currently uploading
+  document.getElementById('upload-cancel-btn')?.addEventListener('click', () => {
+    this._cancelUploads();
   });
 
   // Messages container — move-selection mode intercept (supports Shift+click range)
@@ -2456,7 +2833,7 @@ _setupUI() {
       // Threads are not available in DMs.
       const curCh = this.channels && this.channels.find(c => c.code === this.currentChannel);
       if (curCh && curCh.is_dm) {
-        this._showToast?.('Threads are not available in DMs', 'info');
+        this._showToast?.(t('thread_list.unavailable_in_dm'), 'info');
         return;
       }
       this._openThread(msgId);
@@ -2667,6 +3044,22 @@ _setupUI() {
   }
 
   // ── Poll vote click (delegated from messages container) ──
+  // Role menu buttons: one click gives you the role, another takes it back.
+  document.getElementById('messages').addEventListener('click', (e) => {
+    const btn = e.target.closest('.role-menu-btn');
+    if (!btn) return;
+    e.stopPropagation();
+    const messageId = parseInt(btn.dataset.msgId, 10);
+    const roleId = parseInt(btn.dataset.roleId, 10);
+    if (!messageId || !roleId) return;
+    btn.disabled = true;
+    this.socket.emit('toggle-self-role', { messageId, roleId, held: !btn.classList.contains('held') }, (res) => {
+      btn.disabled = false;
+      if (res?.error) return this._showToast(res.error, 'error');
+      this._markSelfRole(roleId, !!res?.held);
+    });
+  });
+
   document.getElementById('messages').addEventListener('click', (e) => {
     const optBtn = e.target.closest('.poll-option');
     if (!optBtn) return;
@@ -2685,6 +3078,9 @@ _setupUI() {
   document.getElementById('poll-btn').addEventListener('click', () => {
     this._openPollModal();
   });
+  document.getElementById('time-btn')?.addEventListener('click', () => {
+    this._openTimeModal();
+  });
 
   // (#5280) Burn-after-read toggle (DM-only, default 30 s).
   // Persistent toggle: once armed, every outgoing message in the
@@ -2696,20 +3092,13 @@ _setupUI() {
     _burnBtn.addEventListener('click', () => {
       this._burnArmed = !this._burnArmed;
       _burnBtn.classList.toggle('active', !!this._burnArmed);
-      // Use literal English for title — t() returns raw key on miss so the
-      // previous `t() || 'fallback'` pattern never showed the fallback. (#5325)
       _burnBtn.title = this._burnArmed
-        ? 'Burn-after-read ON — every message in this DM self-destructs 30s after viewing. Click to turn off.'
-        : 'Burn after read (DM only)';
+        ? t('app.input_bar.burn_btn_armed')
+        : t('app.input_bar.burn_btn');
       // Surface a toast so users get visible confirmation. The button alone
       // wasn't obvious enough that anything had happened. (#5325)
       const toastKey = this._burnArmed ? 'toasts.burn_armed' : 'toasts.burn_disarmed';
-      const toastFallback = this._burnArmed
-        ? '🔥 Burn-after-read ON — every message in this DM will self-destruct 30s after viewing'
-        : 'Burn-after-read disabled';
-      const translated = t(toastKey);
-      const toastText = (translated && translated !== toastKey) ? translated : toastFallback;
-      this._showToast?.(toastText, 'info');
+      this._showToast?.(t(toastKey), 'info');
     });
   }
   document.getElementById('poll-cancel-btn').addEventListener('click', () => {
@@ -2725,28 +3114,41 @@ _setupUI() {
     if (e.target.id === 'poll-modal') e.target.style.display = 'none';
   });
 
+  // ── /time timestamp picker modal ──
+  const timeModal = document.getElementById('time-modal');
+  if (timeModal) {
+    const refresh = () => this._tsmUpdatePreview();
+    ['tsm-year', 'tsm-month', 'tsm-day', 'tsm-hour', 'tsm-minute', 'tsm-second']
+      .forEach(id => document.getElementById(id)?.addEventListener('input', refresh));
+    timeModal.querySelectorAll('.tsm-mer-btn').forEach(b => {
+      b.addEventListener('click', () => { this._tsmSetMeridiem(b.dataset.mer); refresh(); });
+    });
+    document.getElementById('tsm-cal-btn')?.addEventListener('click', () => {
+      const di = document.getElementById('tsm-cal-input');
+      if (!di) return;
+      const cur = this._tsmBuildDate();
+      // Seed the native picker with the fields' current date so it opens there,
+      // decomposed in the same zone the wall-clock fields are read in.
+      if (cur) {
+        const p = n => String(n).padStart(2, '0');
+        const parts = this._zonedParts(cur);
+        di.value = `${parts.year}-${p(parts.monthIndex + 1)}-${p(parts.day)}`;
+      }
+      try { di.showPicker(); } catch { di.focus(); di.click(); }
+    });
+    document.getElementById('tsm-cal-input')?.addEventListener('change', () => this._tsmSyncFromCalendar());
+    document.getElementById('tsm-styles')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('.tsm-style-insert');
+      if (btn) this._tsmInsert(btn.dataset.style);
+    });
+    timeModal.addEventListener('click', (e) => {
+      if (e.target.id === 'time-modal') e.target.style.display = 'none';
+    });
+  }
+
   // Rename username
   document.getElementById('rename-btn').addEventListener('click', () => {
-    document.getElementById('rename-modal').style.display = 'flex';
-    const input = document.getElementById('rename-input');
-    input.value = this.user.displayName || this.user.username;
-    input.focus();
-    input.select();
-    // Populate bio
-    const bioInput = document.getElementById('edit-profile-bio');
-    if (bioInput) bioInput.value = this.user.bio || '';
-    // Load personas list (#86, #5349)
-    this._loadPersonas?.();
-    this._updateAvatarPreview();
-    // Sync shape picker buttons
-    const picker = document.getElementById('avatar-shape-picker');
-    if (picker) {
-      const currentShape = this.user.avatarShape || localStorage.getItem('haven_avatar_shape') || 'circle';
-      picker.querySelectorAll('.avatar-shape-btn').forEach(b => {
-        b.classList.toggle('active', b.dataset.shape === currentShape);
-      });
-      this._pendingAvatarShape = currentShape;
-    }
+    this._openRenameModal();
   });
 
   // ── Profile popup: click on message author name or avatar ──
@@ -2764,10 +3166,16 @@ _setupUI() {
       clearTimeout(this._hoverCloseTimer);
       clearTimeout(this._hoverAutoCloseTimer);
       clearTimeout(this._hoverFadeTimeout);
-      // If a hover popup is already open, promote it to permanent (no re-fetch)
       const existingPopup = document.getElementById('profile-popup');
+      // A hover preview is already up: promote it to the full card in place
+      // instead of re-fetching.
       if (existingPopup && this._isHoverPopup) {
         this._promoteHoverPopup(existingPopup);
+        return;
+      }
+      // Toggle: clicking the same user whose card is open closes it.
+      if (this._openProfileUserId === userId && existingPopup) {
+        this._closeProfilePopup();
         return;
       }
       this._isHoverPopup = false;
@@ -2789,10 +3197,16 @@ _setupUI() {
       clearTimeout(this._hoverCloseTimer);
       clearTimeout(this._hoverAutoCloseTimer);
       clearTimeout(this._hoverFadeTimeout);
-      // If a hover popup is already open, promote it to permanent (no re-fetch)
       const existingPopup = document.getElementById('profile-popup');
+      // A hover preview is already up: promote it to the full card in place
+      // instead of re-fetching.
       if (existingPopup && this._isHoverPopup) {
         this._promoteHoverPopup(existingPopup);
+        return;
+      }
+      // Toggle: clicking the same user whose card is open closes it.
+      if (this._openProfileUserId === userId && existingPopup) {
+        this._closeProfilePopup();
         return;
       }
       this._isHoverPopup = false;
@@ -2823,14 +3237,18 @@ _setupUI() {
   });
 
   // ── Profile popup: hover-over on usernames/avatars (translucent preview) ──
+  // The off switch is Settings → Chat → "Show profile card on hover". It is
+  // read live so flipping it takes effect without a reload.
+  const hoverCardEnabled = () => localStorage.getItem('haven_hover_profile_card') !== 'false';
   const setupHoverProfile = (container, getInfo) => {
     container.addEventListener('mouseover', (e) => {
+      if (!hoverCardEnabled()) return;
       const trigger = getInfo(e);
       if (!trigger) {
-        // Mouse moved to a non-trigger element — cancel any pending hover
+        // Mouse moved to a non-trigger element: cancel any pending hover
         clearTimeout(this._hoverProfileTimer);
         this._hoverTarget = null;
-        // Close hover popup INSTANTLY
+        // Close hover popup instantly
         if (this._isHoverPopup) {
           clearTimeout(this._hoverCloseTimer);
           clearTimeout(this._hoverAutoCloseTimer);
@@ -2840,7 +3258,7 @@ _setupUI() {
         return;
       }
       if (trigger.el === this._hoverTarget) return;
-      // Switching to a different trigger — close old hover popup instantly
+      // Switching to a different trigger: close the old hover popup instantly
       if (this._isHoverPopup) {
         clearTimeout(this._hoverFadeTimeout);
         this._closeProfilePopup();
@@ -2850,7 +3268,7 @@ _setupUI() {
       clearTimeout(this._hoverAutoCloseTimer);
       this._hoverTarget = trigger.el;
 
-      // Don't show hover popup if a click-based popup is already open
+      // Don't show a hover popup while a click-based card is open
       if (document.getElementById('profile-popup') && !this._isHoverPopup) return;
 
       this._hoverProfileTimer = setTimeout(() => {
@@ -2869,7 +3287,7 @@ _setupUI() {
       clearTimeout(this._hoverAutoCloseTimer);
       clearTimeout(this._hoverFadeTimeout);
       this._hoverTarget = null;
-      // Close hover popup INSTANTLY on leaving the container
+      // Close hover popup instantly on leaving the container
       if (this._isHoverPopup) {
         this._closeProfilePopup();
       }
@@ -2909,6 +3327,15 @@ _setupUI() {
 
   document.getElementById('rename-modal').addEventListener('click', (e) => {
     if (e.target === e.currentTarget) e.currentTarget.style.display = 'none';
+  });
+
+  // manage groups buttons
+  const manageGroupsBtn = document.getElementById('manage-groups-btn');
+  if (manageGroupsBtn) manageGroupsBtn.addEventListener('click', () => this._showGroupManager());
+
+  const saveGroupsBtn = document.getElementById('save-groups-btn');
+  if (saveGroupsBtn) saveGroupsBtn.addEventListener('click', () => {
+    this._GroupManagerSaveGroups();
   });
 
   // ── Admin moderation bindings ───────────────────────
@@ -2959,7 +3386,10 @@ _setupUI() {
     this._switchSettingsTab('user');
     // Sync language select with current locale
     const langSelect = document.getElementById('language-select');
-    if (langSelect && window.i18n) langSelect.value = i18n.locale;
+    if (langSelect && window.i18n) {
+      langSelect.value = i18n.preference;
+      i18n.syncLocalePicker(langSelect);
+    }
     // Show desktop-only sections when running inside Haven Desktop
     if (window.havenDesktop?.isDesktopApp) {
       document.getElementById('desktop-shortcuts-nav')?.style.removeProperty('display');
@@ -3020,14 +3450,7 @@ _setupUI() {
     if (tab === 'admin') {
       // Defensive gate: refuse switching to the admin tab if the user has no
       // admin/manage permissions, regardless of where the call came from.
-      const isAdmin = !!(this.user && this.user.isAdmin);
-      const hasAdminAccess = isAdmin
-        || this._hasPerm?.('manage_emojis')
-        || this._hasPerm?.('manage_stickers')
-        || this._hasPerm?.('manage_soundboard')
-        || this._hasPerm?.('manage_roles')
-        || this._hasPerm?.('manage_server')
-        || this._hasPerm?.('view_audit_log');
+      const hasAdminAccess = !!this.user && this._hasAnyAdminSettingsAccess();
       if (!hasAdminAccess) return this._switchSettingsTab('user');
       if (userBody) userBody.style.display = 'none';
       if (adminBody) adminBody.style.display = '';
@@ -3068,13 +3491,166 @@ _setupUI() {
       // Update active state
       document.querySelectorAll('.settings-nav-item').forEach(n => n.classList.remove('active'));
       item.classList.add('active');
+      // Suppress scroll-spy briefly so the smooth-scroll animation passing over
+      // intermediate sections doesn't steal the highlight from what was clicked.
+      this._settingsSpyMuteUntil = Date.now() + 800;
     });
   });
+
+  // ── Settings scroll-spy ──────────────────────────────
+  // Settings bodies are long scrolling columns rather than tab switchers.
+  // Keep the corresponding nav item highlighted as the user scrolls.
+  //
+  // User settings:
+  //   #settings-body-user
+  //   .settings-nav-user
+  //
+  // Admin settings:
+  //   #settings-body-admin
+  //   .settings-nav-admin-group
+  //
+  // Each body has its own independent scroll-spy so the user and admin nav
+  // states cannot interfere with each other.
+  const setupSettingsScrollSpy = (settingsBody, navSelector) => {
+    if (!settingsBody) return;
+
+    const syncNavHighlight = () => {
+      if (Date.now() < (this._settingsSpyMuteUntil || 0)) return;
+
+      // Only consider nav items whose corresponding section currently exists
+      // and is visible. This is important for admin settings because many of
+      // the admin nav entries start with display:none.
+      const navItems = Array.from(document.querySelectorAll(`${navSelector} .settings-nav-item`));
+      const visibleNavItems = navItems.filter(item => {
+        if (item.offsetParent === null) return false;
+
+        const section = document.getElementById(item.dataset.target);
+        return section && section.offsetParent !== null;
+      });
+
+      if (!visibleNavItems.length) return;
+
+      const bodyTop = settingsBody.getBoundingClientRect().top;
+      let current = null;
+      for (const item of visibleNavItems) {
+        const section = document.getElementById(item.dataset.target);
+        if (!section) continue;
+
+        // The last section whose top has passed the top of the scrolling
+        // body is the section currently being viewed.
+        if (section.getBoundingClientRect().top - bodyTop <= 8) {
+          current = item;
+        } else {
+          break;
+        }
+      }
+
+      // Before the first section reaches the top, highlight the first
+      // visible section.
+      if (!current) current = visibleNavItems[0];
+
+      // Nothing to do if the correct item is already highlighted.
+      if (current.classList.contains('active')) return;
+
+      // Only modify nav items belonging to this scroll-spy.
+      visibleNavItems.forEach(item => item.classList.remove('active'));
+      current.classList.add('active');
+      // Keep the highlighted entry reachable in a long nav list.
+      current.scrollIntoView({ block: 'nearest' });
+    };
+
+    let spyQueued = false;
+    settingsBody.addEventListener('scroll', () => {
+      if (spyQueued) return;
+      spyQueued = true;
+      requestAnimationFrame(() => { spyQueued = false; syncNavHighlight(); });
+    }, { passive: true });
+
+    // Set the correct highlight immediately in case the settings body is
+    // already scrolled when the spy is initialized.
+    syncNavHighlight();
+  };
+  // User settings scroll-spy
+  setupSettingsScrollSpy(document.getElementById('settings-body-user'), '.settings-nav-user');
+  // Admin settings scroll-spy
+  setupSettingsScrollSpy(document.getElementById('settings-body-admin'), '.settings-nav-admin-group');
 
   // ── Language switcher ────────────────────────────────
   document.getElementById('language-select')?.addEventListener('change', (e) => {
     if (window.i18n) i18n.setLocale(e.target.value);
   });
+  this._buildLanguagePicker();
+
+  // ── Voice messages (#5665) ────────────────────────────
+  document.getElementById('voice-btn')?.addEventListener('click', () => this._toggleVoiceMessage());
+  document.getElementById('voice-rec-cancel')?.addEventListener('click', () => this._stopVoiceMessage(false));
+  document.getElementById('voice-rec-send')?.addEventListener('click', () => this._stopVoiceMessage(true));
+
+  // ── One + button in place of the toolbar (#5654) ──────
+  // With the setting on, the toolbar is hidden and becomes the menu the +
+  // opens; the buttons keep their own handlers, only their home moves.
+  const plusBtn = document.getElementById('composer-plus-btn');
+  const actionsBox = document.querySelector('#message-input-area .input-actions-box');
+  this._closeComposerMenu = () => {
+    actionsBox?.classList.remove('open');
+    plusBtn?.setAttribute('aria-expanded', 'false');
+  };
+  if (plusBtn && actionsBox) {
+    plusBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = !actionsBox.classList.contains('open');
+      actionsBox.classList.toggle('open', open);
+      plusBtn.setAttribute('aria-expanded', String(open));
+    });
+    // Picking a tool closes the menu; the tool's own picker takes over.
+    actionsBox.addEventListener('click', (e) => {
+      if (document.documentElement.hasAttribute('data-compact-composer') && e.target.closest('button')) setTimeout(() => this._closeComposerMenu(), 0);
+    });
+    document.addEventListener('click', (e) => {
+      if (actionsBox.classList.contains('open') && !e.target.closest('.input-actions-box') && e.target !== plusBtn) this._closeComposerMenu();
+    });
+  }
+
+  // ── Formatting guide and command list (#5654) ─────────
+  const formatBtn = document.getElementById('format-btn');
+  const formatPicker = document.getElementById('format-picker');
+  if (formatBtn && formatPicker) {
+    let formatTab = 'markdown';
+    const renderFormatPicker = () => {
+      formatPicker.querySelectorAll('.gif-tab').forEach(b => b.classList.toggle('active', b.dataset.formatTab === formatTab));
+      const list = document.getElementById('format-picker-list');
+      if (list) list.innerHTML = formatTab === 'markdown' ? this._formatGuideHtml() : this._commandGuideHtml();
+    };
+    formatBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = formatPicker.style.display === 'none';
+      const emojiPicker = document.getElementById('emoji-picker');
+      const gifPicker = document.getElementById('gif-picker');
+      if (emojiPicker) emojiPicker.style.display = 'none';
+      if (gifPicker) gifPicker.style.display = 'none';
+      formatPicker.style.display = open ? 'flex' : 'none';
+      if (open) renderFormatPicker();
+    });
+    formatPicker.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const tab = e.target.closest('[data-format-tab]');
+      if (tab) { formatTab = tab.dataset.formatTab; renderFormatPicker(); return; }
+      const row = e.target.closest('.format-row');
+      if (!row) return;
+      if (row.dataset.cmd) this._insertSlashCommand(row.dataset.cmd);
+      else this._wrapComposerSelection(row.dataset.before || '', row.dataset.after || '', row.dataset.sample || '', row.dataset.block === '1');
+      formatPicker.style.display = 'none';
+    });
+    document.addEventListener('click', (e) => {
+      if (formatPicker.style.display !== 'none' && !e.target.closest('#format-picker') && !e.target.closest('#format-btn')) formatPicker.style.display = 'none';
+    });
+  }
+
+  // ── Timezone (Configure Time) ────────────────────────
+  document.getElementById('configure-time-btn')?.addEventListener('click', () => {
+    this._openTimezoneModal({ firstRun: false });
+  });
+  this._updateTimezoneSummary?.();
 
   // ── Password change ──────────────────────────────────
   document.getElementById('change-password-btn').addEventListener('click', async () => {
@@ -3191,6 +3767,7 @@ _setupUI() {
     settingsNav.addEventListener('click', (e) => {
       const item = e.target.closest('.settings-nav-item');
       if (item && item.dataset.target === 'section-2fa') loadTotpStatus();
+      if (item && item.dataset.target === 'section-sessions') this._refreshSessions();
       if (item && item.dataset.target === 'section-desktop-shortcuts') this._setupDesktopShortcuts();
       if (item && item.dataset.target === 'section-desktop-app') this._setupDesktopAppPrefs();
     });
@@ -3476,10 +4053,10 @@ _setupUI() {
           <input type="password" id="self-delete-pw" placeholder="${t('settings.delete_account_section.password_placeholder')}" maxlength="128" autocomplete="current-password">
         </div>
         <label class="toggle-row" style="margin:8px 0">
-          <span>Delete all my messages</span>
+          <span>${t('settings.delete_account_section.delete_messages')}</span>
           <input type="checkbox" id="self-delete-scrub">
         </label>
-        <small class="settings-hint" style="margin-bottom:8px;display:block">If unchecked, your messages will show as "[Deleted User]" instead.</small>
+        <small class="settings-hint" style="margin-bottom:8px;display:block">${t('settings.delete_account_section.delete_messages_hint')}</small>
         <small class="settings-hint self-delete-status" style="display:block;margin-bottom:8px"></small>
         <div class="modal-actions">
           <button class="btn-sm self-delete-cancel">${t('modals.common.cancel')}</button>
@@ -3511,6 +4088,7 @@ _setupUI() {
           return;
         }
         // Account deleted — clear local storage and redirect to login
+        this._clearChannelCodeMap?.();
         localStorage.removeItem('haven_token');
         localStorage.removeItem('haven_e2e_privkey');
         localStorage.removeItem('haven_sync_key');
@@ -3613,6 +4191,9 @@ _setupUI() {
     this.socket.emit('get-deleted-users');
     document.getElementById('deleted-users-modal').style.display = 'flex';
   });
+  document.getElementById('aml-bulk-cleanup-btn')?.addEventListener('click', () => {
+    if (this._openBulkCleanup) this._openBulkCleanup();
+  });
 
   // ── Cleanup controls (admin) — saved via admin Save button ──
   const cleanupAge = document.getElementById('cleanup-max-age');
@@ -3641,7 +4222,7 @@ _setupUI() {
   // ── Server backup / restore (admin) ──────────────────
   const startBackupDownload = (include) => {
     const token = localStorage.getItem('haven_token');
-    if (!token) return this._showToast(t('toasts.not_logged_in') || 'Not logged in', 'error');
+    if (!token) return this._showToast(t('toasts.not_logged_in'), 'error');
     const url = `/api/admin/backup?include=${encodeURIComponent(include)}&token=${encodeURIComponent(token)}`;
     const a = document.createElement('a');
     a.href = url;
@@ -3649,7 +4230,7 @@ _setupUI() {
     document.body.appendChild(a);
     a.click();
     setTimeout(() => a.remove(), 1000);
-    this._showToast(t('toasts.backup_started') || 'Preparing backup…', 'info');
+    this._showToast(t('toasts.backup_started'), 'info');
   };
   const getBackupIncludes = () => {
     return Array.from(document.querySelectorAll('.backup-include:checked')).map(el => el.value);
@@ -3657,10 +4238,10 @@ _setupUI() {
   document.getElementById('backup-download-btn')?.addEventListener('click', () => {
     const includes = getBackupIncludes();
     if (!includes.length) {
-      return this._showToast(t('toasts.backup_pick_one') || 'Pick at least one section to back up', 'error');
+      return this._showToast(t('toasts.backup_pick_one'), 'error');
     }
     const heavy = includes.includes('messages') || includes.includes('files');
-    if (heavy && !confirm(t('confirm.backup_heavy') || 'This backup includes messages and/or uploaded files. It may take a while and produce a large download. Continue?')) return;
+    if (heavy && !confirm(t('confirm.backup_heavy'))) return;
     startBackupDownload(includes.join(','));
   });
   document.getElementById('backup-select-all-btn')?.addEventListener('click', () => {
@@ -3672,30 +4253,93 @@ _setupUI() {
 
   const restoreBtn = document.getElementById('backup-restore-btn');
   if (restoreBtn) {
+    const progWrap  = document.getElementById('restore-progress');
+    const progFill  = document.getElementById('restore-progress-fill');
+    const progLabel = document.getElementById('restore-progress-label');
+    const fmtBytesR = (n) => {
+      if (n < 1024) return n + ' B';
+      if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+      if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+      return (n / 1073741824).toFixed(2) + ' GB';
+    };
+    const setBar = (pct, indeterminate) => {
+      if (progWrap) progWrap.classList.toggle('indeterminate', !!indeterminate);
+      if (progFill) progFill.style.width = indeterminate ? '40%' : Math.max(0, Math.min(100, pct)) + '%';
+    };
+
     restoreBtn.addEventListener('click', async () => {
       const fileInput = document.getElementById('backup-restore-file');
       const file = fileInput?.files?.[0];
-      if (!file) return this._showToast(t('toasts.backup_no_file') || 'Choose a backup .zip file first', 'error');
-      if (!confirm(t('confirm.backup_restore') || 'Restore this backup? It will OVERWRITE the current server data and restart the server. This cannot be undone (except via the haven.db.pre-restore copy on the host machine).')) return;
+      if (!file) return this._showToast(t('toasts.backup_no_file'), 'error');
+      if (!confirm(t('confirm.backup_restore'))) return;
       const token = localStorage.getItem('haven_token');
-      if (!token) return this._showToast(t('toasts.not_logged_in') || 'Not logged in', 'error');
-      const fd = new FormData();
-      fd.append('backup', file);
+      if (!token) return this._showToast(t('toasts.not_logged_in'), 'error');
+
       restoreBtn.disabled = true;
       const origText = restoreBtn.innerHTML;
-      restoreBtn.innerHTML = '⏳ Uploading…';
+
+      // The server streams the uploaded zip to disk after the upload lands and
+      // emits `restore-progress` over the socket so we can show a real
+      // extraction bar instead of an opaque wait on large backups (#5438).
+      const onExtractProgress = (p) => {
+        if (!p || p.phase !== 'extract') return;
+        if (p.bytesTotal) {
+          const pct = Math.round((p.bytesDone / p.bytesTotal) * 100);
+          setBar(pct, false);
+          if (progLabel) progLabel.textContent = t('settings.admin.restore_extract_progress', { pct, done: fmtBytesR(p.bytesDone), total: fmtBytesR(p.bytesTotal) });
+        } else {
+          setBar(0, true);
+          if (progLabel) progLabel.textContent = t('settings.admin.restore_extracting');
+        }
+      };
+      this.socket?.on('restore-progress', onExtractProgress);
+      const cleanup = () => { try { this.socket?.off('restore-progress', onExtractProgress); } catch {} };
+
+      if (progWrap) progWrap.style.display = 'block';
+      setBar(0, false);
+      if (progLabel) progLabel.textContent = t('settings.admin.restore_upload_progress', { pct: 0 });
+      restoreBtn.innerHTML = `⏳ ${t('settings.admin.restore_uploading')}`;
+
       try {
-        const res = await fetch('/api/admin/restore', {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${token}` },
-          body: fd,
+        const data = await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', '/api/admin/restore');
+          xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+          xhr.timeout = 0; // multi-GB uploads can run for many minutes
+          xhr.upload.onprogress = (e) => {
+            if (!e.lengthComputable) return;
+            const pct = Math.round((e.loaded / e.total) * 100);
+            setBar(pct, false);
+            if (progLabel) progLabel.textContent = t('settings.admin.restore_upload_progress_bytes', { pct, done: fmtBytesR(e.loaded), total: fmtBytesR(e.total) });
+          };
+          xhr.upload.onload = () => {
+            // Upload finished — server now stages the zip to disk. Flip to the
+            // extraction phase; socket events refine this if/when they arrive.
+            setBar(0, true);
+            if (progLabel) progLabel.textContent = t('settings.admin.restore_upload_complete');
+            restoreBtn.innerHTML = `⏳ ${t('settings.admin.restore_extracting_short')}`;
+          };
+          xhr.onload = () => {
+            let d = {};
+            try { d = JSON.parse(xhr.responseText); } catch {}
+            if (xhr.status >= 200 && xhr.status < 300) resolve(d);
+            else reject(new Error(d.error || `HTTP ${xhr.status}`));
+          };
+          xhr.onerror = () => reject(new Error(t('settings.admin.restore_network_error')));
+          xhr.ontimeout = () => reject(new Error(t('settings.admin.restore_upload_timeout')));
+          const fd = new FormData();
+          fd.append('backup', file);
+          xhr.send(fd);
         });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-        this._showToast(data.message || 'Restore staged. Server restarting…', 'success');
-        restoreBtn.innerHTML = '✓ Restarting…';
+        cleanup();
+        setBar(100, false);
+        if (progLabel) progLabel.textContent = t('settings.admin.restore_done');
+        this._showToast(data.message || t('settings.admin.restore_staged'), 'success');
+        restoreBtn.innerHTML = `✓ ${t('settings.admin.restore_restarting')}`;
       } catch (err) {
-        this._showToast((t('toasts.backup_restore_failed') || 'Restore failed: ') + err.message, 'error');
+        cleanup();
+        if (progWrap) progWrap.style.display = 'none';
+        this._showToast(t('toasts.backup_restore_failed') + err.message, 'error');
         restoreBtn.disabled = false;
         restoreBtn.innerHTML = origText;
       }
@@ -3720,12 +4364,12 @@ _setupUI() {
       const data = await res.json();
       const files = data.files || [];
       if (!files.length) {
-        listEl.innerHTML = '<small class="settings-hint">No auto-backups yet.</small>';
+        listEl.innerHTML = `<small class="settings-hint">${t('settings.admin.auto_backup_none')}</small>`;
         return;
       }
       listEl.innerHTML = files.map(f => {
         const safeName = f.name.replace(/[<>"&]/g, c => ({ '<': '&lt;', '>': '&gt;', '"': '&quot;', '&': '&amp;' }[c]));
-        const when = new Date(f.mtime).toLocaleString();
+        const when = this._fmtDateTime(f.mtime);
         return `<div style="display:flex;gap:6px;align-items:center;justify-content:space-between;border:1px solid var(--border);padding:6px 8px;border-radius:4px">
           <div style="min-width:0;flex:1">
             <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:monospace;font-size:0.85em">${safeName}</div>
@@ -3733,7 +4377,7 @@ _setupUI() {
           </div>
           <div style="display:flex;gap:4px;flex-shrink:0">
             <button class="btn-sm auto-backup-dl-btn" data-name="${safeName}">⬇️</button>
-            <button class="btn-sm auto-backup-del-btn" data-name="${safeName}" title="Delete">🗑️</button>
+            <button class="btn-sm auto-backup-del-btn" data-name="${safeName}" title="${t('msg_toolbar.delete')}">🗑️</button>
           </div>
         </div>`;
       }).join('');
@@ -3749,17 +4393,17 @@ _setupUI() {
       listEl.querySelectorAll('.auto-backup-del-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
           const name = btn.dataset.name;
-          if (!confirm(`Delete ${name}?`)) return;
+          if (!confirm(t('settings.admin.auto_backup_delete_confirm', { name }))) return;
           const r = await fetch(`/api/admin/auto-backups/${encodeURIComponent(name)}`, {
             method: 'DELETE',
             headers: { 'Authorization': `Bearer ${token}` },
           });
           if (r.ok) this._refreshAutoBackupList();
-          else this._showToast('Delete failed', 'error');
+          else this._showToast(t('settings.admin.auto_backup_delete_failed'), 'error');
         });
       });
     } catch (err) {
-      listEl.innerHTML = `<small class="settings-hint" style="color:var(--danger)">Failed to load: ${err.message}</small>`;
+      listEl.innerHTML = `<small class="settings-hint" style="color:var(--danger)">${t('settings.admin.auto_backup_load_failed', { error: err.message })}</small>`;
     }
   };
   document.getElementById('auto-backup-save-btn')?.addEventListener('click', () => {
@@ -3768,13 +4412,13 @@ _setupUI() {
     const retention = document.getElementById('auto-backup-retention')?.value || '7';
     const sections = Array.from(document.querySelectorAll('.auto-backup-include:checked')).map(el => el.value);
     if (enabled === 'true' && !sections.length) {
-      return this._showToast('Pick at least one section to back up', 'error');
+      return this._showToast(t('toasts.backup_pick_one'), 'error');
     }
     this.socket.emit('update-server-setting', { key: 'auto_backup_enabled', value: enabled });
     this.socket.emit('update-server-setting', { key: 'auto_backup_interval_hours', value: String(interval) });
     this.socket.emit('update-server-setting', { key: 'auto_backup_retention', value: String(retention) });
     this.socket.emit('update-server-setting', { key: 'auto_backup_sections', value: sections.join(',') });
-    this._showToast('Auto-backup schedule saved', 'success');
+    this._showToast(t('settings.admin.auto_backup_saved'), 'success');
   });
   document.getElementById('auto-backup-run-now-btn')?.addEventListener('click', async () => {
     const token = localStorage.getItem('haven_token');
@@ -3785,10 +4429,10 @@ _setupUI() {
         headers: { 'Authorization': `Bearer ${token}` },
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      this._showToast('Auto-backup triggered. Refreshing list shortly…', 'info');
+      this._showToast(t('settings.admin.auto_backup_triggered'), 'info');
       setTimeout(() => this._refreshAutoBackupList(), 3000);
     } catch (err) {
-      this._showToast('Run failed: ' + err.message, 'error');
+      this._showToast(t('settings.admin.auto_backup_run_failed', { error: err.message }), 'error');
     }
   });
   document.getElementById('auto-backup-refresh-btn')?.addEventListener('click', () => this._refreshAutoBackupList());
@@ -3801,7 +4445,7 @@ _setupUI() {
     const token = localStorage.getItem('haven_token');
     if (!token) return;
     const status = updStatusEl();
-    if (status) { status.style.display = 'block'; status.textContent = 'Checking…'; }
+    if (status) { status.style.display = 'block'; status.textContent = t('settings.admin.update_checking'); }
     try {
       const r = await fetch('/api/admin/update/check', { headers: { 'Authorization': `Bearer ${token}` } });
       const data = await r.json();
@@ -3811,26 +4455,26 @@ _setupUI() {
         const esc = s => String(s || '').replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
         const cmdBlock = (!data.runnable && data.command) ? `
           <div style="margin-top:8px">
-            <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><strong>Run on host:</strong>
-              <button type="button" class="btn-sm" id="update-copy-cmd-btn" title="Copy command">📋 Copy</button>
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><strong>${t('settings.admin.update_run_on_host')}</strong>
+              <button type="button" class="btn-sm" id="update-copy-cmd-btn" title="${t('settings.admin.update_copy_command')}">📋 ${t('common.copy')}</button>
             </div>
             <pre style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;padding:6px 8px;margin:0;white-space:pre-wrap;word-break:break-all"><code>${esc(data.command)}</code></pre>
           </div>` : '';
         status.innerHTML = `
-          <div><strong>Installed:</strong> v${esc(data.currentVersion)}</div>
-          <div><strong>Latest:</strong> ${data.latestVersion ? 'v' + esc(data.latestVersion) : 'unknown'}</div>
-          <div><strong>Install method:</strong> ${esc(data.method)}</div>
-          <div style="margin-top:6px">${upToDate ? '✅ You are up to date.' : '⚠️ Update available.'}</div>
+          <div><strong>${t('settings.admin.update_installed')}</strong> v${esc(data.currentVersion)}</div>
+          <div><strong>${t('settings.admin.update_latest')}</strong> ${data.latestVersion ? 'v' + esc(data.latestVersion) : t('settings.admin.update_unknown')}</div>
+          <div><strong>${t('settings.admin.update_install_method')}</strong> ${esc(data.method)}</div>
+          <div style="margin-top:6px">${upToDate ? t('settings.admin.update_current') : t('settings.admin.update_available')}</div>
           <div style="margin-top:6px"><small>${esc(data.message || '')}</small></div>
           ${cmdBlock}
-          ${data.releaseUrl ? `<div style="margin-top:6px"><a href="${esc(data.releaseUrl)}" target="_blank" rel="noopener">Release notes →</a></div>` : ''}
+          ${data.releaseUrl ? `<div style="margin-top:6px"><a href="${esc(data.releaseUrl)}" target="_blank" rel="noopener">${t('settings.admin.update_release_notes')} →</a></div>` : ''}
         `;
         const copyBtn = document.getElementById('update-copy-cmd-btn');
         if (copyBtn) copyBtn.addEventListener('click', () => {
           try {
             navigator.clipboard.writeText(data.command).then(() => {
-              copyBtn.textContent = '✅ Copied';
-              setTimeout(() => { copyBtn.textContent = '📋 Copy'; }, 1500);
+              copyBtn.textContent = `✅ ${t('common.copied')}`;
+              setTimeout(() => { copyBtn.textContent = `📋 ${t('common.copy')}`; }, 1500);
             });
           } catch {}
         });
@@ -3840,7 +4484,7 @@ _setupUI() {
       // the right manual command instead of failing silently. (#5267)
       if (updRunBtn()) updRunBtn().disabled = !data.updateAvailable;
     } catch (err) {
-      if (status) status.textContent = 'Check failed: ' + err.message;
+      if (status) status.textContent = t('settings.admin.update_check_failed', { error: err.message });
     }
   });
   document.getElementById('update-run-btn')?.addEventListener('click', async () => {
@@ -3851,14 +4495,14 @@ _setupUI() {
       try { document.getElementById('update-check-btn')?.click(); } catch {}
       if (status) {
         if (status.style) status.style.display = 'block';
-        status.textContent = 'Checking for updates first… click Update Now again once the check finishes.';
+        status.textContent = t('settings.admin.update_check_first');
       }
       return;
     }
     if (!lastUpdateCheck.updateAvailable) {
       if (status) {
         if (status.style) status.style.display = 'block';
-        status.textContent = 'Already up to date — nothing to install.';
+        status.textContent = t('settings.admin.update_nothing_to_install');
       }
       return;
     }
@@ -3866,10 +4510,10 @@ _setupUI() {
       // Most common case: Docker install. Re-run check to surface the
       // copyable command block instead of silently doing nothing.
       try { document.getElementById('update-check-btn')?.click(); } catch {}
-      this._showToast?.(lastUpdateCheck.message || `In-app updates aren't supported for the "${lastUpdateCheck.method}" install method — run the command shown in the panel from your host.`, 'info');
+      this._showToast?.(lastUpdateCheck.message || t('settings.admin.update_not_supported', { method: lastUpdateCheck.method }), 'info');
       return;
     }
-    if (!confirm(`Apply update to v${lastUpdateCheck.latestVersion}? The server will run an auto-backup, then exit so the supervisor restarts it on the new code. You will be disconnected for ~30 seconds.`)) return;
+    if (!confirm(t('settings.admin.update_confirm', { version: lastUpdateCheck.latestVersion }))) return;
     const token = localStorage.getItem('haven_token');
     if (!token) return;
     // Visible status before the fetch so admins always see *something*
@@ -3877,7 +4521,7 @@ _setupUI() {
     // silently or the host blocks the request. (#5267)
     if (status) {
       if (status.style) status.style.display = 'block';
-      status.textContent = 'Sending update request…';
+      status.textContent = t('settings.admin.update_sending');
     }
     try {
       const r = await fetch('/api/admin/update/run', {
@@ -3886,10 +4530,10 @@ _setupUI() {
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
-      if (status) status.innerHTML = `<div>🔄 Update started. The server will restart shortly.</div><div style="margin-top:6px"><small>${data.message || ''}</small></div>`;
+      if (status) status.innerHTML = `<div>${t('settings.admin.update_started')}</div><div style="margin-top:6px"><small>${data.message || ''}</small></div>`;
       if (updRunBtn()) updRunBtn().disabled = true;
     } catch (err) {
-      if (status) status.textContent = 'Update failed: ' + err.message;
+      if (status) status.textContent = t('settings.admin.update_failed', { error: err.message });
     }
   });
 
@@ -3912,6 +4556,16 @@ _setupUI() {
   this.socket.on('whitelist-list', (list) => {
     this._renderWhitelist(list);
   });
+
+  // ── Auto-Mod panel (v3.42.0) ─────────────────────────────
+  // Wired here alongside the other admin-settings controls. Its settings
+  // apply immediately rather than through the Save flow, matching how the
+  // whitelist and tunnel controls already behave.
+  if (typeof this._initAutomodPanel === 'function') {
+    this._initAutomodPanel();
+    this.socket.emit('get-automod-domains');
+    this.socket.emit('get-automod-log', { limit: 100 });
+  }
 
   // ── Tunnel settings (immediate — not part of Save flow) ──
   const tunnelToggleBtn = document.getElementById('tunnel-toggle-btn');
@@ -3971,20 +4625,41 @@ _setupUI() {
       value: e.target.checked ? 'true' : 'false'
     });
   });
+  document.getElementById('invites-bypass-registration-token')?.addEventListener('change', (e) => {
+    this.socket.emit('update-server-setting', {
+      key: 'invites_bypass_registration_token',
+      value: e.target.checked ? 'true' : 'false'
+    });
+  });
+  document.getElementById('test-connectivity-btn')?.addEventListener('click', () => {
+    this._runConnectivityTest();
+  });
   document.getElementById('generate-registration-token-btn')?.addEventListener('click', () => {
     this.socket.emit('generate-registration-token');
   });
   document.getElementById('clear-registration-token-btn')?.addEventListener('click', () => {
-    if (!confirm('Clear the registration token? People will no longer be able to register with it.')) return;
+    if (!confirm(t('settings.admin.registration.clear_confirm'))) return;
     this.socket.emit('clear-registration-token');
   });
-  document.getElementById('copy-registration-token-btn')?.addEventListener('click', () => {
-    const tok = document.getElementById('registration-token-value')?.textContent;
-    if (tok && tok !== '—') {
-      const onCopied = () => this._showToast?.('Token copied', 'success');
-      (navigator.clipboard?.writeText
-        ? navigator.clipboard.writeText(tok).then(onCopied).catch(() => onCopied())
-        : onCopied());
+  document.getElementById('copy-registration-token-btn')?.addEventListener('click', async () => {
+    const tok = document.getElementById('registration-token-value')?.textContent?.trim();
+    if (!tok || tok === '—') return;
+    const onCopied = () => this._showToast?.(t('settings.admin.registration.copied'), 'success');
+    // The old handler toasted "copied" from the rejection path too, so in the
+    // desktop app (clipboard write refused without a fresh user activation)
+    // the toast lied while the clipboard kept its previous contents.
+    try {
+      const res = await window.havenDesktop?.clipboardWriteText?.(tok);
+      if (res?.ok) return onCopied();
+    } catch {}
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('no clipboard api');
+      await navigator.clipboard.writeText(tok);
+      return onCopied();
+    } catch {
+      let ok = false;
+      this._copyTextFallback(tok, () => { ok = true; onCopied(); });
+      if (!ok) this._showToast?.(t('settings.admin.registration.copy_failed'), 'error');
     }
   });
 
@@ -3997,7 +4672,7 @@ _setupUI() {
       !c.is_private && c.code_visibility !== 'private'
     );
     if (all.length === 0) {
-      host.innerHTML = '<p class="muted-text" style="margin:4px 0;font-size:0.85rem">No public channels yet.</p>';
+      host.innerHTML = `<p class="muted-text" style="margin:4px 0;font-size:0.85rem">${t('settings.admin.invite_links.no_public_channels')}</p>`;
       return;
     }
     let selected = null; // null = "all"
@@ -4031,8 +4706,8 @@ _setupUI() {
     const value = (picked.length === total) ? '' : JSON.stringify(picked);
     this.socket.emit('update-server-setting', { key: 'default_join_channels', value });
     this._showToast?.(picked.length === total
-      ? 'Invite joiners will land in every public channel'
-      : `Invite joiners will land in ${picked.length} channel${picked.length === 1 ? '' : 's'}`,
+      ? t('settings.admin.default_join.all')
+      : t(picked.length === 1 ? 'settings.admin.default_join.one' : 'settings.admin.default_join.other', { count: picked.length }),
       'success');
   });
 
@@ -4042,7 +4717,7 @@ _setupUI() {
     if (!host) return;
     const chans = (this.channels || []).filter(c => !c.is_dm);
     if (chans.length === 0) {
-      host.innerHTML = '<p class="muted-text" style="margin:4px 0;font-size:0.85rem">No channels yet.</p>';
+      host.innerHTML = `<p class="muted-text" style="margin:4px 0;font-size:0.85rem">${t('settings.admin.invite_links.no_channels')}</p>`;
       return;
     }
     // CSV of channel ids. Empty string = no channels (guests can log in but have nowhere to go).
@@ -4066,8 +4741,8 @@ _setupUI() {
 
     const tagsFor = (ch) => {
       const tags = [];
-      if (ch.is_private || ch.code_visibility === 'private') tags.push('private');
-      if (ch.text_enabled === 0 && ch.voice_enabled) tags.push('voice');
+      if (ch.is_private || ch.code_visibility === 'private') tags.push(t('settings.admin.guest_access.private'));
+      if (ch.text_enabled === 0 && ch.voice_enabled) tags.push(t('settings.admin.guest_access.voice'));
       return tags.length
         ? ` <small style="color:var(--text-muted)">(${tags.join(', ')})</small>` : '';
     };
@@ -4093,7 +4768,7 @@ _setupUI() {
   this._renderGuestChannels = _renderGuestChannels;
   document.getElementById('guests-enabled')?.addEventListener('change', (e) => {
     this.socket.emit('update-server-setting', { key: 'guests_enabled', value: e.target.checked ? 'true' : 'false' });
-    this._showToast?.(e.target.checked ? 'Guest login enabled' : 'Guest login disabled', 'success');
+    this._showToast?.(t(e.target.checked ? 'settings.admin.guest_access.enabled' : 'settings.admin.guest_access.disabled'), 'success');
   });
   document.getElementById('guest-channels-all-btn')?.addEventListener('click', () => {
     document.querySelectorAll('.guest-channel-cb').forEach(cb => { cb.checked = true; });
@@ -4122,8 +4797,8 @@ _setupUI() {
     const value = picked.join(',');
     this.socket.emit('update-server-setting', { key: 'guest_channels', value });
     this._showToast?.(picked.length === 0
-      ? 'Guests now have access to zero channels'
-      : `Guests can now access ${picked.length} channel${picked.length === 1 ? '' : 's'}`,
+      ? t('settings.admin.guest_access.zero')
+      : t(picked.length === 1 ? 'settings.admin.guest_access.one' : 'settings.admin.guest_access.other', { count: picked.length }),
       'success');
   });
 
@@ -4135,7 +4810,7 @@ _setupUI() {
   // ("grant all public"); otherwise only the ids in the set are checked.
   const _inviteChannelChecks = (cls, selectedSet) => {
     const all = _invitePublicChannels();
-    if (!all.length) return '<p class="muted-text" style="margin:4px 0;font-size:0.85rem">No public channels yet.</p>';
+    if (!all.length) return `<p class="muted-text" style="margin:4px 0;font-size:0.85rem">${t('settings.admin.invite_links.no_public_channels')}</p>`;
     return all.map(ch => {
       const checked = (selectedSet === null) || selectedSet.has(ch.id);
       return `<label style="display:flex;align-items:center;gap:6px;padding:3px 4px;font-size:0.85rem">
@@ -4158,30 +4833,39 @@ _setupUI() {
     const countEl = document.getElementById('invite-links-count');
     if (countEl) {
       const active = this._inviteCodes.filter(c => c.enabled && !c.is_expired).length;
-      countEl.textContent = this._inviteCodes.length ? `(${active} active / ${this._inviteCodes.length})` : '';
+      countEl.textContent = this._inviteCodes.length ? t('settings.admin.invite_links.count', { active, total: this._inviteCodes.length }) : '';
     }
     const host = document.getElementById('invite-codes-list');
     if (!host) return;
     if (!this._inviteCodes.length) {
-      host.innerHTML = '<p class="muted-text" style="margin:4px 0;font-size:0.85rem">No invite links yet. Create one below.</p>';
+      host.innerHTML = `<p class="muted-text" style="margin:4px 0;font-size:0.85rem">${t('settings.admin.invite_links.none')}</p>`;
       return;
     }
+    // determine invite usage input limits
+    const parsedMaxInvtUses = parseInt(this.serverSettings?.max_invite_uses, 10);
+    const maxInvtUses = Number.isNaN(parsedMaxInvtUses) ? 0 : parsedMaxInvtUses;
+    const restrictUses = !this.user?.isAdmin && !this._hasPerm('manage_server') && maxInvtUses > 0;
+    const maxUsesInput = restrictUses ? maxInvtUses : 100000;
+    const minUsesInput = restrictUses ? 1 : 0;
+
     const origin = window.location.origin;
     host.innerHTML = this._inviteCodes.map(ic => {
       const status = !ic.enabled
-        ? '<span style="color:var(--text-muted)">● Disabled</span>'
-        : ic.is_expired
-          ? '<span style="color:var(--danger,#e84a4a)">● Expired</span>'
-          : '<span style="color:var(--green,#43b581)">● Active</span>';
+        ? `<span style="color:var(--text-muted)">● ${t('settings.admin.invite_links.disabled')}</span>`
+        : ic.max_uses > 0 && ic.use_count >= ic.max_uses
+          ? `<span style="color:var(--text-secondary,#9498b3)">● ${t('settings.admin.invite_links.used')}</span>`
+          : ic.is_expired
+            ? `<span style="color:var(--danger,#e84a4a)">● ${t('settings.admin.invite_links.expired')}</span>`
+            : `<span style="color:var(--green,#43b581)">● ${t('settings.admin.invite_links.active')}</span>`;
       const link = `${origin}/?invite=${encodeURIComponent(ic.code)}`;
-      const chCount = (ic.channels && ic.channels.length)
-        ? `${ic.channels.length} channel${ic.channels.length === 1 ? '' : 's'}`
-        : 'all public channels';
+      const chCount = t(ic.channels.length === 1
+          ? 'settings.admin.invite_links.channel_one'
+          : 'settings.admin.invite_links.channel_other', { count: ic.channels.length }
+      );
       const uses = ic.max_uses > 0 ? `${ic.use_count} / ${ic.max_uses}` : `${ic.use_count}`;
-      const expiry = ic.expires_at ? new Date(ic.expires_at).toLocaleString() : 'never';
-      const label = ic.label ? this._escapeHtml(ic.label) : '<em style="opacity:.6">(no label)</em>';
-      const editorChannels = _inviteChannelChecks('invite-edit-channel-cb',
-        (ic.channels && ic.channels.length) ? new Set(ic.channels) : null);
+      const expiry = ic.expires_at ? this._fmtDateTime(ic.expires_at) : t('settings.admin.invite_links.never');
+      const label = ic.label ? this._escapeHtml(ic.label) : `<em style="opacity:.6">${t('settings.admin.invite_links.no_label')}</em>`;
+      const editorChannels = _inviteChannelChecks('invite-edit-channel-cb', new Set(ic.channels || []));
       return `<div class="invite-code-card" data-id="${ic.id}" style="border:1px solid var(--border);border-radius:8px;padding:10px">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
           <div style="font-weight:600">${label} &nbsp;<code style="font-size:.85rem">${this._escapeHtml(ic.code)}</code></div>
@@ -4189,37 +4873,38 @@ _setupUI() {
         </div>
         <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
           <input type="text" readonly value="${this._escapeHtml(link)}" class="settings-text-input" style="flex:1;min-width:0;font-size:.8rem" data-role="invite-link">
-          <button class="btn-sm" data-act="copy" title="Copy link">📋</button>
+          <button class="btn-sm" data-act="copy" title="${t('settings.admin.invite_links.copy_link')}">📋</button>
         </div>
         <div style="font-size:.8rem;opacity:.8;margin-top:6px;display:flex;gap:12px;flex-wrap:wrap">
-          <span>Grants: ${chCount}</span><span>Uses: ${uses}</span><span>Expires: ${this._escapeHtml(expiry)}</span>
+          <span>${t('settings.admin.invite_links.grants')} ${chCount}</span><span>${t('settings.admin.invite_links.uses')} ${uses}</span><span>${t('settings.admin.invite_links.expires')} ${this._escapeHtml(expiry)}</span>
         </div>
         <div style="display:flex;gap:4px;margin-top:8px;flex-wrap:wrap">
-          <button class="btn-sm" data-act="toggle">${ic.enabled ? 'Disable' : 'Enable'}</button>
-          <button class="btn-sm" data-act="edit">Edit</button>
-          <button class="btn-sm" data-act="delete">Delete</button>
+          <button class="btn-sm" data-act="toggle">${t(ic.enabled ? 'settings.admin.invite_links.disable' : 'settings.admin.invite_links.enable')}</button>
+          <button class="btn-sm" data-act="edit">${t('msg_toolbar.edit')}</button>
+          <button class="btn-sm" data-act="delete">${t('msg_toolbar.delete')}</button>
+          <button class="btn-sm" data-act="copy_card" title="${t('settings.admin.invite_links.copy_email_card')}" style="margin-left:auto">✉️</button>
         </div>
         <div class="invite-code-editor" style="display:none;margin-top:10px;padding-top:8px;border-top:1px dashed var(--border)">
-          <h6 style="margin:0 0 4px;font-size:.8rem;font-weight:600">Channels this link grants</h6>
+          <h6 style="margin:0 0 4px;font-size:.8rem;font-weight:600">${t('settings.admin.invite_links.channels_granted')}</h6>
           <div class="invite-edit-channels" style="max-height:160px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:6px">${editorChannels}</div>
           <div style="display:flex;gap:4px;margin-top:4px">
-            <button class="btn-sm" data-act="edit-all">Select all</button>
-            <button class="btn-sm" data-act="edit-none">Select none</button>
+            <button class="btn-sm" data-act="edit-all">${t('settings.admin.invite_links.select_all')}</button>
+            <button class="btn-sm" data-act="edit-none">${t('settings.admin.invite_links.select_none')}</button>
           </div>
-          <label class="select-row" style="margin-top:8px"><span>Max uses (0 = unlimited)</span><input type="number" min="0" max="100000" value="${ic.max_uses || 0}" class="settings-number-input" data-role="edit-maxuses"></label>
-          <label class="select-row" style="margin-top:4px"><span>Reset expiry</span>
-            <select class="settings-number-input" data-role="edit-expiry">
-              <option value="-1" selected>Keep current</option>
-              <option value="0">Never</option>
-              <option value="1">After 1 hour</option>
-              <option value="24">After 1 day</option>
-              <option value="168">After 7 days</option>
-              <option value="720">After 30 days</option>
+          <label class="select-row" style="margin-top:8px"><span>${t('settings.admin.invite_links.max_uses')}</span><input type="number" min="${minUsesInput}" max="${maxUsesInput}" value="${ic.max_uses || 0}" class="settings-number-input" data-role="edit-maxuses"></label>
+          <label class="select-row" style="margin-top:4px"><span>${t('settings.admin.invite_links.reset_expiry')}</span>
+            <select class="settings-number-input" data-role="edit-expiry" style="width: 6.5rem;">
+              <option value="-1" selected>${t('settings.admin.invite_links.keep_current')}</option>
+              <option value="0">${t('settings.admin.invite_links.never')}</option>
+              <option value="1">${t('settings.admin.invite_links.after_hour')}</option>
+              <option value="24">${t('settings.admin.invite_links.after_day')}</option>
+              <option value="168">${t('settings.admin.invite_links.after_7_days')}</option>
+              <option value="720">${t('settings.admin.invite_links.after_30_days')}</option>
             </select>
           </label>
           <div style="display:flex;gap:4px;margin-top:8px">
-            <button class="btn-sm btn-accent" data-act="save">Save changes</button>
-            <button class="btn-sm" data-act="cancel">Cancel</button>
+            <button class="btn-sm btn-accent" data-act="save">${t('settings.admin.invite_links.save_changes')}</button>
+            <button class="btn-sm" data-act="cancel">${t('modals.common.cancel')}</button>
           </div>
         </div>
       </div>`;
@@ -4242,9 +4927,14 @@ _setupUI() {
     const total = cbs.length;
     const picked = cbs.filter(cb => cb.checked).map(cb => parseInt(cb.dataset.cid)).filter(Number.isFinite);
     // All checked → [] = "grant all public" (future-proof as new channels appear).
-    const channels = (total > 0 && picked.length === total) ? [] : picked;
-    const maxUses = parseInt(document.getElementById('invite-new-maxuses')?.value) || 0;
-    const expiresInHours = parseInt(document.getElementById('invite-new-expiry')?.value) || 0;
+    const channels = picked;
+
+    const maxUsesValue = document.getElementById('invite-new-maxuses')?.value;
+    const maxUses = maxUsesValue === '' ? 1 : parseInt(maxUsesValue);
+
+    const expiryValue = document.getElementById('invite-new-expiry')?.value;
+    const expiresInHours = expiryValue === '' ? 720 : parseInt(expiryValue);
+
     const slug = document.getElementById('invite-new-slug')?.value.trim() || '';
     const payload = { label, channels, maxUses, expiresInHours };
     if (slug) payload.code = slug;
@@ -4252,8 +4942,8 @@ _setupUI() {
     // Reset the form fields (channel checks reset on the next list render).
     const lblEl = document.getElementById('invite-new-label'); if (lblEl) lblEl.value = '';
     const slugEl = document.getElementById('invite-new-slug'); if (slugEl) slugEl.value = '';
-    const muEl = document.getElementById('invite-new-maxuses'); if (muEl) muEl.value = '0';
-    const expEl = document.getElementById('invite-new-expiry'); if (expEl) expEl.value = '0';
+    const muEl = document.getElementById('invite-new-maxuses'); if (muEl) muEl.value = '1';
+    const expEl = document.getElementById('invite-new-expiry'); if (expEl) expEl.value = '720';
   });
 
   // One delegated handler for all per-card actions (the list re-renders often).
@@ -4269,7 +4959,7 @@ _setupUI() {
       const input = card.querySelector('[data-role="invite-link"]');
       const val = input?.value || '';
       if (!val) return;
-      const done = () => this._showToast?.('Invite link copied', 'success');
+      const done = () => this._showToast?.(t('settings.admin.invite_links.copied'), 'success');
       // navigator.clipboard.writeText() rejects (or fails silently in Electron's
       // BrowserView) when the document isn't focused, so fall back to selecting
       // the field and execCommand('copy'). Only toast success if a copy worked.
@@ -4280,17 +4970,19 @@ _setupUI() {
           if (input) input.setSelectionRange(0, 0);
           if (ok) { done(); return; }
         } catch { /* fall through */ }
-        this._showToast?.('Press Ctrl+C to copy the selected link', 'info');
+        this._showToast?.(t('settings.admin.invite_links.copy_manually'), 'info');
       };
       if (navigator.clipboard?.writeText) {
         navigator.clipboard.writeText(val).then(done).catch(fallback);
       } else {
         fallback();
       }
+    } else if (act === 'copy_card'){
+      this._copyInviteCard(card);
     } else if (act === 'toggle') {
       this.socket.emit('update-invite-code', { id, enabled: ic ? !ic.enabled : true });
     } else if (act === 'delete') {
-      if (confirm(`Delete invite link "${ic?.code || id}"? Anyone holding the old link won't be able to use it.`)) {
+      if (confirm(t('settings.admin.invite_links.delete_confirm', { code: ic?.code || id }))) {
         this.socket.emit('delete-invite-code', { id });
       }
     } else if (act === 'edit') {
@@ -4307,26 +4999,88 @@ _setupUI() {
       const cbs = Array.from(card.querySelectorAll('.invite-edit-channel-cb'));
       const total = cbs.length;
       const picked = cbs.filter(cb => cb.checked).map(cb => parseInt(cb.dataset.cid)).filter(Number.isFinite);
-      const channels = (total > 0 && picked.length === total) ? [] : picked;
+      const channels = picked;
       const maxUses = parseInt(card.querySelector('[data-role="edit-maxuses"]')?.value) || 0;
       const payload = { id, channels, maxUses };
       const exp = parseInt(card.querySelector('[data-role="edit-expiry"]')?.value);
       if (Number.isFinite(exp) && exp >= 0) payload.expiresInHours = exp;
       this.socket.emit('update-invite-code', payload);
-      this._showToast?.('Invite link updated', 'success');
     }
   });
 
   // Invite Links popout — open/close. Refresh the list and create-form channels
   // on open so the modal always reflects current state.
-  document.getElementById('open-invite-links-btn')?.addEventListener('click', () => {
-    const modal = document.getElementById('invite-links-modal');
-    if (!modal) return;
-    if (typeof this._renderInviteCreateChannels === 'function') {
-      try { this._renderInviteCreateChannels(true); } catch { /* non-critical */ }
+  // Active sessions. Refreshed whenever the Account settings pane is opened
+  // rather than polled, since the list is only interesting while you look at it.
+  document.getElementById('revoke-sessions-btn')?.addEventListener('click', async () => {
+    const status = document.getElementById('sessions-status');
+    const pw = prompt(t('settings.sessions_section.confirm_prompt'));
+    if (pw === null) return;                       // cancelled
+    if (!pw) { status.textContent = t('settings.sessions_section.need_password'); return; }
+    status.classList.remove('error', 'success');
+    status.textContent = t('settings.sessions_section.working');
+    // Set before the request: the server disconnects every socket including
+    // ours, and this is what tells our own force-logout handler to sit still.
+    this._justRevokedSessions = true;
+    try {
+      const res = await fetch('/api/auth/revoke-sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.token}` },
+        body: JSON.stringify({ password: pw })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        this._justRevokedSessions = false;
+        status.textContent = data.error || t('settings.sessions_section.failed');
+        status.classList.add('error');
+        return;
+      }
+      this.token = data.token;
+      localStorage.setItem('haven_token', data.token);
+      this.socket.auth.token = data.token;         // so the auto-reconnect authenticates
+      status.textContent = t('settings.sessions_section.done');
+      status.classList.add('success');
+    } catch {
+      this._justRevokedSessions = false;
+      status.textContent = t('settings.sessions_section.failed');
+      status.classList.add('error');
     }
-    if (this.socket?.connected) { try { this.socket.emit('get-invite-codes'); } catch { /* non-critical */ } }
-    modal.style.display = 'flex';
+  });
+
+  // Member search in the right sidebar. Re-rendering the roster from the last
+  // payload rather than asking the server keeps typing instant and costs the
+  // server nothing.
+  const userSearch = document.getElementById('user-search');
+  const userSearchClear = document.getElementById('user-search-clear');
+  const applyUserFilter = (value) => {
+    this._userFilter = value;
+    if (userSearchClear) userSearchClear.style.display = value ? '' : 'none';
+    if (this._lastOnlineUsers) this._renderOnlineUsers(this._lastOnlineUsers);
+  };
+  userSearch?.addEventListener('input', (e) => applyUserFilter(e.target.value));
+  userSearch?.addEventListener('keydown', (e) => {
+    // Escape clears rather than just blurring, which is what the key does in
+    // every other search box in the app.
+    if (e.key === 'Escape' && userSearch.value) {
+      e.stopPropagation();
+      userSearch.value = '';
+      applyUserFilter('');
+    }
+  });
+  userSearchClear?.addEventListener('click', () => {
+    if (userSearch) userSearch.value = '';
+    applyUserFilter('');
+    userSearch?.focus();
+  });
+
+  document.getElementById('open-invite-links-btn')?.addEventListener('click', () => {
+    this._openInviteLinksModal();
+  });
+  document.getElementById('right-btn-invite-popout')?.addEventListener('click', () => {
+    this._openInviteLinksModal();
+  });
+  document.getElementById('aml-view-invite-btn')?.addEventListener('click', () => {
+    this._openInviteLinksModal();
   });
   document.getElementById('close-invite-links-btn')?.addEventListener('click', () => {
     const modal = document.getElementById('invite-links-modal');
@@ -4337,9 +5091,179 @@ _setupUI() {
   });
 },
 
+async _copyInviteCard(card) {
+  const input = card.querySelector('[data-role="invite-link"]');
+  const inviteUrl = input?.value || '';
+  if (!inviteUrl) return;
+
+  // Find the invite code data for this card.
+  const id = parseInt(card.dataset.id, 10);
+  const invite = (this._inviteCodes || []).find(x => x.id === id);
+
+  // Server branding
+  const brandText = document.querySelector('.brand-text')?.textContent?.trim() || 'HAVEN';
+  const brandIcon = document.querySelector('.brand-icon');
+  const defaultLogo = document.querySelector('.logo-sm')?.textContent?.trim() || '⬡';
+
+  // Active theme
+  const themeElement = document.querySelector('[data-theme]') || document.documentElement;
+  const styles = getComputedStyle(themeElement);
+  const theme = name => styles.getPropertyValue(name).trim();
+
+  const bgCard = theme('--bg-card');
+  const accent = theme('--accent');
+  const accentText = theme('--accent-text') || '#fff';
+  const textPrimary = theme('--text-primary');
+  const textSecondary = theme('--text-secondary');
+  const textLink = theme('--text-link');
+  const border = theme('--border');
+  const radius = theme('--radius') || '8px';
+  const fontMain = theme('--font-main');
+
+  // Convert custom server icon to a self-contained data URL.
+  let iconSrc = '';
+
+  if (brandIcon?.src) {
+    try {
+      if (brandIcon.src.startsWith('data:')) {
+        iconSrc = brandIcon.src;
+      } else {
+        const response = await fetch(brandIcon.src);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const blob = await response.blob();
+        iconSrc = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      }
+    } catch (err) {
+      console.warn('Failed to embed server icon:', err);
+    }
+  }
+
+  const iconHtml = iconSrc
+    ? `<img src="${iconSrc}" alt="${brandText}" style="display:block;width:96px;height:96px;margin:0 auto 16px; border-radius:${radius};object-fit:contain">`
+    : `<div style="margin:0 auto 16px;font-size:84px;line-height:96px;color:${accent}">${defaultLogo}</div>`;
+
+  // Format invite expiration.
+  let expiryText = '';
+
+  if (invite?.expires_at) {
+    const expiryDate = new Date(invite.expires_at);
+    if (!Number.isNaN(expiryDate.getTime())) expiryText = this._fmtDateTime(expiryDate);
+  }
+
+  const invitedText = t('settings.admin.invite_links.card_invited', { server: brandText });
+  const registerText = t('settings.admin.invite_links.card_register');
+  const joinText = t('settings.admin.invite_links.card_join', { server: brandText });
+  const copyLinkText = t('settings.admin.invite_links.card_copy_link');
+
+  const expiryHtml = expiryText
+    ? `<p style="margin:24px 0 0;padding-top:16px;border-top:1px solid ${border};color:${textSecondary}; font-size:13px">${t('settings.admin.invite_links.card_expires', { date: expiryText })}</p>`
+    : '';
+
+  const html = `
+    <div style="margin:0;padding:40px 20px;font-family:${fontMain};text-align:center">
+      <div style="max-width:600px;margin:0 auto;padding:32px 24px;box-sizing:border-box;background:${bgCard};
+          border:1px solid ${border};border-radius:${radius}">
+        ${iconHtml}
+        <h2 style="margin:0 0 16px;font-family:${fontMain};font-size:24px;color:${textPrimary}">
+          ${invitedText}
+        </h2>
+        <p style="margin:0 0 24px;color:${textSecondary};font-size:16px">
+          ${registerText}
+        </p>
+        <a href="${inviteUrl}" style="display:inline-block;padding:12px 24px;background:${accent};color:${accentText};
+            text-decoration:none;border-radius:${radius};font-size:16px;font-weight:bold">
+          ${joinText}
+        </a>
+        <p style="margin:24px 0 8px;color:${textSecondary};font-size:14px">${copyLinkText}</p>
+        <p style="margin:0;word-break:break-all;font-size:14px">
+          <a href="${inviteUrl}" style="color:${textLink};text-decoration:none">${inviteUrl}</a>
+        </p>
+        ${expiryHtml}
+      </div>
+    </div>`;
+
+  const text = `${invitedText}
+
+${registerText}
+
+${joinText}:
+${inviteUrl}${expiryText ? `
+
+${t('settings.admin.invite_links.card_expires', { date: expiryText })}` : ''}`;
+
+  try {
+    if (!navigator.clipboard?.write) throw new Error('HTML clipboard API unavailable');
+
+    await navigator.clipboard.write([
+      new ClipboardItem({
+        'text/html': new Blob([html], { type: 'text/html' }),
+        'text/plain': new Blob([text], { type: 'text/plain' })
+      })
+    ]);
+
+    this._showToast?.(t('settings.admin.invite_links.email_card_copied'), 'success');
+  } catch (err) {
+    console.warn('Failed to copy HTML email:', err);
+    this._showToast?.(t('settings.admin.invite_links.email_card_copy_failed'), 'info');
+  }
+},
+
+_openRenameModal() {
+  document.getElementById('rename-modal').style.display = 'flex';
+  const input = document.getElementById('rename-input');
+  input.value = this.user.displayName || this.user.username;
+  input.focus();
+  input.select();
+  // Populate bio
+  const bioInput = document.getElementById('edit-profile-bio');
+  if (bioInput) bioInput.value = this.user.bio || '';
+  // Load personas list (#86, #5349)
+  this._loadPersonas?.();
+  this._loadRoles(() => this._renderUserProfileGroupsList());
+  this._updateAvatarPreview();
+  this._resetBorderEditState();
+  // Sync shape picker buttons
+  const picker = document.getElementById('avatar-shape-picker');
+  if (picker) {
+    const currentShape = this.user.avatarShape || localStorage.getItem('haven_avatar_shape') || 'circle';
+    picker.querySelectorAll('.avatar-shape-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.shape === currentShape);
+    });
+    this._pendingAvatarShape = currentShape;
+  }
+},
+
 // ═══════════════════════════════════════════════════════
 // CHANNEL & MESSAGE LINKS — copy/share deep-links
 // ═══════════════════════════════════════════════════════
+
+/**
+ * Replace the native language <select> with a custom dropdown that can show
+ * real flag artwork.
+ *
+ * Windows browsers refuse to render Unicode regional-indicator flags and fall
+ * back to the bare two-letter code, so "🇬🇧 English" displayed as "GB English".
+ * The emoji picker already solved this by shipping SVGs (see builtinEmojis in
+ * app.js), but that fix can't apply here: an <option> element renders text
+ * only — no images, no markup — so no amount of CSS or emoji font work will
+ * put a flag inside a native select.
+ *
+ * The original <select> is kept in the DOM as the source of truth and still
+ * receives its 'change' event, so the existing i18n wiring is untouched; this
+ * only swaps the visible control.
+ */
+_buildLanguagePicker() {
+  const select = document.getElementById('language-select');
+  if (!select || !window.i18n) return;
+  select.value = i18n.preference;
+  i18n.buildLocalePicker(select);
+},
 
 _canShareChannelLink(code) {
   if (!code) return false;
@@ -4353,15 +5277,14 @@ _canShareChannelLink(code) {
 _copyChannelLink(code, messageId = null) {
   if (!code) return;
   if (!this._canShareChannelLink(code)) {
-    this._showToast?.(t('toasts.channel_link_unavailable') || 'Channel not available on this server', 'error');
+    this._showToast?.(t('toasts.channel_link_unavailable'), 'error');
     return;
   }
   const base = `${window.location.origin}/app.html?channel=${encodeURIComponent(code)}`;
   const url = messageId ? `${base}&message=${encodeURIComponent(messageId)}` : base;
   const onCopied = () => {
     const key = messageId ? 'toasts.message_link_copied' : 'toasts.channel_link_copied';
-    const fallback = messageId ? 'Message link copied' : 'Channel link copied';
-    this._showToast(t(key) || fallback, 'success');
+    this._showToast(t(key), 'success');
   };
   if (navigator.clipboard?.writeText) {
     navigator.clipboard.writeText(url).then(onCopied).catch(() => this._copyTextFallback(url, onCopied));
@@ -4563,9 +5486,9 @@ _setupServerBar() {
       // 4. Health-check all servers
       await this.serverManager.checkAll();
       this._renderServerBar();
-      this._showToast('Server list synced', 'success');
+      this._showToast(t('servers.sync_success'), 'success');
     } catch {
-      this._showToast('Sync failed', 'error');
+      this._showToast(t('servers.sync_failed'), 'error');
     } finally {
       btn.classList.remove('spinning');
     }
@@ -4573,9 +5496,10 @@ _setupServerBar() {
 
   // ── Channel Code Settings Modal ─────────────────────
   document.getElementById('channel-code-settings-btn')?.addEventListener('click', () => {
-    if (!this.currentChannel || (!this.user.isAdmin && !this._hasPerm('create_channel'))) return;
+    if (!this.currentChannel) return;
     const channel = this.channels.find(c => c.code === this.currentChannel);
     if (!channel || channel.is_dm) return;
+    if (!this.user.isAdmin && !channel.canManageSettings) return; // (#5467) per channel, not "anywhere"
 
     document.getElementById('code-settings-channel-name').textContent = `# ${channel.name}`;
     document.getElementById('code-visibility-select').value = channel.code_visibility || 'public';
@@ -4782,7 +5706,7 @@ _renderManageServersList() {
       : initial;
 
     row.innerHTML = `
-      <div class="manage-server-drag-handle" title="Drag to reorder">⠿</div>
+      <div class="manage-server-drag-handle" title="${t('channels.drag_to_reorder')}">⠿</div>
       <div class="manage-server-icon">${iconContent}</div>
       <div class="manage-server-info">
         <div class="manage-server-name">${this._escapeHtml(s.name)}</div>
@@ -5178,14 +6102,11 @@ _setupImageUpload() {
     fileInput.click();
   });
 
+  // The picker, the clipboard and a drop can all hand over several files at
+  // once; every one of them queues, up to the admin's cap. (#5561)
   fileInput.addEventListener('change', () => {
-    if (!fileInput.files[0]) return;
-    const file = fileInput.files[0];
-    if (file.type.startsWith('image/')) {
-      this._queueImage(file);
-    } else {
-      this._queueGeneralFile(file);
-    }
+    if (!fileInput.files.length) return;
+    this._queueComposerFiles(fileInput.files);
     fileInput.value = '';
   });
 
@@ -5194,19 +6115,10 @@ _setupImageUpload() {
   document.getElementById('message-input').addEventListener('paste', (e) => {
     const items = e.clipboardData?.items;
     if (!items) return;
-    for (const item of items) {
-      if (item.kind === 'file' && item.type.startsWith('image/')) {
-        e.preventDefault();
-        this._queueImage(item.getAsFile());
-        return;
-      }
-      if (item.kind === 'file') {
-        e.preventDefault();
-        const file = item.getAsFile();
-        if (file) this._queueGeneralFile(file);
-        return;
-      }
-    }
+    const files = Array.from(items).filter(i => i.kind === 'file').map(i => i.getAsFile()).filter(Boolean);
+    if (!files.length) return;
+    e.preventDefault();
+    this._queueComposerFiles(files);
   });
 
   // Drag & drop — QUEUE instead of uploading immediately
@@ -5222,13 +6134,7 @@ _setupImageUpload() {
   messageArea.addEventListener('drop', (e) => {
     e.preventDefault();
     messageArea.classList.remove('drag-over');
-    const file = e.dataTransfer?.files[0];
-    if (!file) return;
-    if (file.type.startsWith('image/')) {
-      this._queueImage(file);
-    } else {
-      this._queueGeneralFile(file);
-    }
+    this._queueComposerFiles(e.dataTransfer?.files);
   });
 },
 
@@ -5450,7 +6356,7 @@ _renderMobileServerList() {
   if (!list || !this.serverManager) return;
   const servers = this.serverManager.getAll();
   if (servers.length === 0) {
-    list.innerHTML = `<div style="padding:8px 10px;color:var(--text-muted);font-size:12px;">${t('servers.no_servers')}</div>`;
+    list.innerHTML = `<div style="padding:8px 10px;color:var(--text-muted);font-size:0.75rem;">${t('servers.no_servers')}</div>`;
     return;
   }
   list.innerHTML = servers.map(s => {
@@ -5590,6 +6496,9 @@ _openPollModal() {
   document.getElementById('poll-question-input').value = '';
   document.getElementById('poll-multi-vote').checked = false;
   document.getElementById('poll-anonymous').checked = false;
+  const colSel = document.getElementById('poll-columns');
+  if (colSel) colSel.value = '0';
+  this._updatePollColumnsVis();
   const list = document.getElementById('poll-options-list');
   list.innerHTML = '';
   for (let i = 0; i < 2; i++) {
@@ -5606,7 +6515,7 @@ _addPollOptionRow(list, index) {
   const input = document.createElement('input');
   input.type = 'text';
   input.className = 'poll-option-input';
-  input.placeholder = `Option ${index + 1}`;
+  input.placeholder = t('modals.poll.option_placeholder', { number: index + 1 });
   input.maxLength = 100;
   const removeBtn = document.createElement('button');
   removeBtn.className = 'poll-option-remove';
@@ -5617,7 +6526,52 @@ _addPollOptionRow(list, index) {
     row.remove();
     this._updatePollRemoveButtons();
   });
+  // A picture for the option: uploaded on pick, so the poll can be posted
+  // with the URLs the moment Create is clicked (#5648).
+  const imgBtn = document.createElement('button');
+  imgBtn.type = 'button';
+  imgBtn.className = 'poll-option-imgbtn';
+  imgBtn.textContent = '\ud83d\uddbc\ufe0f';
+  imgBtn.title = t('modals.poll.add_image');
+  const file = document.createElement('input');
+  file.type = 'file';
+  file.accept = 'image/*';
+  file.style.display = 'none';
+  imgBtn.addEventListener('click', () => {
+    if (row.dataset.image) {
+      delete row.dataset.image;
+      imgBtn.classList.remove('has-image');
+      imgBtn.style.backgroundImage = '';
+      imgBtn.title = t('modals.poll.add_image');
+      this._updatePollColumnsVis();
+      return;
+    }
+    file.click();
+  });
+  file.addEventListener('change', async () => {
+    const f = file.files && file.files[0];
+    file.value = '';
+    if (!f || !f.type.startsWith('image/')) return;
+    const cap = this._uploadCapMb ? this._uploadCapMb() : 25;
+    if (f.size > cap * 1024 * 1024) return this._showToast(t('media.image_too_large', { maxMb: cap }), 'error');
+    try {
+      const fd = new FormData();
+      fd.append('scope', 'channel');
+      fd.append('image', f);
+      const data = await this._uploadWithProgress('/api/upload', fd);
+      if (!data || !data.url) throw new Error('upload');
+      row.dataset.image = data.url;
+      imgBtn.classList.add('has-image');
+      imgBtn.style.backgroundImage = `url("${data.url}")`;
+      imgBtn.title = t('modals.poll.remove_image');
+      this._updatePollColumnsVis();
+    } catch (err) {
+      if (!err?.aborted) this._showToast(err?.message || t('toasts.upload_failed'), 'error');
+    }
+  });
   row.appendChild(input);
+  row.appendChild(imgBtn);
+  row.appendChild(file);
   row.appendChild(removeBtn);
   list.appendChild(row);
   this._updatePollRemoveButtons();
@@ -5636,19 +6590,563 @@ _updatePollRemoveButtons() {
   const list = document.getElementById('poll-options-list');
   const btns = list.querySelectorAll('.poll-option-remove');
   btns.forEach(b => { b.style.display = list.children.length > 2 ? '' : 'none'; });
+  this._updatePollColumnsVis();
+},
+
+// The Columns choice only matters for a picture poll (#5648).
+_updatePollColumnsVis() {
+  const wrap = document.getElementById('poll-columns-wrap');
+  if (!wrap) return;
+  const any = [...document.querySelectorAll('#poll-options-list .poll-option-row')].some(r => r.dataset.image);
+  wrap.style.display = any ? '' : 'none';
 },
 
 _submitPoll() {
   const question = document.getElementById('poll-question-input').value.trim();
   if (!question) return;
-  const inputs = document.querySelectorAll('#poll-options-list .poll-option-input');
-  const options = Array.from(inputs).map(i => i.value.trim()).filter(Boolean);
+  const rows = Array.from(document.querySelectorAll('#poll-options-list .poll-option-row'))
+    .map(r => ({ text: r.querySelector('.poll-option-input')?.value.trim() || '', image: r.dataset.image || null }))
+    .filter(r => r.text);
+  const options = rows.map(r => r.text);
   if (options.length < 2) return;
+  const images = rows.map(r => r.image);
   const multiVote = document.getElementById('poll-multi-vote').checked;
   const anonymous = document.getElementById('poll-anonymous').checked;
+  const hasImages = images.some(Boolean);
+  const columns = hasImages ? (parseInt(document.getElementById('poll-columns')?.value, 10) || 0) : 0;
 
-  this.socket.emit('create-poll', { question, options, multiVote, anonymous });
+  this.socket.emit('create-poll', { question, options, multiVote, anonymous, ...(hasImages && { images }), ...(columns > 1 && { columns }) });
   document.getElementById('poll-modal').style.display = 'none';
+},
+
+// The drag bar above a text box. Bound once per handle; the edit box makes
+// its own handle on the fly (#5662).
+// ── Formatting guide and command list (#5654) ─────────────
+// Every markdown trick the message formatter understands, in one place. A
+// click wraps the selection (or drops a sample) into the message box.
+_formatGuideRows() {
+  return [
+    { key: 'bold',      before: '**', after: '**' },
+    { key: 'italic',    before: '*',  after: '*' },
+    { key: 'underline', before: '__', after: '__' },
+    { key: 'strike',    before: '~~', after: '~~' },
+    { key: 'highlight', before: '==', after: '==' },
+    { key: 'spoiler',   before: '||', after: '||' },
+    { key: 'code',      before: '`',  after: '`' },
+    { key: 'codeblock', before: '```\n', after: '\n```', block: true },
+    { key: 'quote',     before: '> ',  after: '', block: true },
+    { key: 'heading',   before: '# ',  after: '', block: true },
+    { key: 'list',      before: '- ',  after: '', block: true },
+    { key: 'numbered',  before: '1. ', after: '', block: true },
+    { key: 'link',      before: '[',   after: '](https://example.com)' },
+    { key: 'colour',    before: 'c#FF00EF ', after: ' #c' },
+    { key: 'rule',      before: '---', after: '', block: true, sample: '' },
+    { key: 'table',     before: '| A | B |\n| --- | --- |\n| 1 | 2 |', after: '', block: true, sample: '' },
+    { key: 'mention',   before: '@',  after: '', sample: '' },
+    { key: 'channel',   before: '#',  after: '', sample: '' },
+    { key: 'emoji',     before: ':',  after: ':', sample: 'smile' },
+  ];
+},
+
+_formatGuideHtml() {
+  return this._formatGuideRows().map(r => {
+    const sample = r.sample !== undefined ? r.sample : t('format_picker.sample_text');
+    const syntax = r.before + sample + r.after;
+    const demo = (r.block || !sample) ? '' : `<span class="format-row-demo message-content">${this._formatContent(syntax)}</span>`;
+    return `<button type="button" class="format-row" data-before="${this._escapeHtml(r.before)}" data-after="${this._escapeHtml(r.after)}" data-sample="${this._escapeHtml(sample)}"${r.block ? ' data-block="1"' : ''}>
+      <span class="format-row-label">${this._escapeHtml(t('format_picker.' + r.key))}</span>
+      <code class="format-row-syntax">${this._escapeHtml(syntax)}</code>${demo}</button>`;
+  }).join('');
+},
+
+// The same list the / dropdown offers, for the current channel, including
+// the bot commands registered here.
+_commandGuideHtml() {
+  const code = this.currentChannel;
+  const cmds = (this.slashCommands || []).filter(c => c && c.cmd && (!Array.isArray(c.channelCodes) || c.channelCodes.includes(code)));
+  if (!cmds.length) return `<div class="format-picker-hint">${this._escapeHtml(t('format_picker.no_commands'))}</div>`;
+  const rows = cmds.map(c => {
+    const desc = (c.descByChannel && code && c.descByChannel[code]) || c.desc || '';
+    return `<button type="button" class="format-row format-row-command" data-cmd="${this._escapeHtml(c.cmd)}">
+      <span class="format-row-cmd">/${this._escapeHtml(c.cmd)}${c.args ? ' ' + this._escapeHtml(c.args) : ''}</span>
+      <span class="format-row-desc">${this._escapeHtml(desc)}</span></button>`;
+  }).join('');
+  return `<div class="format-picker-hint">${this._escapeHtml(t('format_picker.commands_hint'))}</div>${rows}`;
+},
+
+// Wrap the selection in the message box (or the box being edited) with a
+// markdown pair, or drop a sample in when nothing is selected. Block-level
+// syntax starts on its own line.
+_wrapComposerSelection(before, after, sample = '', block = false) {
+  const input = this._activeEditTextarea || document.getElementById('message-input');
+  if (!input) return;
+  const start = Number.isInteger(input.selectionStart) ? input.selectionStart : input.value.length;
+  const end = Number.isInteger(input.selectionEnd) ? input.selectionEnd : start;
+  const selected = input.value.slice(start, end);
+  const inner = selected || sample;
+  const lead = (block && start > 0 && input.value[start - 1] !== '\n') ? '\n' : '';
+  input.focus();
+  input.setRangeText(lead + before + inner + after, start, end, 'end');
+  if (!selected && sample) {
+    const s = start + lead.length + before.length;
+    input.setSelectionRange(s, s + sample.length);
+  }
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+},
+
+// Put a command at the front of the message box, replacing one already there.
+_insertSlashCommand(cmd) {
+  const input = document.getElementById('message-input');
+  if (!input) return;
+  input.value = '/' + cmd + ' ' + input.value.replace(/^\/\S*\s?/, '');
+  input.focus();
+  input.setSelectionRange(cmd.length + 2, cmd.length + 2);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+},
+
+// ── Voice messages (#5665) ─────────────────────────────────
+// Click the mic to record, click it again (or Send) to post the recording as
+// an audio attachment; Cancel or Escape throws it away. It goes out through
+// the same upload as any file, so in an encrypted DM it is encrypted like
+// one. Five minutes is the ceiling.
+_voiceMimeChoice() {
+  if (typeof MediaRecorder === 'undefined') return null;
+  const wants = [
+    ['audio/webm;codecs=opus', 'weba'], ['audio/webm', 'weba'],
+    ['audio/ogg;codecs=opus', 'ogg'], ['audio/mp4', 'm4a'],
+  ];
+  for (const [mime, ext] of wants) {
+    try { if (MediaRecorder.isTypeSupported(mime)) return { mime, ext }; } catch { /* next */ }
+  }
+  return null;
+},
+
+async _toggleVoiceMessage() {
+  if (this._voiceRec) { this._stopVoiceMessage(true); return; }
+  const ch = this.channels.find(c => c.code === this.currentChannel);
+  if (!ch) return;
+  if (ch.media_enabled === 0) { this._showToast(t('media.uploads_disabled'), 'error'); return; }
+  const choice = this._voiceMimeChoice();
+  if (!choice || !navigator.mediaDevices?.getUserMedia) { this._showToast(t('voice_message.unsupported'), 'error'); return; }
+  let stream;
+  try {
+    // The same microphone voice chat uses, when one was picked.
+    const audio = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+    const savedInputId = localStorage.getItem('haven_input_device') || '';
+    if (savedInputId) audio.deviceId = { exact: savedInputId };
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio }); }
+    catch { delete audio.deviceId; stream = await navigator.mediaDevices.getUserMedia({ audio }); }
+  } catch {
+    this._showToast(t('voice_message.mic_denied'), 'error');
+    return;
+  }
+  const chunks = [];
+  let recorder;
+  try { recorder = new MediaRecorder(stream, { mimeType: choice.mime }); }
+  catch { recorder = new MediaRecorder(stream); }
+  const rec = { recorder, stream, chunks, ext: choice.ext, mime: recorder.mimeType || choice.mime, startedAt: Date.now(), code: this.currentChannel, send: false, timer: null };
+  recorder.addEventListener('dataavailable', (e) => { if (e.data && e.data.size) chunks.push(e.data); });
+  recorder.addEventListener('stop', () => this._finishVoiceMessage(rec));
+  try {
+    recorder.start(250);
+  } catch {
+    // A browser that has the API but cannot encode from this input.
+    try { stream.getTracks().forEach(tr => tr.stop()); } catch { /* nothing to stop */ }
+    this._showToast(t('voice_message.unsupported'), 'error');
+    return;
+  }
+  this._voiceRec = rec;
+  const bar = document.getElementById('voice-record-bar');
+  if (bar) bar.style.display = 'flex';
+  document.getElementById('voice-btn')?.classList.add('recording');
+  const tick = () => {
+    const s = Math.floor((Date.now() - rec.startedAt) / 1000);
+    const el = document.getElementById('voice-rec-time');
+    if (el) el.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    if (s >= 300) this._stopVoiceMessage(true);
+  };
+  tick();
+  rec.timer = setInterval(tick, 250);
+  this._voiceRecKeyHandler = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this._stopVoiceMessage(false); } };
+  document.addEventListener('keydown', this._voiceRecKeyHandler, true);
+},
+
+_stopVoiceMessage(send) {
+  const rec = this._voiceRec;
+  if (!rec) return;
+  rec.send = !!send;
+  rec.seconds = Math.round((Date.now() - rec.startedAt) / 1000);
+  clearInterval(rec.timer);
+  if (this._voiceRecKeyHandler) {
+    document.removeEventListener('keydown', this._voiceRecKeyHandler, true);
+    this._voiceRecKeyHandler = null;
+  }
+  const bar = document.getElementById('voice-record-bar');
+  if (bar) bar.style.display = 'none';
+  document.getElementById('voice-btn')?.classList.remove('recording');
+  this._voiceRec = null;
+  try {
+    if (rec.recorder.state !== 'inactive') rec.recorder.stop();
+    else this._finishVoiceMessage(rec);
+  } catch { this._finishVoiceMessage(rec); }
+},
+
+_finishVoiceMessage(rec) {
+  try { rec.stream.getTracks().forEach(tr => tr.stop()); } catch { /* already stopped */ }
+  if (rec.done) return;
+  rec.done = true;
+  if (!rec.send || !rec.chunks.length) return;
+  if (!rec.seconds || rec.seconds < 1) { this._showToast(t('voice_message.too_short'), 'error'); return; }
+  const type = String(rec.mime || '').split(';')[0] || 'audio/webm';
+  const blob = new Blob(rec.chunks, { type });
+  const m = Math.floor(rec.seconds / 60), s = rec.seconds % 60;
+  // The length rides in the name so the message can show it without loading
+  // the audio: voice-message-1m05s.weba.
+  const file = new File([blob], `voice-message-${m}m${String(s).padStart(2, '0')}s.${rec.ext}`, { type });
+  this._uploadGeneralFile(file, rec.code);
+},
+
+_bindInputResizer(handle) {
+  if (!handle || handle._resizerBound) return;
+  handle._resizerBound = true;
+  // The composer's bar sits above its box, so up means taller; the edit
+  // box's bar sits below it, so there down means taller (#5662).
+  const below = handle.classList.contains('edit-resizer');
+  let startY = 0;
+  let startHeight = 0;
+  let ta = null;
+  let cap = 600;
+
+  const onMove = (e) => {
+    if (!ta) return;
+    const delta = below ? (e.clientY - startY) : (startY - e.clientY); // positive when growing
+    const newHeight = Math.max(34, Math.min(cap, startHeight + delta));
+    ta.style.height = `${newHeight}px`;
+    ta.style.minHeight = `${newHeight}px`;
+    ta.style.maxHeight = `${cap}px`;
+  };
+
+  const onUp = () => {
+    ta = null;
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+  };
+
+  handle.addEventListener('mousedown', (e) => {
+    ta = handle.parentElement?.querySelector('textarea');
+    if (!ta) return;
+    startY = e.clientY;
+    startHeight = ta.getBoundingClientRect().height;
+    // Cap manual expansion at ~60% of viewport so the textarea can never
+    // swallow the entire chat pane. Min 200px on tiny windows.
+    cap = Math.max(200, Math.floor(window.innerHeight * 0.6));
+    e.preventDefault();
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+},
+
+/* ── Send later (#5638) ─────────────────────────────── */
+_openScheduleModal(prefill = '') {
+  const modal = document.getElementById('schedule-modal');
+  if (!modal) return;
+  const ch = this.channels?.find(c => c.code === this.currentChannel);
+  if (!ch || ch.is_dm) { this._showToast(t('modals.schedule.not_here'), 'error'); return; }
+  const text = document.getElementById('schedule-text');
+  text.value = prefill || document.getElementById('message-input')?.value || '';
+  text.maxLength = parseInt(this.serverSettings?.max_message_chars) || 2000;
+  // Default to one hour out, on the whole minute, seeded in the user's zone.
+  const d = new Date(Date.now() + 60 * 60 * 1000);
+  d.setSeconds(0, 0);
+  this._wireScheduleFields();
+  this._seedScheduleFields(d);
+  this._scheduleEditingId = null;
+  document.getElementById('schedule-save').textContent = t('modals.schedule.schedule_btn');
+  modal.style.display = 'flex';
+  text.focus();
+  this._loadScheduledList();
+},
+
+/** Load an instant into the Send-at fields, decomposed into the user's
+ *  confirmed timezone (device zone when none is set). */
+_seedScheduleFields(d) {
+  const parts = this._zonedParts(d);
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  set('sch-year', parts.year);
+  set('sch-month', parts.monthIndex + 1);
+  set('sch-day', parts.day);
+  set('sch-minute', parts.minute);
+  set('sch-second', parts.second);
+  this._tsmSetMeridiem(this._tsm24hDefault() ? '24' : (parts.hour < 12 ? 'AM' : 'PM'), parts.hour, this._schScope());
+},
+
+/** Wire the Send-at picker once: meridiem toggle and the calendar helper,
+ *  reusing the /time picker's field logic under the schedule scope. */
+_wireScheduleFields() {
+  if (this._scheduleFieldsWired) return;
+  this._scheduleFieldsWired = true;
+  const scope = this._schScope();
+  document.querySelectorAll('#schedule-modal .tsm-mer-btn').forEach(b => {
+    b.addEventListener('click', () => this._tsmSetMeridiem(b.dataset.mer, undefined, scope));
+  });
+  document.getElementById('sch-cal-btn')?.addEventListener('click', () => {
+    const di = document.getElementById('sch-cal-input');
+    if (!di) return;
+    const cur = this._tsmBuildDate(scope);
+    if (cur) {
+      const p = n => String(n).padStart(2, '0');
+      const parts = this._zonedParts(cur);
+      di.value = `${parts.year}-${p(parts.monthIndex + 1)}-${p(parts.day)}`;
+    }
+    try { di.showPicker(); } catch { di.focus(); di.click(); }
+  });
+  document.getElementById('sch-cal-input')?.addEventListener('change', () => {
+    const v = document.getElementById('sch-cal-input')?.value; // YYYY-MM-DD
+    const m = v && v.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return;
+    document.getElementById('sch-year').value = Number(m[1]);
+    document.getElementById('sch-month').value = Number(m[2]);
+    document.getElementById('sch-day').value = Number(m[3]);
+  });
+},
+
+_loadScheduledList() {
+  this.socket.timeout(8000).emit('get-scheduled-messages', {}, (err, r) => {
+    if (err || !r) return;
+    this._renderScheduledList(r.items || []);
+  });
+},
+
+_renderScheduledList(items) {
+  const list = document.getElementById('schedule-list');
+  if (!list) return;
+  if (!items.length) {
+    list.innerHTML = `<p class="muted-text" style="font-size:0.8rem">${t('modals.schedule.none')}</p>`;
+    return;
+  }
+  list.innerHTML = items.map(it => `<div class="schedule-item" data-id="${it.id}">
+    <div class="schedule-item-main">
+      <span class="schedule-item-when">${this._escapeHtml(this._fmtDateTime(it.sendAt))}</span>
+      <span class="schedule-item-chan">#${this._escapeHtml(it.channelName || '')}</span>
+      <div class="schedule-item-text">${this._escapeHtml(it.content)}</div>
+    </div>
+    <div class="schedule-item-actions">
+      <button type="button" class="btn-sm" data-act="edit">${t('msg_toolbar.edit')}</button>
+      <button type="button" class="btn-sm danger" data-act="cancel">${t('modals.schedule.cancel_send')}</button>
+    </div>
+  </div>`).join('');
+  list.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', () => {
+    const id = parseInt(b.closest('.schedule-item').dataset.id, 10);
+    const it = items.find(x => x.id === id);
+    if (!it) return;
+    if (b.dataset.act === 'cancel') {
+      this.socket.emit('cancel-scheduled-message', { id }, (r) => this._renderScheduledList((r && r.items) || []));
+      return;
+    }
+    this._scheduleEditingId = id;
+    document.getElementById('schedule-text').value = it.content;
+    this._wireScheduleFields();
+    this._seedScheduleFields(new Date(it.sendAt));
+    document.getElementById('schedule-save').textContent = t('modals.common.save');
+  }));
+},
+
+_submitSchedule() {
+  const textEl = document.getElementById('schedule-text');
+  const content = textEl.value.trim();
+  // Read the wall-clock in the user's confirmed zone (device fallback), so the
+  // absolute instant sent to the server is the moment the user actually meant,
+  // not whatever the browser's clock/zone claims. toISOString() below is still
+  // a plain UTC handoff; only the zone the fields are read in has changed.
+  const at = this._tsmBuildDate(this._schScope());
+  if (!content) { textEl.focus(); return; }
+  if (!at || isNaN(at.getTime()) || at.getTime() < Date.now() + 30000) { this._showToast(t('modals.schedule.in_past'), 'error'); return; }
+  const editing = this._scheduleEditingId;
+  const done = (r) => {
+    if (!r || r.error) { this._showToast((r && r.error) || t('toasts.role_server_no_response'), 'error'); return; }
+    this._showToast(t(editing ? 'modals.schedule.updated' : 'modals.schedule.scheduled', { when: this._fmtDateTime(at) }), 'success');
+    if (!editing) {
+      const input = document.getElementById('message-input');
+      if (input && input.value.trim() === content) { input.value = ''; input.style.height = 'auto'; }
+    }
+    this._scheduleEditingId = null;
+    textEl.value = '';
+    document.getElementById('schedule-save').textContent = t('modals.schedule.schedule_btn');
+    this._renderScheduledList(r.items || []);
+  };
+  if (editing) this.socket.emit('update-scheduled-message', { id: editing, content, sendAt: at.toISOString() }, done);
+  else this.socket.emit('schedule-message', { code: this.currentChannel, content, sendAt: at.toISOString() }, done);
+},
+
+/* ── /time timestamp picker modal ───────────────────── */
+// Opened by `/time` with no argument. It builds the very same <t:...> token
+// the text command does, so the render side (_formatTimestampToken) is reused
+// untouched — the modal is only a friendlier way to choose the instant.
+
+/** True when the reader's locale keeps a 24-hour clock. Falls back to 24-hour
+ *  when the browser cannot report an hour cycle, per the feature's default. */
+_tsm24hDefault() {
+  // A confirmed clock preference wins over the locale probe.
+  const h12 = this._userHour12?.();
+  if (h12 === true) return false;
+  if (h12 === false) return true;
+  try {
+    const hc = new Intl.DateTimeFormat(this._timeLocale?.(), { hour: 'numeric' })
+      .resolvedOptions().hourCycle;
+    if (hc) return hc === 'h23' || hc === 'h24';
+    // Older engines omit hourCycle: probe whether an afternoon hour prints a
+    // meridiem marker instead.
+    const s = new Date(2020, 0, 1, 13).toLocaleTimeString(this._timeLocale?.(), { hour: 'numeric' });
+    return !/[ap]\.?\s?m/i.test(s);
+  } catch { return true; }
+},
+
+_openTimeModal() {
+  const modal = document.getElementById('time-modal');
+  if (!modal) return;
+  // Seed "now" in the reader's confirmed zone (device zone when none is set),
+  // so a privacy browser reporting a false clock does not preset the wrong time.
+  const now = this._nowZonedParts();
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  set('tsm-year', now.year);
+  set('tsm-month', now.monthIndex + 1);
+  set('tsm-day', now.day);
+  set('tsm-minute', now.minute);
+  set('tsm-second', now.second);
+  // Default the clock mode to the reader's own convention, then seed the hour
+  // field in whatever units that mode expects.
+  this._tsmSetMeridiem(this._tsm24hDefault() ? '24' : (now.hour < 12 ? 'AM' : 'PM'), now.hour);
+  this._tsmRenderStyles();
+  this._tsmUpdatePreview();
+  modal.style.display = 'flex';
+  document.getElementById('tsm-hour')?.focus();
+},
+
+/** The two wall-clock pickers that share this field logic. Each names its modal
+ *  (for the meridiem buttons), its field id prefix, and where its 24/AM/PM
+ *  state lives. Defaulting every function to the /time scope keeps that
+ *  picker's existing call sites untouched. */
+_tsmScope() { return { modalId: 'time-modal', prefix: 'tsm', meridiemKey: '_tsmMeridiem' }; },
+_schScope() { return { modalId: 'schedule-modal', prefix: 'sch', meridiemKey: '_schMeridiem' }; },
+
+/** Switch the 24HR / AM / PM segmented control. `seedHour24`, when given, is a
+ *  0–23 hour to load into the field in the new mode's units. */
+_tsmSetMeridiem(mode, seedHour24, scope = this._tsmScope()) {
+  this[scope.meridiemKey] = mode;
+  document.querySelectorAll(`#${scope.modalId} .tsm-mer-btn`).forEach(b => {
+    b.classList.toggle('active', b.dataset.mer === mode);
+  });
+  const hourEl = document.getElementById(`${scope.prefix}-hour`);
+  if (!hourEl) return;
+  const cur = Number(hourEl.value);
+  // Reuse whatever hour is already showing when the user flips the toggle, so
+  // "8 PM" stays 8 PM going to 24-hour (→ 20) and back.
+  let h24 = Number.isFinite(seedHour24) ? seedHour24 : this._tsmReadHour24(cur, scope);
+  if (!Number.isFinite(h24)) h24 = 0;
+  if (mode === '24') {
+    hourEl.min = 0; hourEl.max = 23;
+    hourEl.value = h24;
+  } else {
+    hourEl.min = 1; hourEl.max = 12;
+    hourEl.value = ((h24 % 12) || 12);
+  }
+},
+
+/** Convert the hour field's current number into 0–23, honouring the mode. */
+_tsmReadHour24(raw, scope = this._tsmScope()) {
+  const h = Number(raw);
+  if (!Number.isFinite(h)) return NaN;
+  if (this[scope.meridiemKey] === '24') return h;
+  const base = h % 12;
+  return this[scope.meridiemKey] === 'PM' ? base + 12 : base;
+},
+
+/** Read all fields into a Date, interpreting the entered wall-clock in the
+ *  reader's confirmed timezone (device zone when none is set), or null if the
+ *  combination is not a real calendar instant. */
+_tsmBuildDate(scope = this._tsmScope()) {
+  const num = id => Number(document.getElementById(id)?.value);
+  const y = num(`${scope.prefix}-year`), mo = num(`${scope.prefix}-month`), d = num(`${scope.prefix}-day`);
+  const mi = num(`${scope.prefix}-minute`), se = num(`${scope.prefix}-second`);
+  const h24 = this._tsmReadHour24(document.getElementById(`${scope.prefix}-hour`)?.value, scope);
+  if (![y, mo, d, mi, se, h24].every(Number.isFinite)) return null;
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  if (h24 < 0 || h24 > 23 || mi < 0 || mi > 59 || se < 0 || se > 59) return null;
+  // Interpret the entered wall-clock in the reader's confirmed zone (device
+  // zone when none is set), so the instant matches what the person meant.
+  const when = this._wallToInstant(y, mo - 1, d, h24, mi, se);
+  // Reject dates JS silently rolls forward (e.g. 2026-02-31 → March), checked
+  // in the same zone the wall-clock was read in.
+  const back = this._zonedParts(when);
+  if (back.year !== y || back.monthIndex !== mo - 1 || back.day !== d) return null;
+  return when;
+},
+
+/** Build the seven style rows once — each a live preview plus its own Insert
+ *  button. Order follows the format list the feature documents. */
+_tsmRenderStyles() {
+  const box = document.getElementById('tsm-styles');
+  if (!box || box.childElementCount) return;
+  const label = this._escapeHtml(t('modals.time.insert_btn'));
+  box.innerHTML = ['F', 'f', 'D', 'd', 't', 'T', 'R'].map(s =>
+    `<div class="tsm-style-row" data-style="${s}">` +
+      `<span class="tsm-style-preview"></span>` +
+      `<button type="button" class="btn-sm btn-accent tsm-style-insert" data-style="${s}">${label}</button>` +
+    `</div>`).join('');
+},
+
+/** Refresh every style's preview from the current field values. */
+_tsmUpdatePreview() {
+  const box = document.getElementById('tsm-styles');
+  if (!box) return;
+  const when = this._tsmBuildDate();
+  const secs = when ? Math.floor(when.getTime() / 1000) : null;
+  box.querySelectorAll('.tsm-style-row').forEach(row => {
+    const prev = row.querySelector('.tsm-style-preview');
+    const btn = row.querySelector('.tsm-style-insert');
+    const html = secs !== null ? this._formatTimestampToken(secs, row.dataset.style) : null;
+    if (html) {
+      prev.classList.remove('tsm-invalid');
+      prev.innerHTML = html;
+      if (btn) { btn.disabled = false; btn.setAttribute('aria-label', `${t('modals.time.insert_btn')}: ${prev.textContent}`); }
+    } else {
+      prev.classList.add('tsm-invalid');
+      prev.textContent = '—';
+      if (btn) btn.disabled = true;
+    }
+  });
+},
+
+/** Pull the native date input's YYYY-MM-DD back into the Year/Month/Day
+ *  fields. The picker itself is the search feature's <input type="date">. */
+_tsmSyncFromCalendar() {
+  const v = document.getElementById('tsm-cal-input')?.value; // YYYY-MM-DD
+  if (!v) return;
+  const m = v.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return;
+  document.getElementById('tsm-year').value = Number(m[1]);
+  document.getElementById('tsm-month').value = Number(m[2]);
+  document.getElementById('tsm-day').value = Number(m[3]);
+  this._tsmUpdatePreview();
+},
+
+_tsmInsert(style) {
+  const when = this._tsmBuildDate();
+  if (!when) return;
+  const s = ['F', 'f', 'D', 'd', 't', 'T', 'R'].includes(style) ? style : 'f';
+  const token = `<t:${Math.floor(when.getTime() / 1000)}:${s}>`;
+  const input = document.getElementById('message-input');
+  document.getElementById('time-modal').style.display = 'none';
+  if (!input) return;
+  // Insert at the caret so the token can sit inside a sentence the user is
+  // already writing; fall back to the end when there is no selection.
+  const start = Number.isInteger(input.selectionStart) ? input.selectionStart : input.value.length;
+  const end = Number.isInteger(input.selectionEnd) ? input.selectionEnd : input.value.length;
+  input.value = input.value.slice(0, start) + token + input.value.slice(end);
+  input.style.height = 'auto';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.focus();
+  try { input.setSelectionRange(start + token.length, start + token.length); } catch { /* not a text input */ }
 },
 
 /* ── iOS Keyboard Layout Fix ────────────────────────── */
@@ -5845,7 +7343,7 @@ _handleMobileBack() {
   const search = document.getElementById('search-container');
   if (search && search.style.display !== 'none' && search.style.display !== '') {
     search.style.display = 'none';
-    document.getElementById('search-results-panel').style.display = 'none';
+    document.getElementById('search-panel').style.display = 'none';
     return;
   }
 
@@ -5905,25 +7403,39 @@ _reportThemeColor() {
 
 _saveRename() {
   const input = document.getElementById('rename-input');
-  const newName = input.value.trim().replace(/\s+/g, ' ');
-  if (!newName || newName.length < 2) {
+  // Mirrors normalizeDisplayName on the server (#5509) so a name in any
+  // script gets an instant answer here rather than a bare error-msg back.
+  const newName = input.value.normalize('NFC').trim().replace(/\s+/g, ' ');
+  if (!newName || [...newName].length < 2) {
     return this._showToast(t('toasts.display_name_too_short'), 'error');
   }
-  if (!/^[a-zA-Z0-9_ ]+$/.test(newName)) {
+  if (!/^[\p{L}\p{N}\p{M}_ ]+$/u.test(newName)) {
     return this._showToast(t('toasts.display_name_invalid_chars'), 'error');
   }
-  this.socket.emit('rename-user', { username: newName });
+  if (/\p{M}{4,}/u.test(newName)) {
+    return this._showToast(t('toasts.display_name_too_many_marks'), 'error');
+  }
+  // Only an actual change goes to the server; a bio or avatar save with the
+  // name left alone used to announce a rename to the whole channel.
+  if (newName !== (this.user.displayName || this.user.username)) {
+    this.socket.emit('rename-user', { username: newName });
+  }
   // Save bio
   const bioInput = document.getElementById('edit-profile-bio');
   if (bioInput) {
     this.socket.emit('set-bio', { bio: bioInput.value });
   }
-  // Also commit any pending avatar changes
+  // Also commit any pending avatar and groups changes
   this._commitAvatarSettings();
+  this._GroupManagerSaveGroups();
   document.getElementById('rename-modal').style.display = 'none';
 },
 
 // ── Upload with progress bar ───────────────────────────
+// Every in-flight request is kept in _activeUploads so the bar's × can abort
+// them. The general file queue fires its uploads without awaiting, so there
+// can be several at once — hence a set, and hence hiding the bar only once
+// the last one settles rather than whenever any single one does.
 _uploadWithProgress(url, formData) {
   return new Promise((resolve, reject) => {
     const bar = document.getElementById('upload-progress-bar');
@@ -5933,9 +7445,16 @@ _uploadWithProgress(url, formData) {
     if (fill) { fill.style.width = '0%'; }
     if (text) { text.textContent = t('common.uploading'); }
 
+    if (!this._activeUploads) this._activeUploads = new Set();
+
     const xhr = new XMLHttpRequest();
     xhr.open('POST', url);
     xhr.setRequestHeader('Authorization', `Bearer ${this.token}`);
+
+    const settle = () => {
+      this._activeUploads.delete(xhr);
+      if (bar && this._activeUploads.size === 0) bar.style.display = 'none';
+    };
 
     xhr.upload.addEventListener('progress', (e) => {
       if (e.lengthComputable) {
@@ -5946,29 +7465,45 @@ _uploadWithProgress(url, formData) {
     });
 
     xhr.addEventListener('load', () => {
-      if (bar) bar.style.display = 'none';
+      settle();
       if (xhr.status >= 200 && xhr.status < 300) {
         try { resolve(JSON.parse(xhr.responseText)); }
-        catch { reject(new Error('Invalid JSON response')); }
+        catch { reject(new Error(t('toasts.invalid_json_response'))); }
       } else {
-        let errMsg = `Upload failed (${xhr.status})`;
+        let errMsg = t('toasts.upload_failed_status', { status: xhr.status });
         try { const d = JSON.parse(xhr.responseText); errMsg = d.error || errMsg; } catch {}
         reject(new Error(errMsg));
       }
     });
 
     xhr.addEventListener('error', () => {
-      if (bar) bar.style.display = 'none';
-      reject(new Error('Upload failed — check your connection'));
+      settle();
+      reject(new Error(t('toasts.upload_connection_failed')));
     });
 
     xhr.addEventListener('abort', () => {
-      if (bar) bar.style.display = 'none';
-      reject(new Error('Upload cancelled'));
+      settle();
+      // Flagged so the callers can skip their own "upload failed" toast —
+      // cancelling on purpose isn't an error, and the cancel already toasts.
+      const err = new Error(t('toasts.upload_cancelled'));
+      err.aborted = true;
+      reject(err);
     });
 
+    this._activeUploads.add(xhr);
     xhr.send(formData);
   });
+},
+
+// The × on the progress bar. Aborts everything currently in flight and tells
+// the queue loops to stop, since cancelling one file out of a batch and then
+// watching the rest go up anyway isn't what the button looks like it does.
+_cancelUploads() {
+  const active = this._activeUploads ? [...this._activeUploads] : [];
+  if (active.length === 0) return;
+  this._uploadsCancelled = true;
+  active.forEach(xhr => { try { xhr.abort(); } catch { /* already settled */ } });
+  this._showToast(t('toasts.upload_cancelled'), 'info');
 },
 
 // Intercept clicks on concealed media. Returns true when the click was
@@ -5983,17 +7518,26 @@ _maybeRevealConcealed(e) {
     sp.classList.add('revealed');
     return true;
   }
+  // Spoilered link embed (the link was wrapped in ||spoiler||) → reveal the
+  // card in place; blurred children have pointer-events disabled, so the
+  // click lands on the card and this consumes it before the embed's own
+  // controls or link fire.
+  const lp = e.target.closest && e.target.closest('.link-preview.lp-spoiler');
+  if (lp && !lp.classList.contains('revealed')) {
+    lp.classList.add('revealed');
+    return true;
+  }
   return false;
 },
 
-async _uploadImage(file, targetCode, bundled = false, personaPrefix = '', spoiler = false) {
+async _uploadImage(file, targetCode, bundled = false, personaPrefix = '', spoiler = false, opts = {}) {
   if (!this.currentChannel && !targetCode) return;
   // The queue stores the per-image spoiler choice on the File object itself.
   if (!spoiler && file && file._spoiler) spoiler = true;
   // Capture the target channel NOW (before any await) so a mid-upload channel
   // switch doesn't send the image to the wrong channel.
   const targetChannel = targetCode || this.currentChannel;
-  const _maxMb = parseInt(this.serverSettings?.max_upload_mb) || 25;
+  const _maxMb = this._uploadCapMb();
   if (file.size > _maxMb * 1024 * 1024) {
     return this._showToast(t('toasts.image_too_large', { max: _maxMb }), 'error');
   }
@@ -6014,6 +7558,7 @@ async _uploadImage(file, targetCode, bundled = false, personaPrefix = '', spoile
       const encrypted = await this.e2e.encryptBytes(arrayBuffer, partner.userId, partner.publicKeyJwk);
       const blob = new Blob([encrypted], { type: 'application/octet-stream' });
       const formData = new FormData();
+      formData.append('scope', 'dm');
       formData.append('file', blob, 'e2e-image.enc');
       const data = await this._uploadWithProgress('/api/upload-file', formData);
       const mime = file.type || 'image/png';
@@ -6027,6 +7572,7 @@ async _uploadImage(file, targetCode, bundled = false, personaPrefix = '', spoile
       });
       this.notifications.play('sent');
     } catch (err) {
+      if (err?.aborted) return;
       console.error('[E2E] Image encryption failed:', err);
       const detail = err?.message ? ` — ${err.message}` : '';
       this._showToast(`${t('toasts.encrypted_image_failed')}${detail}`, 'error');
@@ -6037,31 +7583,87 @@ async _uploadImage(file, targetCode, bundled = false, personaPrefix = '', spoile
   try {
     // SVG must use /api/upload-file (the raster-only /api/upload rejects it)
     let data;
+    const uploadScope = isDm ? 'dm' : 'channel';
     if (file.type === 'image/svg+xml') {
       const fd = new FormData();
+      fd.append('scope', uploadScope);
       fd.append('file', file);
       data = await this._uploadWithProgress('/api/upload-file', fd);
     } else {
       const formData = new FormData();
+      formData.append('scope', uploadScope);
       formData.append('image', file);
       data = await this._uploadWithProgress('/api/upload', formData);
     }
 
     // Send the image URL as a message to the channel that was active at upload time.
     // Prepend persona prefix if this image is bundled with a persona text message.
+    const line = personaPrefix + (spoiler ? 'spoiler-img:' : '') + data.url;
+    // A forum topic sent with text collects its picture lines and goes out as
+    // one message instead (#5653).
+    if (opts.returnContent) return line;
     this.socket.emit('send-message', {
       code: targetChannel,
-      content: personaPrefix + (spoiler ? 'spoiler-img:' : '') + data.url,
+      content: line,
       isImage: true,
       ...(bundled && { bundled: true })
     });
     this.notifications.play('sent');
   } catch (err) {
+    if (err?.aborted) return;
     this._showToast(err.message || t('toasts.upload_failed'), 'error');
   }
 },
 
 // ── Channel Media Gallery (#5350) ─────────────────────
+_renderThreadList(filter = '') {
+  const body = document.getElementById('threads-list-body');
+  const countEl = document.getElementById('threads-list-count');
+  if (!body) return;
+
+  const all = this._threadListData || [];
+  const needle = String(filter || '').trim().toLowerCase();
+  const rows = needle
+    ? all.filter(th =>
+        String(th.content || '').toLowerCase().includes(needle) ||
+        String(th.username || '').toLowerCase().includes(needle))
+    : all;
+
+  if (countEl) {
+    countEl.textContent = needle
+      ? `${rows.length} / ${all.length}`
+      : (all.length ? String(all.length) : '');
+  }
+
+  if (!rows.length) {
+    const key = all.length ? 'thread_list.no_matches' : 'thread_list.empty';
+    body.innerHTML = `<div class="media-gallery-empty muted-text">${t(key)}</div>`;
+    return;
+  }
+
+  body.innerHTML = rows.map(th => {
+    const replies = Number(th.reply_count) || 0;
+    const label = replies === 1
+      ? t('thread_list.reply_one')
+      : t('thread_list.reply_other', { count: replies });
+    // Strip attachment markdown so a thread started with a file reads as its
+    // filename rather than a wall of markup.
+    const preview = String(th.content || '')
+      .replace(/\[file:([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/!\[[^\]]*\]\(([^)\s]+)\)/g, '$1')
+      .trim();
+    return `
+      <button class="thread-list-row" data-parent-id="${th.id}">
+        <span class="thread-list-row-top">
+          <span class="thread-list-author">${this._escapeHtml(th.username || '')}</span>
+          <span class="thread-list-replies">${this._escapeHtml(label)}</span>
+          <span class="thread-list-when">${this._escapeHtml(this._formatTime?.(th.last_reply_at) || '')}</span>
+        </span>
+        <span class="thread-list-preview">${this._escapeHtml(preview)}</span>
+      </button>`;
+  }).join('');
+},
+
 _renderMediaGallery(data) {
   this._mediaGalleryData = data;
   ['photos','videos','audios','files','links'].forEach(k => {
@@ -6072,7 +7674,30 @@ _renderMediaGallery(data) {
   this._mediaGallerySelected = new Map();
   this._mediaGallerySelectMode = false;
   this._refreshMediaGalleryToolbar();
+  this._applyMediaTileSize();
   this._renderMediaGalleryTab(this._mediaGalleryActiveTab || 'photos');
+},
+
+_mediaTilePx(raw) {
+  const n = parseInt(raw != null ? raw : (() => { try { return localStorage.getItem('mediaGalleryTile'); } catch { return ''; } })(), 10);
+  if (!Number.isFinite(n)) return 150;
+  return Math.min(360, Math.max(72, n));
+},
+
+_applyMediaTileSize(px) {
+  const size = px != null ? this._mediaTilePx(px) : this._mediaTilePx();
+  const modal = document.getElementById('media-gallery-modal');
+  if (modal) modal.style.setProperty('--media-tile', `${size}px`);
+  if (modal && this._tileShapes) {
+    let shape = 'square';
+    try { shape = this._forumParseShape(localStorage.getItem('mediaGalleryShape')); } catch {}
+    modal.style.setProperty('--media-shape', this._tileShapes()[shape] || '1 / 1');
+  }
+  const slider = document.getElementById('media-gallery-tile');
+  if (slider && slider.value !== String(size)) slider.value = String(size);
+  const wrap = document.getElementById('media-gallery-tile-wrap');
+  const tab = this._mediaGalleryActiveTab || 'photos';
+  if (wrap) wrap.hidden = tab !== 'photos' && tab !== 'videos';
 },
 
 // Build a stable key for a gallery row so the same attachment shared
@@ -6141,14 +7766,12 @@ _refreshMediaGalleryToolbar() {
   actions.style.display = '';
   const selectMode = !!this._mediaGallerySelectMode;
   const count = this._mediaGallerySelected ? this._mediaGallerySelected.size : 0;
-  toggle.textContent = selectMode
-    ? ((window.t && t('media_gallery.cancel_select')) || 'Cancel')
-    : ((window.t && t('media_gallery.select')) || 'Select');
+  toggle.textContent = t(selectMode ? 'media_gallery.cancel_select' : 'media_gallery.select');
   selAll.style.display = selectMode ? '' : 'none';
   delBtn.style.display = selectMode ? '' : 'none';
   delBtn.disabled = count === 0;
   info.style.display = selectMode ? '' : 'none';
-  info.textContent = selectMode ? `${count} selected` : '';
+  info.textContent = selectMode ? t('media_gallery.selected', { count }) : '';
 },
 
 _renderMediaGalleryTab(tab) {
@@ -6157,13 +7780,13 @@ _renderMediaGalleryTab(tab) {
   const rawItems = this._mediaGalleryData[tab] || [];
   if (rawItems.length === 0) {
     const labels = {
-      photos: 'No photos in this channel yet',
-      videos: 'No videos in this channel yet',
-      audios: 'No audio files in this channel yet',
-      files:  'No files in this channel yet',
-      links:  'No links in this channel yet',
+      photos: t('media_gallery.empty_photos'),
+      videos: t('media_gallery.empty_videos'),
+      audios: t('media_gallery.empty_audio'),
+      files:  t('media_gallery.empty_files'),
+      links:  t('media_gallery.empty_links'),
     };
-    body.innerHTML = `<div class="media-gallery-empty muted-text">${labels[tab] || 'Nothing here yet'}</div>`;
+    body.innerHTML = `<div class="media-gallery-empty muted-text">${labels[tab] || t('media_gallery.empty')}</div>`;
     return;
   }
   const items = this._sortMediaItems(rawItems);
@@ -6172,7 +7795,7 @@ _renderMediaGalleryTab(tab) {
     try {
       const d = new Date(iso);
       if (isNaN(d)) return '';
-      return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+      return this._fmtDate(d, { year: 'numeric', month: 'short', day: 'numeric' });
     } catch { return ''; }
   };
   const esc = (s) => this._escapeHtml ? this._escapeHtml(s) : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -6198,7 +7821,7 @@ _renderMediaGalleryTab(tab) {
       <div class="media-grid-item${selected.has(this._mediaItemKey(it)) ? ' selected' : ''}" data-url="${esc(it.url)}" data-msg-id="${it.message_id}" data-action="lightbox" title="${esc(it.username || '')} • ${esc(fmt(it.created_at))}">
         ${selBox(it)}
         <img src="${esc(it.url)}" loading="lazy" alt="">
-        <button class="media-grid-jump" data-action="jump" data-msg-id="${it.message_id}" title="Jump to message">↗</button>
+        <button class="media-grid-jump" data-action="jump" data-msg-id="${it.message_id}" title="${t('app.actions.jump_to_message')}">↗</button>
         <div class="media-grid-date">${esc(fmt(it.created_at))}${sizeBadge(it) ? ' • ' + sizeBadge(it) : ''}</div>
       </div>`).join('')}</div>`;
   } else if (tab === 'videos') {
@@ -6207,7 +7830,7 @@ _renderMediaGalleryTab(tab) {
         ${selBox(it)}
         <video src="${esc(it.url)}" preload="metadata" muted></video>
         <div class="media-grid-play">▶</div>
-        <button class="media-grid-jump" data-action="jump" data-msg-id="${it.message_id}" title="Jump to message">↗</button>
+        <button class="media-grid-jump" data-action="jump" data-msg-id="${it.message_id}" title="${t('app.actions.jump_to_message')}">↗</button>
         <div class="media-grid-date">${esc(fmt(it.created_at))}${sizeBadge(it) ? ' • ' + sizeBadge(it) : ''}</div>
       </div>`).join('')}</div>`;
   } else if (tab === 'audios') {
@@ -6220,7 +7843,7 @@ _renderMediaGalleryTab(tab) {
           <span class="media-list-meta">${esc(it.username || '')} • ${esc(fmt(it.created_at))}</span>
           <audio class="media-list-audio" src="${esc(it.url)}" controls preload="none"></audio>
         </div>
-        <button class="media-list-jump" data-action="jump" data-msg-id="${it.message_id}" title="Jump to message">↗</button>
+        <button class="media-list-jump" data-action="jump" data-msg-id="${it.message_id}" title="${t('app.actions.jump_to_message')}">↗</button>
       </div>`).join('')}</div>`;
   } else if (tab === 'files') {
     // In select mode, render as <div> instead of <a> so clicking the row
@@ -6237,7 +7860,7 @@ _renderMediaGalleryTab(tab) {
           <span class="media-list-name">${esc(it.name || it.url.split('/').pop())} ${sizeBadge(it)}</span>
           <span class="media-list-meta">${esc(it.username || '')} • ${esc(fmt(it.created_at))}</span>
         </div>
-        <button class="media-list-jump" data-action="jump" data-msg-id="${it.message_id}" title="Jump to message">↗</button>
+        <button class="media-list-jump" data-action="jump" data-msg-id="${it.message_id}" title="${t('app.actions.jump_to_message')}">↗</button>
       </${tag}>`;
     }).join('')}</div>`;
   } else if (tab === 'links') {
@@ -6252,7 +7875,7 @@ _renderMediaGalleryTab(tab) {
           <span class="media-list-meta">${esc(it.url)}</span>
           <span class="media-list-meta">${esc(it.username || '')} • ${esc(fmt(it.created_at))}</span>
         </div>
-        <button class="media-list-jump" data-action="jump" data-msg-id="${it.message_id}" title="Jump to message">↗</button>
+        <button class="media-list-jump" data-action="jump" data-msg-id="${it.message_id}" title="${t('app.actions.jump_to_message')}">↗</button>
       </a>`;
     }).join('')}</div>`;
   }
@@ -6351,6 +7974,312 @@ _openVideoLightbox(src) {
   document.body.appendChild(overlay);
 },
 
+_loadGroupChannelAccess(roleIds, callback) {
+  this._roleEmit('get-role-channel-access', { roleIds }, (res) => {
+    if (!res || res.error) return callback?.({});
+
+    const channelMap = new Map((res.channels || []).map(ch => [ch.id, ch]));
+    const accessMap = {};
+    (res.access || []).forEach(a => {
+      if (!a.grant_on_promote) return;
+
+      const channel = channelMap.get(a.channel_id);
+      if (!channel) return;
+      if (!accessMap[a.role_id]) accessMap[a.role_id] = [];
+
+      accessMap[a.role_id].push(channel);
+    });
+    callback?.(accessMap);
+  });
+},
+
+// user Groups
+_renderUserProfileGroupsList() {
+  const section = document.getElementById('rename-modal-groups-section');
+  const list = document.getElementById('user-profile-groups-list');
+  const manager = document.getElementById('user-profile-groups-manager');
+  const managerSaveBtn = document.getElementById('save-groups-btn');
+  const manageGroupsBtn = document.getElementById('manage-groups-btn');
+  if (!section || !list || !manager || !managerSaveBtn || !manageGroupsBtn) return;
+
+  // Hide Groups section if there are no groups available to join.
+  const availableGroups = (this._allRoles || []).filter(r => r.level === 0).sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  section.style.display = availableGroups.length > 0 ? '' : 'none';
+
+  // Always start from the read-only view. Clearing the manager's checkboxes
+  // matters: Save Profile calls _GroupManagerSaveGroups too, and stale
+  // checkboxes from an earlier visit would otherwise be replayed as the
+  // user's current choice.
+  manager.style.display = 'none';
+  manager.innerHTML = '';
+  managerSaveBtn.style.display = 'none';
+
+  if (availableGroups.length > 0) {
+    // Make Sure non manager parts are visible:
+    manageGroupsBtn.style.display = '';
+    list.style.display = '';
+
+    const groups = (this.user?.roles || []).filter(r => r.level === 0).sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+    const esc = (s) => this._escapeHtml ? this._escapeHtml(s) : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    if (groups.length === 0) {
+      // display tip when user is not a part of any groups
+      list.innerHTML = `<p class="muted-text" style="font-size:.78rem;margin:6px 0">${t('modals.edit_profile.no_groups')}</p>`;
+    }
+    else {
+      // render list of user's current groups
+      list.innerHTML = groups.map(r => {
+        const rIcon = r.icon ? `<img class="role-icon" src="${esc(r.icon)}" alt="">` : `<span class="profile-role-dot" style="background:${this._safeColor(r.color, 'var(--text-muted)')}"></span>`;
+          return `<span class="profile-popup-role" style="border-color:${this._safeColor(r.color, 'var(--border-light)')}; color:${this._safeColor(r.color, 'var(--text-secondary)')}">${rIcon}${esc(r.name)}</span>`;
+      }).join('');
+    }
+  }
+},
+
+_showGroupManager() {
+  const list = document.getElementById('user-profile-groups-list');
+  const manager = document.getElementById('user-profile-groups-manager');
+  const managerSaveBtn = document.getElementById('save-groups-btn');
+  const manageGroupsBtn = document.getElementById('manage-groups-btn');
+  if (!list || !manager || !managerSaveBtn || !manageGroupsBtn) return;
+
+  const availableGroups = (this._allRoles || []).filter(r => r.level === 0).sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  const groups = (this.user?.roles || []).filter(r => r.level === 0).sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  const esc = (s) => this._escapeHtml ? this._escapeHtml(s) : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  list.style.display = 'none';
+  manageGroupsBtn.style.display = 'none';
+
+  manager.style.display = '';
+  managerSaveBtn.style.display = '';
+
+  // render html list of selectable groups for the user groups-manager
+  const userGroupIds = new Set(groups.map(g => g.id));
+  manager.innerHTML = availableGroups.map(r => {
+    const isMember = userGroupIds.has(r.id);
+    const rIcon = r.icon ? `<img class="role-icon" src="${esc(r.icon)}" alt="">` : `<span class="profile-role-dot" style="background:${this._safeColor(r.color, 'var(--text-muted)')}"></span>`;
+
+    return `
+      <label class="toggle-row user-group-toggle-row">
+        <span class="user-group-name">
+          <button class="user-group-channel-info" data-role="${r.id}" style="visibility:hidden" title="">#i</button>
+          <span class="profile-popup-role" style="border-color:${this._safeColor(r.color, 'var(--border-light)')}; color:${this._safeColor(r.color, 'var(--text-secondary)')}">${rIcon}${esc(r.name)}</span>
+        </span>
+        <input type="checkbox" class="user-group-checkbox" data-role="${r.id}"${isMember ? ' checked' : ''}>
+      </label>
+    `;
+  }).join('');
+
+  // Load channel access for all groups and show info icons
+  this._loadGroupChannelAccess(
+    availableGroups.map(r => r.id),
+    (accessMap) => {
+      availableGroups.forEach(r => {
+        const channels = accessMap[r.id] || [];
+        if (!channels.length) return;
+
+        const info = manager.querySelector(`.user-group-channel-info[data-role="${r.id}"]`);
+        if (!info) return;
+
+        info.dataset.channels = JSON.stringify(channels);
+        info.style.visibility = 'visible';
+
+        info.addEventListener('mouseenter', () => {
+          // Don't show a hover tooltip while the persistent popup is open.
+          if (this._groupChannelInfoPopup) return;
+
+          this._showGroupChannelInfo(info, false);
+        });
+
+        info.addEventListener('mouseleave', () => {
+          // Persistent popup is intentionally unaffected.
+          if (!this._groupChannelInfoPopup) {
+            this._closeGroupChannelInfo();
+          }
+        });
+
+        info.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+
+          this._showGroupChannelInfo(info, true);
+        });
+      });
+    }
+  );
+},
+
+_GroupManagerSaveGroups() {
+  // Only send a selection while the group manager is open. Save Profile calls
+  // this unconditionally, and with the manager closed there are no checkboxes
+  // in the DOM, so an empty list would go out and the server would read it as
+  // "leave every group".
+  const manager = document.getElementById('user-profile-groups-manager');
+  if (!manager || manager.style.display === 'none') return;
+  const selectedGroupIds = Array.from(manager.querySelectorAll('.user-group-checkbox:checked')).map(el => parseInt(el.dataset.role, 10)).filter(Number.isInteger);
+  this._roleEmit('update-groups', {groupIds: selectedGroupIds}, (res) => {
+    if (res.error) {
+      return this._showToast(res.error, 'error');
+    }
+
+    // Update local user roles with the groups returned by the server.
+    if (Array.isArray(res.groups)) {
+      this.user.roles = [
+        ...(this.user.roles || []).filter(r => r.level !== 0),
+        ...res.groups
+      ];
+    }
+
+    this._showToast(t('modals.edit_profile.groups_saved'), 'success');
+    this._renderUserProfileGroupsList();
+  });
+},
+
+_showGroupChannelInfo(info, persistent = false) {
+  const channels = JSON.parse(info.dataset.channels || '[]');
+  if (!channels.length) return;
+
+  // Remove any existing group-channel popup.
+  this._closeGroupChannelInfo();
+
+  const popup = document.createElement('div');
+  popup.className = `group-channel-info-popup${persistent ? ' persistent' : ''}`;
+
+  const channelMap = new Map(channels.map(ch => [ch.id, ch]));
+  const children = new Map();
+
+  // Only display subchannels when their parent is also granted
+  // by this group.
+  const visibleChannels = channels.filter(ch => {
+    if (!ch.parent_channel_id) return true;
+    return channelMap.has(ch.parent_channel_id);
+  });
+
+  // Build hierarchy from the channels we're actually displaying.
+  visibleChannels.forEach(ch => {
+    if (ch.parent_channel_id && channelMap.has(ch.parent_channel_id)) {
+      if (!children.has(ch.parent_channel_id)) {
+        children.set(ch.parent_channel_id, []);
+      }
+      children.get(ch.parent_channel_id).push(ch);
+    }
+  });
+
+  const visibleIds = new Set(visibleChannels.map(ch => ch.id));
+
+  const roots = visibleChannels.filter(ch =>
+    !ch.parent_channel_id ||
+    !visibleIds.has(ch.parent_channel_id)
+  );
+
+  const renderChannel = (ch, isChild = false) => {
+    const prefix = isChild ? '↳ ' : '# ';
+    const lock = ch.is_private ? ' 🔒' : '';
+
+    return `
+      <div class="group-channel-info-row${isChild ? ' sub' : ''}">
+        ${prefix}${this._escapeHtml(ch.name)}${lock}
+      </div>
+      ${(children.get(ch.id) || [])
+        .sort((a, b) =>
+          a.position - b.position ||
+          a.name.localeCompare(b.name)
+        )
+        .map(child => renderChannel(child, true))
+        .join('')}
+    `;
+  };
+
+  popup.innerHTML = `
+    <div class="group-channel-info-title">
+      <span>${this._escapeHtml(t('modals.edit_profile.group_channels_granted'))}</span>
+      ${persistent
+        ? `<button type="button" class="group-channel-info-close" title="Close">&times;</button>`
+        : ''}
+    </div>
+    <div class="group-channel-info-list">
+      ${roots
+        .sort((a, b) =>
+          a.position - b.position ||
+          a.name.localeCompare(b.name)
+        )
+        .map(ch => renderChannel(ch))
+        .join('')}
+    </div>
+  `;
+
+  document.body.appendChild(popup);
+
+  const rect = info.getBoundingClientRect();
+  const popupRect = popup.getBoundingClientRect();
+  const margin = 8;
+  const gap = 6;
+
+  let left = rect.left;
+  let top = rect.bottom + gap;
+
+  // Keep popup within the horizontal viewport.
+  if (left + popupRect.width > window.innerWidth - margin) {
+    left = window.innerWidth - popupRect.width - margin;
+  }
+  left = Math.max(margin, left);
+
+  // Prefer below; move above if necessary.
+  if (top + popupRect.height > window.innerHeight - margin) {
+    const aboveTop = rect.top - popupRect.height - gap;
+    top = (aboveTop >= margin) ? aboveTop : margin;
+  }
+
+  top = Math.max(margin, top);
+  const availableHeight = window.innerHeight - top - margin;
+  const channelList = popup.querySelector('.group-channel-info-list');
+  if (channelList) {
+    channelList.style.maxHeight =
+      `${Math.max(4 * 16, availableHeight - 55)}px`;
+  }
+
+  popup.style.left = `${left}px`;
+  popup.style.top = `${top}px`;
+
+  if (persistent) {
+    this._groupChannelInfoPopup = popup;
+
+    const closeBtn = popup.querySelector('.group-channel-info-close');
+    closeBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this._closeGroupChannelInfo();
+    });
+
+    this._groupChannelInfoOutsideHandler = (e) => {
+      if (!popup.contains(e.target) && e.target !== info) {
+        this._closeGroupChannelInfo();
+      }
+    };
+
+    setTimeout(() => {
+      document.addEventListener('click', this._groupChannelInfoOutsideHandler);
+    }, 0);
+  } else {
+    this._groupChannelInfoTooltip = popup;
+  }
+},
+
+_closeGroupChannelInfo() {
+  if (this._groupChannelInfoTooltip) {
+    this._groupChannelInfoTooltip.remove();
+    this._groupChannelInfoTooltip = null;
+  }
+
+  if (this._groupChannelInfoPopup) {
+    this._groupChannelInfoPopup.remove();
+    this._groupChannelInfoPopup = null;
+  }
+
+  if (this._groupChannelInfoOutsideHandler) {
+    document.removeEventListener('click', this._groupChannelInfoOutsideHandler);
+    this._groupChannelInfoOutsideHandler = null;
+  }
+},
+
 // ── Personas (#86, #5349) ──────────────────────────────
 
 // Persona prefix autocomplete: when the input STARTS with "::" we suggest
@@ -6396,7 +8325,7 @@ _showPersonaDropdown() {
   if (filtered.length === 0) {
     if (q.length === 0 && personas.length === 0) {
       // No personas yet — point the user at the profile UI
-      dropdown.innerHTML = `<div class="mention-item" data-persona-empty="1"><strong>No personas yet</strong> <span class="mention-item-handle">create one in Profile → Personas</span></div>`;
+      dropdown.innerHTML = `<div class="mention-item" data-persona-empty="1"><strong>${t('personas.dropdown_none')}</strong> <span class="mention-item-handle">${t('personas.dropdown_create')}</span></div>`;
       dropdown.style.display = 'block';
       dropdown.querySelectorAll('[data-persona-empty]').forEach(el => {
         el.addEventListener('click', () => {
@@ -6414,7 +8343,7 @@ _showPersonaDropdown() {
     const avatar = p.avatar
       ? `<img src="${esc(p.avatar)}" class="persona-dd-avatar" alt="">`
       : `<span class="persona-dd-avatar persona-dd-avatar-fallback">${esc((p.name || '?').charAt(0).toUpperCase())}</span>`;
-    return `<div class="mention-item${i === 0 ? ' active' : ''}" data-persona-name="${esc(p.name)}">${avatar}<strong>${esc(p.name)}</strong> <span class="mention-item-handle">::${esc(p.name)} message</span></div>`;
+    return `<div class="mention-item${i === 0 ? ' active' : ''}" data-persona-name="${esc(p.name)}">${avatar}<strong>${esc(p.name)}</strong> <span class="mention-item-handle">${t('personas.dropdown_preview', { name: esc(p.name) })}</span></div>`;
   }).join('');
   dropdown.style.display = 'block';
   dropdown.querySelectorAll('[data-persona-name]').forEach(item => {
@@ -6462,7 +8391,7 @@ async _loadPersonas() {
     const res = await fetch('/api/personas', {
       headers: { 'Authorization': `Bearer ${this.token}` }
     });
-    if (!res.ok) throw new Error('Failed to load personas');
+    if (!res.ok) throw new Error(t('personas.load_failed'));
     const data = await res.json();
     this._personas = data.personas || [];
     this._renderPersonasList();
@@ -6477,7 +8406,7 @@ _renderPersonasList() {
   const personas = this._personas || [];
   const esc = (s) => this._escapeHtml ? this._escapeHtml(s) : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   if (personas.length === 0) {
-    list.innerHTML = `<p class="muted-text" style="font-size:.78rem;margin:6px 0">No personas yet. Click "+ Add Persona" to create one.</p>`;
+    list.innerHTML = `<p class="muted-text" style="font-size:.78rem;margin:6px 0">${t('personas.none')}</p>`;
     return;
   }
   list.innerHTML = personas.map(p => `
@@ -6487,11 +8416,11 @@ _renderPersonasList() {
           : esc((p.name || '?').charAt(0).toUpperCase())}</div>
       <div class="persona-item-info">
         <div class="persona-item-name">${esc(p.name)}</div>
-        <div class="persona-item-trigger">${esc(p.name)}: your message</div>
+        <div class="persona-item-trigger">${t('personas.trigger_preview', { name: esc(p.name) })}</div>
       </div>
       <div class="persona-item-actions">
-        <button class="persona-edit-btn" data-id="${p.id}" title="Edit">✎</button>
-        <button class="persona-delete-btn" data-id="${p.id}" title="Delete">🗑</button>
+        <button class="persona-edit-btn" data-id="${p.id}" title="${t('msg_toolbar.edit')}">✎</button>
+        <button class="persona-delete-btn" data-id="${p.id}" title="${t('msg_toolbar.delete')}">🗑</button>
       </div>
     </div>
   `).join('');
@@ -6504,17 +8433,17 @@ _renderPersonasList() {
       const id = parseInt(btn.dataset.id);
       const persona = (this._personas || []).find(p => p.id === id);
       if (!persona) return;
-      if (!confirm(`Delete persona "${persona.name}"? Past messages stay attributed to it.`)) return;
+      if (!confirm(t('personas.delete_confirm', { name: persona.name }))) return;
       try {
         const res = await fetch(`/api/personas/${id}`, {
           method: 'DELETE',
           headers: { 'Authorization': `Bearer ${this.token}` }
         });
-        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Failed to delete');
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || t('personas.delete_failed'));
         this._personas = (this._personas || []).filter(p => p.id !== id);
         this._renderPersonasList();
       } catch (err) {
-        this._showToast?.(err.message || 'Delete failed', 'error');
+        this._showToast?.(err.message || t('personas.delete_failed'), 'error');
       }
     });
   });
@@ -6536,13 +8465,13 @@ _showPersonaEditor(id) {
       <div class="persona-item-avatar" id="persona-edit-avatar-preview">${existing && existing.avatar
           ? `<img src="${esc(existing.avatar)}" alt="">`
           : '?'}</div>
-      <input type="text" id="persona-edit-name" maxlength="32" placeholder="Persona name" value="${existing ? esc(existing.name) : ''}">
-      <button type="button" class="btn-sm" id="persona-edit-upload">Upload Avatar</button>
+      <input type="text" id="persona-edit-name" maxlength="32" placeholder="${t('personas.name_placeholder')}" value="${existing ? esc(existing.name) : ''}">
+      <button type="button" class="btn-sm" id="persona-edit-upload">${t('personas.upload_avatar')}</button>
       <input type="file" id="persona-edit-file" accept="image/jpeg,image/png,image/gif,image/webp" style="display:none">
     </div>
     <div class="persona-edit-controls" style="justify-content:flex-end">
-      <button type="button" class="btn-sm" id="persona-edit-cancel">Cancel</button>
-      <button type="button" class="btn-sm btn-accent" id="persona-edit-save">${existing ? 'Save' : 'Create'}</button>
+      <button type="button" class="btn-sm" id="persona-edit-cancel">${t('modals.common.cancel')}</button>
+      <button type="button" class="btn-sm btn-accent" id="persona-edit-save">${t(existing ? 'modals.common.save' : 'personas.create')}</button>
     </div>
   `;
   if (existing) {
@@ -6559,7 +8488,7 @@ _showPersonaEditor(id) {
     const file = e.target.files?.[0];
     if (!file) return;
     if (file.size > 2 * 1024 * 1024) {
-      this._showToast?.('Avatar must be under 2 MB', 'error');
+      this._showToast?.(t('personas.avatar_too_large'), 'error');
       return;
     }
     const fd = new FormData();
@@ -6571,12 +8500,12 @@ _showPersonaEditor(id) {
         body: fd,
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Upload failed');
+      if (!res.ok) throw new Error(data.error || t('toasts.upload_failed'));
       pendingAvatarUrl = data.url;
       const preview = editor.querySelector('#persona-edit-avatar-preview');
       preview.innerHTML = `<img src="${esc(data.url)}" alt="">`;
     } catch (err) {
-      this._showToast?.(err.message || 'Upload failed', 'error');
+      this._showToast?.(err.message || t('toasts.upload_failed'), 'error');
     }
   });
 
@@ -6585,7 +8514,7 @@ _showPersonaEditor(id) {
   editor.querySelector('#persona-edit-save').addEventListener('click', async () => {
     const name = editor.querySelector('#persona-edit-name').value.trim();
     if (!name) {
-      this._showToast?.('Name is required', 'error');
+      this._showToast?.(t('personas.name_required'), 'error');
       return;
     }
     try {
@@ -6597,7 +8526,7 @@ _showPersonaEditor(id) {
         body: JSON.stringify({ name, avatar: pendingAvatarUrl })
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Save failed');
+      if (!res.ok) throw new Error(data.error || t('personas.save_failed'));
       // Update local list
       if (existing) {
         const idx = this._personas.findIndex(p => p.id === existing.id);
@@ -6609,7 +8538,7 @@ _showPersonaEditor(id) {
       editor.remove();
       this._renderPersonasList();
     } catch (err) {
-      this._showToast?.(err.message || 'Save failed', 'error');
+      this._showToast?.(err.message || t('personas.save_failed'), 'error');
     }
   });
 },

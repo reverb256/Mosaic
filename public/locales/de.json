@@ -149,6 +149,7 @@
   },
   "toasts": {
     "roles_updated": "Deine Rollen wurden aktualisiert",
+    "role_server_no_response": "Keine Antwort vom Server. Er läuft möglicherweise mit einer älteren Haven-Version. Aktualisiere die Serverdateien, starte den Server vollständig neu und versuche es erneut.",
     "status_pending_reconnect": "Status wird nach Wiederverbindung aktualisiert",
     "channel_created": "Kanal „#{{name}}“ erstellt!\nCode: {{code}}",
     "channel_deleted": "Kanal wurde gelöscht",
@@ -369,6 +370,7 @@
     "rename_sub_channel": "Unterkanäle umbenennen",
     "set_channel_topic": "Kanalthema festlegen",
     "manage_sub_channels": "Unterkanäle verwalten",
+    "manage_channel_settings": "Kanaleinstellungen verwalten",
     "create_channel": "Kanäle erstellen",
     "upload_files": "Dateien hochladen",
     "use_voice": "Sprachchat nutzen",
@@ -378,6 +380,7 @@
     "mention_everyone": "@everyone erwähnen",
     "view_history": "Nachrichtenverlauf anzeigen",
     "view_all_members": "Alle Servermitglieder anzeigen",
+    "view_all_channels": "Alle Kanäle sehen (Auto-Beitritt)",
     "manage_emojis": "Benutzerdefinierte Emojis verwalten",
     "manage_soundboard": "Soundboard verwalten",
     "promote_user": "Nutzer befördern",
@@ -546,6 +549,7 @@
     "bio_placeholder": "Erzähl den Leuten von dir…",
     "gear_menu": {
       "assign_role": "Rolle zuweisen",
+      "role_management": "Rollenverwaltung",
       "kick": "Kicken",
       "mute": "Stummschalten",
       "ban": "Bannen",
@@ -608,6 +612,8 @@
     "resolution": "Auflösung",
     "resolution_source": "Quelle",
     "frame_rate": "Bildrate",
+    "native_screen_share": "Native GPU-Bildschirmfreigabe",
+    "native_screen_share_hint": "Verwendet die experimentelle native Medienpipeline der Desktop-App. Chromium bleibt Standard und Fallback.",
     "camera_fallback": "Kamera {{n}}"
   },
   "status_bar": {
@@ -638,6 +644,7 @@
       "desktop_app": "Desktop-App",
       "admin_group": "Admin",
       "branding": "Branding",
+      "tos": "Nutzungsbedingungen",
       "members": "Mitglieder",
       "whitelist": "Whitelist",
       "invite": "Einladungscode",
@@ -645,25 +652,39 @@
       "limits": "Limits",
       "admin_sounds": "Töne",
       "emojis": "Emojis",
+      "stickers": "Sticker",
       "roles": "Rollen",
       "tunnel": "Tunnel",
       "bots": "Bots",
       "import": "Importieren",
-      "mod_mode": "Mod-Modus"
+      "mod_mode": "Mod-Modus",
+      "automod": "Automod",
+      "guests": "Gastzugriff"
     },
     "language_section": {
       "title": "Sprache",
       "label": "Sprache",
+      "auto": "Automatisch",
       "hint": "Änderungen werden sofort übernommen"
     },
-    "layout_density": {
-      "title": "Layout-Dichte",
-      "compact": "Kompakt",
-      "compact_hint": "Kompakt — engere Abstände, kleinere Avatare",
-      "cozy": "Gemütlich",
-      "cozy_hint": "Gemütlich — Standard-Layout",
-      "spacious": "Geräumig",
-      "spacious_hint": "Geräumig — mehr Weißraum"
+    "layout": {
+      "title": "Layout",
+      "density": {
+        "title": "Layout-Dichte",
+        "compact": "Kompakt",
+        "compact_hint": "Kompakt — engere Abstände, kleinere Avatare",
+        "cozy": "Gemütlich",
+        "cozy_hint": "Gemütlich — Standard-Layout",
+        "spacious": "Geräumig",
+        "spacious_hint": "Geräumig — mehr Weißraum"
+      },
+      "channel_scrolling": {
+        "title": "Kanal-Scrolling",
+        "separate": "Getrennt",
+        "separate_hint": "Getrennt — separate Scrollleisten für Kanäle und DMs",
+        "combined": "Kombiniert",
+        "combined_hint": "Kombiniert — eine Scrollleiste für Kanäle und DMs"
+      }
     },
     "font_size": {
       "title": "Schriftgröße",
@@ -678,10 +699,13 @@
     },
     "image_display": {
       "title": "Bildanzeige",
-      "thumbnail": "Vorschaubild",
-      "thumbnail_hint": "Vorschaubild — kleines Vorschaubild, klicken zum Vergrößern",
-      "full": "Vollbild",
-      "full_hint": "Vollbild — große Inline-Bilder wie Discord"
+      "image_mode": {
+        "title": "Bildanzeigemodus",
+        "thumbnail": "Vorschaubild",
+        "thumbnail_hint": "Vorschaubild — kleines Vorschaubild, klicken zum Vergrößern",
+        "full": "Vollbild",
+        "full_hint": "Vollbild — große Inline-Bilder wie Discord"
+      }
     },
     "sounds_section": {
       "title": "Töne",
@@ -883,6 +907,8 @@
       "max_sound_hint": "Max. Soundboard-Upload-Größe (256–10240 KB, Standard 1024 / 1 MB)",
       "max_emoji_hint": "Max. benutzerdefinierte Emoji-Upload-Größe (64–1024 KB, Standard 256)",
       "max_poll_hint": "Maximale Antwortmöglichkeiten pro Umfrage (2–25, Standard 10)",
+      "max_invite_uses": "Maximale Anzahl der Einladungslink-Nutzungen",
+      "max_invite_uses_hint": "Die maximale Anzahl von Nutzungen, auf die ein Einladungslink festgelegt werden kann. Administratoren und Benutzer mit der Berechtigung zur Serververwaltung ignorieren dieses Limit. (0 = unbegrenzt)",
       "sounds_hint": "Audiodateien für benutzerdefinierte Benachrichtigungstöne hochladen",
       "emojis_hint": "Bilder für benutzerdefinierte Server-Emojis hochladen",
       "emojis_upload_hint": "Bilder für benutzerdefinierte Server-Emojis hochladen (max. 256 KB, png/gif/webp). Name muss kleingeschrieben sein, keine Leerzeichen.",
@@ -946,12 +972,22 @@
       "import_skipped": "{{count}} Duplikat(e) übersprungen.",
       "import_reused": "{{count}} vorhandener Kanal (Kanäle) aktualisiert.",
       "import_failed_alert": "Import fehlgeschlagen: {{error}}",
+      "invite_links": {
+        "copy_email_card": "Einladungskarte für E-Mail kopieren",
+        "email_card_copied": "Einladungskarte kopiert!",
+        "email_card_copy_failed": "Kopieren der Karte fehlgeschlagen!",
+        "card_invited": "Du bist eingeladen, {{server}} beizutreten!",
+        "card_register": "Klicke auf die Schaltfläche unten, um dich zu registrieren!",
+        "card_join": "{{server}} beitreten",
+        "card_copy_link": "Oder kopiere diesen Link:",
+        "card_expires": "Diese Einladung ist bis zum {{date}} gültig."
+      },
       "roles_no_custom": "Keine benutzerdefinierten Rollen",
-      "roles_level_invalid": "Ebene muss 1–99 sein",
+      "roles_level_invalid": "Ebene muss 0–99 sein",
       "roles_create_title": "Rolle erstellen",
       "roles_create_hint": "Rollennamen eingeben:",
       "roles_level_title": "Rollenebene",
-      "roles_level_hint": "Rollenebene (1–99, höher = mehr Autorität):\nServer-Mod Standard = 50, Kanal-Mod Standard = 25",
+      "roles_level_hint": "Rollenstufe (0–99, höher = mehr Befugnisse):\nServer-Mod standardmäßig = 50\nKanal-Mod standardmäßig = 25\nSelbstverwaltung (keine Berechtigungen) = 0",
       "roles_created": "Rolle erstellt",
       "roles_saved": "Rolle gespeichert",
       "roles_updated": "Rolle aktualisiert",
@@ -999,7 +1035,7 @@
       "roles_changes_saved_other": "{{count}} Rollenänderungen gespeichert",
       "role_form": {
         "name": "Name",
-        "level": "Ebene (1–99)",
+        "level": "Ebene (0–99)",
         "color": "Farbe",
         "auto_assign": "Neuen Mitgliedern automatisch zuweisen",
         "auto_assign_hint": "Neue Nutzer erhalten diese Rolle automatisch, wenn sie sich registrieren oder einem Kanal beitreten.",
@@ -1008,6 +1044,8 @@
         "link_channel_access_hint": "Wenn aktiviert, wird beim Zuweisen/Entziehen dieser Rolle automatisch die Kanalmitgliedschaft gewährt/entzogen.",
         "reapply_access": "Zugang auf alle Nutzer erneut anwenden",
         "permissions": "Berechtigungen",
+        "admin_only_note": "Hervorgehobene Berechtigungen sind nur für Administratoren verfügbar – nur der Serverbesitzer kann sie vergeben.",
+        "level_0_role_note": "Rollen der Stufe 0 werden als „Gruppen“ bezeichnet. Gruppen gewähren keine Berechtigungen. Benutzer können diesen Gruppen nach Belieben beitreten, ohne erhöhte Berechtigungen zu benötigen. Mögliche Verwendungszwecke sind: Kanalzuweisungen, Gruppierungen und Rollenspiele.",
         "delete": "Löschen"
       }
     }
@@ -1133,7 +1171,14 @@
       "display_name_placeholder": "Neuer Anzeigename...",
       "bio_label": "Bio",
       "bio_max": "(max. 190 Zeichen)",
-      "bio_placeholder": "Erzähl den Leuten von dir…"
+      "bio_placeholder": "Erzähl den Leuten von dir…",
+      "groups_title": "Gruppen",
+      "manage_groups_btn": "Gruppen verwalten",
+      "save_groups_btn": "Gruppen speichern",
+      "groups_hint": "Gruppen werden auf deiner Profilkarte als Rollen angezeigt. Sie gewähren keine Berechtigungen, können aber Zugriff auf Kanäle gewähren!",
+      "no_groups": "Du bist noch keiner Gruppe beigetreten. Klicke auf „Gruppen verwalten“, um einer Gruppe beizutreten.",
+      "groups_saved": "Gruppen gespeichert!",
+      "group_channels_granted": "Gewährte Kanalzugriffe"
     },
     "admin_action": {
       "title": "Nutzer moderieren",
@@ -1380,7 +1425,8 @@
     "role_management": {
       "title": "Rollenverwaltung",
       "new_role_btn": "+ Neue Rolle",
-      "select_to_edit": "Rolle zum Bearbeiten auswählen"
+      "select_to_edit": "Rolle zum Bearbeiten auswählen",
+      "groups_label": "Gruppen"
     },
     "assign_role": {
       "title": "Rolle zuweisen",
@@ -1525,6 +1571,8 @@
     "slow_mode": "Langsam-Modus",
     "slow_mode_hint": "Abkühlzeit zwischen Nachrichten verlangen (0 = aus)",
     "cleanup_guard": "Bereinigungsschutz",
+    "welcome": "Willkommensnachrichten",
+    "welcome_hint": "Hier eine gespeicherte Willkommensnachricht posten, wenn ein neues Mitglied dem Server beitritt",
     "cleanup_guard_hint": "Diesen Kanal vor automatischer Nachrichtenbereinigung schützen",
     "voice_limit": "Sprachchat-Limit",
     "voice_limit_hint": "Gleichzeitige Sprachchat-Nutzer begrenzen (klicken zum Festlegen; leer = unbegrenzt)",
@@ -1582,6 +1630,15 @@
     "all_emojis_title": "Alle Emojis",
     "customize_quick_title": "Schnellreaktionen anpassen",
     "customize_quick_hint": "Auf ein Feld klicken, dann ein Emoji auswählen, um es zu ersetzen.",
+    "skin_tone": "Hautton",
+    "skin_tones": {
+      "default": "Standard",
+      "light": "Hell",
+      "medium_light": "Mittelhell",
+      "medium": "Mittel",
+      "medium_dark": "Mitteldunkel",
+      "dark": "Dunkel"
+    },
     "categories": {
       "smileys": "Smileys",
       "faces": "Gesichter",
@@ -1597,6 +1654,13 @@
     }
   },
   "gifs": {
+    "tab_search": "Suche",
+    "tab_favorites": "★ Favoriten",
+    "search_favorites": "Favoriten durchsuchen…",
+    "no_favorites": "Noch keine GIF-Favoriten — tippe auf das ☆ eines GIFs, um es hier zu speichern",
+    "no_favorite_matches": "Keine Favoriten passen zu dieser Suche",
+    "favorite": "Zu Favoriten hinzufügen",
+    "unfavorite": "Aus Favoriten entfernen",
     "searching": "Suche läuft...",
     "no_results": "Keine GIFs gefunden",
     "search_failed": "Suche fehlgeschlagen",

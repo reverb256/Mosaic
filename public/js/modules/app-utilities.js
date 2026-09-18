@@ -1,3 +1,32 @@
+// GIF favorites live entirely client-side: starring a GIF just keeps its
+// GIPHY URLs in localStorage, so the Favorites tab keeps working even when
+// the server has no GIPHY key configured.
+const GIF_FAVORITES_KEY = 'haven_gif_favorites';
+const GIF_FAVORITES_MAX = 200;
+
+// Emoji skin tones. A tone is a Unicode Fitzpatrick modifier appended to a
+// "modifier base" emoji (hands, people, body parts); non-base emoji are left
+// untouched. EMOJI_MODIFIER_BASE is the authoritative set from the Unicode
+// emoji-data, so the transform stays correct as Haven's emoji lists grow.
+const SKIN_TONE_KEY = 'haven_emoji_skin_tone';
+const SKIN_TONE_MODIFIERS = {
+  light: '\u{1F3FB}', 'medium-light': '\u{1F3FC}', medium: '\u{1F3FD}',
+  'medium-dark': '\u{1F3FE}', dark: '\u{1F3FF}'
+};
+const EMOJI_MODIFIER_BASE = new Set(
+  ('261D 26F9 270A 270B 270C 270D 1F385 1F3C2 1F3C3 1F3C4 1F3C7 1F3CA 1F3CB 1F3CC ' +
+   '1F442 1F443 1F446 1F447 1F448 1F449 1F44A 1F44B 1F44C 1F44D 1F44E 1F44F 1F450 ' +
+   '1F466 1F467 1F468 1F469 1F46B 1F46C 1F46D 1F46E 1F470 1F471 1F472 1F473 1F474 ' +
+   '1F475 1F476 1F477 1F478 1F47C 1F481 1F482 1F483 1F485 1F486 1F487 1F48F 1F491 ' +
+   '1F4AA 1F574 1F575 1F57A 1F590 1F595 1F596 1F645 1F646 1F647 1F64B 1F64C 1F64D ' +
+   '1F64E 1F64F 1F6A3 1F6B4 1F6B5 1F6B6 1F6C0 1F6CC 1F90C 1F90F 1F918 1F919 1F91A ' +
+   '1F91B 1F91C 1F91D 1F91E 1F91F 1F926 1F930 1F931 1F932 1F933 1F934 1F935 1F936 ' +
+   '1F937 1F938 1F939 1F93D 1F93E 1F977 1F9B5 1F9B6 1F9B8 1F9B9 1F9BB 1F9CD 1F9CE ' +
+   '1F9CF 1F9D1 1F9D2 1F9D3 1F9D4 1F9D5 1F9D6 1F9D7 1F9D8 1F9D9 1F9DA 1F9DB 1F9DC ' +
+   '1F9DD 1FAC3 1FAC4 1FAC5 1FAF0 1FAF1 1FAF2 1FAF3 1FAF4 1FAF5 1FAF6 1FAF7 1FAF8')
+  .split(' ').map(h => String.fromCodePoint(parseInt(h, 16)))
+);
+
 export default {
 
 // ── Utilities ─────────────────────────────────────────
@@ -174,7 +203,7 @@ _wireBurnMessages(root) {
     if (!el.querySelector('.burn-pending-label')) {
       const label = document.createElement('span');
       label.className = 'burn-pending-label';
-      label.title = `Self-destructs ${burnSeconds}s after the recipient views it`;
+      label.title = t('messages.burn_pending_tooltip', { seconds: burnSeconds });
       label.textContent = '🔥';
       // Attach burn status to the message's own inline status slot so the
       // flame stays visually attached to that row instead of forming a
@@ -204,9 +233,8 @@ _wireBurnMessages(root) {
     if (!content) return;
     const real = content.innerHTML;
     el.dataset.burnRealContent = real;
-    const revealLabel = t('messages.burn_reveal');
-    const revealText = (revealLabel && revealLabel !== 'messages.burn_reveal') ? revealLabel : 'Tap to view';
-    content.innerHTML = `<button type="button" class="burn-reveal-btn">🔥 ${this._escapeHtml(revealText)} <span class="muted-text">(${burnSeconds}s after viewing)</span></button>`;
+    const revealText = t('messages.burn_reveal');
+    content.innerHTML = `<button type="button" class="burn-reveal-btn">🔥 ${this._escapeHtml(revealText)} <span class="muted-text">${t('messages.burn_reveal_hint', { seconds: burnSeconds })}</span></button>`;
     const btn = content.querySelector('.burn-reveal-btn');
     btn.addEventListener('click', () => {
       content.innerHTML = el.dataset.burnRealContent || '';
@@ -248,9 +276,8 @@ _replaceBurnedMessage(el) {
   if (el._burnTimer) { clearInterval(el._burnTimer); el._burnTimer = null; }
   const content = el.querySelector('.message-content');
   if (!content) return;
-  const doneLabel = t('messages.burn_done');
-  const doneText = (doneLabel && doneLabel !== 'messages.burn_done') ? doneLabel : 'Message burned';
-  content.innerHTML = `<span class="muted-text" style="font-style:italic">🔥 ${this._escapeHtml(doneText)}</span>`;
+  const doneText = t('messages.burn_done');
+  content.innerHTML = `<span class="muted-text burn-complete-label" style="font-style:italic">🔥 ${this._escapeHtml(doneText)}</span>`;
   el.classList.remove('message-burn-pending');
   el.classList.add('message-burned');
 },
@@ -262,11 +289,35 @@ _isImageUrl(str) {
   // the payload so the message still gets image layout treatment.
   if (trimmed.startsWith('spoiler-img:')) return this._isImageUrl(trimmed.slice(12));
   if (trimmed.startsWith('e2e-img:')) return true;
-  if (/^\/uploads\/(stickers\/)?[\w\-.]+\.(jpg|jpeg|png|gif|webp|svg)$/i.test(trimmed)) return true;
-  if (/^https?:\/\/.+\.(jpg|jpeg|png|gif|webp|svg)(\?[^"'<>]*)?$/i.test(trimmed)) return true;
-  // GIPHY GIF URLs (may not have file extensions)
+  // Optional extra path segment (stickers/, images/, …) and dots in the
+  // basename. Must stay in lockstep with the early-return regex in
+  // `_formatContent` or classified-as-image messages render as empty.
+  if (/^\/uploads\/(?:[\w\-]+\/)?[\w\-.]+\.(jpg|jpeg|png|gif|webp|svg)$/i.test(trimmed)) return true;
+  // The query part stops at whitespace: two Discord CDN links on separate
+  // lines used to match as one URL, which drew one broken image for the pair.
+  if (/^https?:\/\/.+\.(jpg|jpeg|png|gif|webp|svg)(\?[^"'<>\s]*)?$/i.test(trimmed)) return true;
+  // GIPHY / Tenor GIF URLs (may not have file extensions)
   if (/^https:\/\/media\d*\.giphy\.com\/.+/i.test(trimmed)) return true;
+  if (/^https:\/\/(media|c)\.tenor\.com\/.+/i.test(trimmed)) return true;
   return false;
+},
+
+// Auto-link and markdown image handlers run after `_escapeHtml`, so query
+// strings arrive as `?ex=…&amp;is=…`. Feed those straight to the media proxy
+// and Discord (Ferry attachments) 404s — the phone client never HTML-escapes
+// the URL, which is why the same photo shows on mobile and vanishes on desktop.
+_rawHttpUrl(escapedOrRaw) {
+  if (typeof escapedOrRaw !== 'string' || !escapedOrRaw) return null;
+  const decoded = this._decodeHtmlEntities(escapedOrRaw).replace(/['"<>]/g, '');
+  try { new URL(decoded); } catch { return null; }
+  return decoded;
+},
+
+_isRemoteImageUrl(url) {
+  if (typeof url !== 'string' || !url) return false;
+  return /\.(jpg|jpeg|png|gif|webp)(\?[^"'<>]*)?$/i.test(url) ||
+    /^https:\/\/media\d*\.giphy\.com\//i.test(url) ||
+    /^https:\/\/(media|c)\.tenor\.com\//i.test(url);
 },
 
 // Extract /uploads/<file> attachment paths from a (decrypted) message's
@@ -274,24 +325,48 @@ _isImageUrl(str) {
 // E2E DM attachments whose URL is hidden inside the ciphertext.
 _getMessageAttachments(messageId) {
   if (!messageId) return [];
+  // Messages that arrived live are appended straight to the DOM and never
+  // land in _lastRenderedMessages, which only holds the last full render.
+  // So an image you just posted in a DM had no URLs to hand the server, and
+  // deleting it left the file on disk forever. The hint map below is filled
+  // at decrypt time and covers exactly that gap. (#5487)
+  const hinted = this._dmAttachmentHints && this._dmAttachmentHints.get(messageId);
+  if (hinted && hinted.length) return hinted.slice();
   const msgs = this._lastRenderedMessages || [];
   const msg = msgs.find(m => m && m.id === messageId);
   if (!msg || typeof msg.content !== 'string') return [];
+  return this._extractUploadUrls(msg.content);
+},
+
+_extractUploadUrls(content) {
+  if (typeof content !== 'string' || !content) return [];
   const out = [];
   const re = /\/uploads\/((?!deleted-attachments)[\w\-.]+)/g;
   let m;
-  while ((m = re.exec(msg.content)) !== null) out.push('/uploads/' + m[1]);
+  while ((m = re.exec(content)) !== null) out.push('/uploads/' + m[1]);
   return out;
 },
 
-// Client-side DM message search — walks _lastRenderedMessages (already decrypted)
-// and renders results into the shared search-results-panel. (#5248)
-_searchDmCacheLocally(query) {
-  const panel = document.getElementById('search-results-panel');
-  const list  = document.getElementById('search-results-list');
-  const count = document.getElementById('search-results-count');
-  if (!panel || !list || !count) return;
+// Remember which uploads a decrypted DM message points at, so a later delete
+// can tell the server which files to clean up. Only DM messages need this —
+// everywhere else the server reads the URLs straight out of the stored
+// content. Capped so a long session can't grow it without bound. (#5487)
+_rememberDmAttachments(message) {
+  if (!message || !message.id || typeof message.content !== 'string') return;
+  const urls = this._extractUploadUrls(message.content);
+  if (!urls.length) return;
+  if (!(this._dmAttachmentHints instanceof Map)) this._dmAttachmentHints = new Map();
+  this._dmAttachmentHints.set(message.id, urls);
+  const MAX_HINTS = 500;
+  while (this._dmAttachmentHints.size > MAX_HINTS) {
+    this._dmAttachmentHints.delete(this._dmAttachmentHints.keys().next().value);
+  }
+},
 
+// Client-side DM message search — walks _lastRenderedMessages (already
+// decrypted) and hands matches to the search panel. DMs are E2E-encrypted so
+// the server never sees plaintext; each DM keeps its own panel context. (#5248)
+_searchDmCacheLocally(query) {
   const q = query.toLowerCase();
   // Newest-first so the most recent matches appear at the top
   const msgs = (this._lastRenderedMessages || []).slice().reverse();
@@ -299,30 +374,7 @@ _searchDmCacheLocally(query) {
     .filter(m => m && typeof m.content === 'string' && m.content.toLowerCase().includes(q))
     .slice(0, 50);
 
-  count.innerHTML = `${matches.length} result${matches.length === 1 ? '' : 's'} for "${this._escapeHtml(query)}" <span class="search-filter-tag">DM (local)</span>`;
-
-  if (matches.length === 0) {
-    list.innerHTML = `<p class="muted-text" style="padding:12px">${t('header.search_no_results')}</p>`;
-  } else {
-    list.innerHTML = matches.map(r => `
-      <div class="search-result-item" data-msg-id="${r.id}">
-        <span class="search-result-author" style="color:${this._getUserColor(r.username)}">${this._escapeHtml(this._getNickname(r.user_id, r.username))}</span>
-        <span class="search-result-time">${this._formatTime(r.created_at)}</span>
-        <div class="search-result-content">${this._highlightSearch(this._escapeHtml(r.content), query)}</div>
-      </div>
-    `).join('');
-  }
-  panel.style.display = 'block';
-
-  list.querySelectorAll('.search-result-item').forEach(item => {
-    item.addEventListener('click', () => {
-      const msgId = parseInt(item.dataset.msgId, 10);
-      panel.style.display = 'none';
-      document.getElementById('search-container').style.display = 'none';
-      document.getElementById('search-input').value = '';
-      this._jumpToMessage(msgId);
-    });
-  });
+  this._searchReceiveResults(`dm:${this.currentChannel}`, { results: matches, query, isDM: true });
 },
 
 _highlightSearch(escapedHtml, query) {
@@ -336,24 +388,379 @@ _highlightSearch(escapedHtml, query) {
 // Capped at 27 to avoid jumbo-sizing a wall of emoji.
 _isEmojiOnly(str) {
   if (!str || !str.trim()) return false;
+  // A Discord emote token counts as one emoji, like a resolved :name: does.
+  const discordEmotes = (str.match(/<a?:[A-Za-z0-9_]{2,32}:\d{15,25}>/g) || []).length;
+  str = str.replace(/<a?:[A-Za-z0-9_]{2,32}:\d{15,25}>/g, ' ');
   const customMatches = str.match(/:([a-zA-Z0-9_-]+):/g) || [];
   // Only expand custom tokens that actually exist as loaded emojis
   const resolvedCustom = customMatches.filter(m => {
     const name = m.slice(1, -1).toLowerCase();
-    return this.customEmojis && this.customEmojis.some(e => e.name === name);
+    return !!this._findNamedEmoji(name);
   });
   let s = str.replace(/:([a-zA-Z0-9_-]+):/g, ' ');
   try {
-    // Strip unicode emoji, modifiers, ZWJ, variation selectors, flags
-    s = s.replace(/[\p{Extended_Pictographic}\u{FE00}-\u{FEFF}\u{200D}\u{20E3}\u{1F1E0}-\u{1F1FF}]/gu, '');
+    // Strip unicode emoji, skin-tone modifiers, ZWJ, variation selectors, flags.
+    // Skin tones (1F3FB–1F3FF) are Emoji_Modifier, not Extended_Pictographic, so
+    // they need their own range or a toned emoji leaves a leftover and misses jumbo.
+    s = s.replace(/[\p{Extended_Pictographic}\u{1F3FB}-\u{1F3FF}\u{FE00}-\u{FEFF}\u{200D}\u{20E3}\u{1F1E0}-\u{1F1FF}]/gu, '');
   } catch {
     s = s.replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}\u{FE00}-\u{FEFF}\u{200D}\u{20E3}]/gu, '');
   }
   if (s.trim().length > 0) return false;
   let unicodeCount = 0;
   try { unicodeCount = (str.match(/[\p{Extended_Pictographic}]/gu) || []).length; } catch {}
-  const total = resolvedCustom.length + unicodeCount;
+  const total = resolvedCustom.length + unicodeCount + discordEmotes;
   return total >= 1 && total <= 27;
+},
+
+// Markup for one Discord emote token. Haven's own emoji of that name is
+// preferred so a server carrying the same set shows its copy; the fallback is
+// the server-side emote cache, and a failed load turns back into the :name:
+// text (the capture-phase error listener in app-ui.js does that).
+_discordEmoteHtml(name, id, animated) {
+  const label = this._escapeHtml(`:${name}:`);
+  const own = this._findNamedEmoji(name);
+  if (own) return `<img src="${this._escapeHtml(own.url)}" alt="${label}" title="${label}" class="custom-emoji">`;
+  return `<img src="/api/ferry/emote/${id}.${animated ? 'gif' : 'png'}" alt="${label}" title="${label}" class="custom-emoji discord-emote">`;
+},
+
+// Resolve a `:name:` shortcode to an image emoji — checks the bundled
+// built-in image emoji (US flags, etc.) first, then server custom emoji.
+// Returns { name, url } or null.
+_findNamedEmoji(name) {
+  if (!name) return null;
+  const lower = String(name).toLowerCase();
+  return (this.builtinEmojis && this.builtinEmojis.find(e => e.name === lower))
+      || (this.customEmojis && this.customEmojis.find(e => e.name === lower))
+      || null;
+},
+
+// Punctuation search aliases: typing an actual punctuation mark (e.g. "?"
+// or "!") should surface the matching punctuation emojis, whose keywords
+// are stored as words ("question", "exclamation"). Cached after first use.
+_getEmojiPunctAliases() {
+  if (this._emojiPunctAliases) return this._emojiPunctAliases;
+  this._emojiPunctAliases = {
+    '?': 'question', '!': 'exclamation bang', ',': 'comma', '.': 'period dot',
+    ';': 'semicolon', ':': 'colon', '#': 'hash number pound', '*': 'asterisk star',
+    '+': 'plus add', '-': 'minus dash subtract', '=': 'equal', '/': 'slash divide',
+    '%': 'percent', '$': 'dollar money', '&': 'ampersand and', '@': 'at mention',
+    '^': 'caret up', '~': 'tilde', '<': 'less than left', '>': 'greater than right',
+    '(': 'parenthesis bracket', ')': 'parenthesis bracket',
+    '"': 'quote quotation', "'": 'apostrophe quote',
+    '©': 'copyright', '®': 'registered', '™': 'trademark', '∞': 'infinity',
+  };
+  return this._emojiPunctAliases;
+},
+
+// Shared emoji search matcher used by the emoji picker and reaction picker.
+// Matches on keyword substrings, the literal emoji character (so typing an
+// actual "?", "#", or a digit surfaces the matching emoji), and punctuation
+// aliases (typing "?" surfaces ❓ ⁉️ etc.).
+_emojiSearchMatch(emoji, keywords, rawQuery) {
+  const raw = (rawQuery || '').trim();
+  const q = raw.toLowerCase();
+  if (!q) return true;
+  const kw = (keywords || '').toLowerCase();
+  if (kw.includes(q)) return true;
+  if (typeof emoji === 'string' && raw && emoji.includes(raw)) return true;
+  const alias = this._getEmojiPunctAliases()[q];
+  if (alias && alias.split(/\s+/).some(w => kw.includes(w))) return true;
+  return false;
+},
+
+// ── Role mentions (#5579) ──
+// "@Moderators" lights up for everyone holding the role and pings them,
+// unless they have turned role pings off. Sending one needs the same
+// permission as @everyone, which the server enforces.
+
+/** Fetch the server's roles for rendering and the @ picker. Re-run whenever
+ *  the server says its roles changed. */
+_refreshMentionableRoles() {
+  if (!this.socket) return;
+  try {
+    this.socket.emit('get-roles', null, (res) => {
+      const roles = res && Array.isArray(res.roles) ? res.roles : [];
+      this._mentionableRoles = roles
+        .filter(r => r && r.name)
+        .map(r => ({ id: r.id, name: String(r.name), color: r.color || null, level: r.level }));
+    });
+  } catch { /* offline: keep whatever we had */ }
+},
+
+/** True when `content` pings a role the viewer holds and role pings are on. */
+_mentionsMyRole(content) {
+  if (!content || (this.notifications && this.notifications.roleMentionsEnabled === false)) return false;
+  const mine = (this.user && Array.isArray(this.user.roles)) ? this.user.roles : [];
+  if (!mine.length) return false;
+  const esc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return mine.some(r => r && r.name && new RegExp(`(?<![\\w@])@${esc(r.name)}(?!\\w)`, 'i').test(content));
+},
+
+// ── Timestamps that follow the reader (<t:1780853820:R>) ──
+// One instant in the message, rendered in whatever timezone and locale the
+// person reading it is in, which is the whole point for scheduling across a
+// group. The syntax is deliberately Discord's: tokens survive a round trip
+// through Ferry in both directions, and the generators people already use
+// keep working.
+
+/** Locale for date formatting: the reader's own regional locale when it speaks
+ *  the language Haven is set to (so en-GB keeps day/month order), else the
+ *  Haven language, else whatever the browser prefers. */
+_timeLocale() {
+  const ui = String((typeof document !== 'undefined' && document.documentElement && document.documentElement.lang) || '').toLowerCase();
+  const browser = (typeof navigator !== 'undefined' && Array.isArray(navigator.languages)) ? navigator.languages : [];
+  if (!ui) return browser[0] || undefined;
+  const base = ui.split('-')[0];
+  return browser.find(l => String(l).toLowerCase().split('-')[0] === base) || ui;
+},
+
+/** The reader's confirmed IANA timezone, or undefined to let the browser use
+ *  the device zone. Only a value the user actively confirmed counts; Skip and
+ *  "Remind later" leave this unset so nothing changes from Haven's old
+ *  browser-default behaviour. Passing an IANA id to Intl means DST and any
+ *  historical offset change are resolved per-instant — never a frozen offset. */
+_userTimeZone() {
+  const tz = this._userPrefs && this._userPrefs.timezone;
+  if (typeof tz !== 'string' || !tz) return undefined;
+  // A zone this browser does not know (a newer zone name on an older engine,
+  // or a stray value) would make every Intl call throw and take the message
+  // list with it. Check it once per value and fall back to the browser's own
+  // zone when it is unknown.
+  if (this._tzCheckedValue !== tz) {
+    this._tzCheckedValue = tz;
+    try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); this._tzCheckedOk = true; }
+    catch { this._tzCheckedOk = false; }
+  }
+  return this._tzCheckedOk ? tz : undefined;
+},
+
+/** The reader's confirmed hour cycle as an Intl `hour12` value: true for 12h,
+ *  false for 24h, undefined to keep the locale's own default. */
+_userHour12() {
+  const f = this._userPrefs && this._userPrefs.time_format;
+  if (f === '12') return true;
+  if (f === '24') return false;
+  return undefined;
+},
+
+/** Merge the reader's persisted timezone + hour cycle into a set of
+ *  Intl.DateTimeFormat options. Both `timeZone` and `hour12` are legal
+ *  alongside dateStyle/timeStyle as well as explicit component options, so
+ *  every existing call site can route through here unchanged. */
+_dtOpts(opts) {
+  const out = Object.assign({}, opts);
+  const tz = this._userTimeZone();
+  if (tz && out.timeZone === undefined) out.timeZone = tz;
+  const h12 = this._userHour12();
+  if (h12 !== undefined && out.hour12 === undefined && out.hourCycle === undefined) out.hour12 = h12;
+  return out;
+},
+
+/** Central time/date formatters. All timestamp rendering across the app goes
+ *  through these so a confirmed timezone/format applies everywhere at once and
+ *  an unset preference falls back to exactly what the browser did before.
+ *  `locale` defaults to the browser default (what every call site used before);
+ *  the <t:> token formatter passes _timeLocale() to keep its own behaviour. */
+_fmtTime(value, opts = { hour: '2-digit', minute: '2-digit' }, locale) {
+  const d = (value instanceof Date) ? value : new Date(value);
+  return d.toLocaleTimeString(locale, this._dtOpts(opts));
+},
+_fmtDate(value, opts = {}, locale) {
+  const d = (value instanceof Date) ? value : new Date(value);
+  return d.toLocaleDateString(locale, this._dtOpts(opts));
+},
+_fmtDateTime(value, opts = {}, locale) {
+  const d = (value instanceof Date) ? value : new Date(value);
+  return d.toLocaleString(locale, this._dtOpts(opts));
+},
+
+// ── Wall-clock <-> instant in the reader's confirmed zone ───────────────
+// The formatters above render an instant; these go the other way, for the
+// features that let someone type a wall-clock time (the /time command and its
+// modal). With no timezone confirmed they fall back to the device zone, so the
+// behaviour is unchanged; with one set the entered time is anchored to that
+// zone instead of whatever the browser reports, which is the whole point on a
+// privacy browser that lies about the system clock.
+
+/** The wall-clock parts of an instant in the confirmed zone (or the device
+ *  zone when none is set). monthIndex is 0-based to match the Date API. */
+_zonedParts(date, tz = this._userTimeZone()) {
+  const d = (date instanceof Date) ? date : new Date(date);
+  if (!tz) {
+    return { year: d.getFullYear(), monthIndex: d.getMonth(), day: d.getDate(),
+             hour: d.getHours(), minute: d.getMinutes(), second: d.getSeconds() };
+  }
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).formatToParts(d);
+  const m = {};
+  for (const p of parts) if (p.type !== 'literal') m[p.type] = p.value;
+  let hour = Number(m.hour);
+  if (hour === 24) hour = 0; // some engines report midnight as 24
+  return { year: Number(m.year), monthIndex: Number(m.month) - 1, day: Number(m.day),
+           hour, minute: Number(m.minute), second: Number(m.second) };
+},
+
+/** Milliseconds that `tz` is ahead of UTC at instant `ts` (negative if behind). */
+_zoneOffsetMs(tz, ts) {
+  const p = this._zonedParts(new Date(ts), tz);
+  const asUTC = Date.UTC(p.year, p.monthIndex, p.day, p.hour, p.minute, p.second);
+  return asUTC - ts;
+},
+
+/** Turn a wall-clock (year, 0-based month, day, hour, minute, second) read in
+ *  the confirmed zone into the matching instant. With no zone set this is
+ *  exactly new Date(y, mo, d, ...) in the device zone, so the fallback path is
+ *  byte-for-byte the old behaviour. */
+_wallToInstant(y, moIndex, d, h, mi, s, tz = this._userTimeZone()) {
+  if (!tz) return new Date(y, moIndex, d, h, mi, s, 0);
+  const naive = Date.UTC(y, moIndex, d, h, mi, s);
+  // One correction, then a second pass so a DST boundary resolves correctly.
+  let inst = naive - this._zoneOffsetMs(tz, naive);
+  inst = naive - this._zoneOffsetMs(tz, inst);
+  return new Date(inst);
+},
+
+/** "Now" decomposed into the confirmed zone's wall-clock, for seeding pickers. */
+_nowZonedParts() {
+  return this._zonedParts(new Date());
+},
+
+/** "in 5 minutes" / "3 hours ago", in the largest unit that still reads well. */
+_relativeTimestamp(ms, locale) {
+  const diff = ms - Date.now();
+  const abs = Math.abs(diff);
+  const MIN = 60000, HOUR = 3600000, DAY = 86400000;
+  const rtf = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' });
+  if (abs < MIN)       return rtf.format(Math.round(diff / 1000), 'second');
+  if (abs < HOUR)      return rtf.format(Math.round(diff / MIN), 'minute');
+  if (abs < DAY)       return rtf.format(Math.round(diff / HOUR), 'hour');
+  if (abs < 30 * DAY)  return rtf.format(Math.round(diff / DAY), 'day');
+  if (abs < 365 * DAY) return rtf.format(Math.round(diff / (30 * DAY)), 'month');
+  return rtf.format(Math.round(diff / (365 * DAY)), 'year');
+},
+
+/** Render one <t:...> token to HTML, or null when it is not a usable instant
+ *  (in which case the caller leaves the raw text alone). */
+_formatTimestampToken(seconds, style = 'f') {
+  if (!Number.isFinite(seconds)) return null;
+  const date = new Date(seconds * 1000);
+  if (Number.isNaN(date.getTime())) return null;
+  const locale = this._timeLocale();
+  let text;
+  try {
+    switch (style) {
+      case 't': text = this._fmtTime(date, { timeStyle: 'short' }, locale); break;
+      case 'T': text = this._fmtTime(date, { timeStyle: 'medium' }, locale); break;
+      case 'd': text = this._fmtDate(date, { dateStyle: 'short' }, locale); break;
+      case 'D': text = this._fmtDate(date, { dateStyle: 'long' }, locale); break;
+      case 'F': text = this._fmtDateTime(date, { dateStyle: 'full', timeStyle: 'short' }, locale); break;
+      case 'R': text = this._relativeTimestamp(date.getTime(), locale); break;
+      default:  text = this._fmtDateTime(date, { dateStyle: 'long', timeStyle: 'short' }, locale); break;
+    }
+  } catch { return null; }
+  // The hover title always spells the instant out in full, so a relative or
+  // time-only token can still be pinned down without asking the sender.
+  let title = text;
+  try { title = this._fmtDateTime(date, { dateStyle: 'full', timeStyle: 'long' }, locale); } catch { /* keep the visible text */ }
+  if (style === 'R') this._startTimestampTicker();
+  return `<time class="chat-timestamp" datetime="${this._escapeHtml(date.toISOString())}" data-ts="${Math.trunc(seconds)}" data-tstyle="${this._escapeHtml(style)}" title="${this._escapeHtml(title)}">${this._escapeHtml(text)}</time>`;
+},
+
+/** Keep rendered relative timestamps honest without re-rendering messages.
+ *  Started on first use, so a server whose chat has none never runs a timer. */
+_startTimestampTicker() {
+  if (this._timestampTicker || typeof document === 'undefined') return;
+  this._timestampTicker = setInterval(() => {
+    const nodes = document.querySelectorAll('time.chat-timestamp[data-tstyle="R"]');
+    if (!nodes.length) return;
+    const locale = this._timeLocale();
+    nodes.forEach(el => {
+      const secs = Number(el.dataset.ts);
+      if (!Number.isFinite(secs)) return;
+      const next = this._relativeTimestamp(secs * 1000, locale);
+      if (next && el.textContent !== next) el.textContent = next;
+    });
+  }, 30000);
+},
+
+/** Turn what someone typed after /time into a token, or null if it makes no
+ *  sense. Everything is read in the sender's own timezone, which is the
+ *  natural thing: you type your time, everyone else sees theirs. */
+_parseTimeExpression(input, now = new Date()) {
+  let text = String(input == null ? '' : input).trim();
+  if (!text) return null;
+
+  // Optional trailing style letter: "8pm R".
+  let style = null;
+  const styled = text.match(/\s+([tTdDfFR])$/);
+  if (styled) { style = styled[1]; text = text.slice(0, styled.index).trim(); }
+  if (!text) return null;
+
+  // Raw unix seconds pass straight through.
+  if (/^\d{9,12}$/.test(text)) return { seconds: Number(text), style: style || 'f' };
+
+  // An offset from now: +90m, 2h, +3d, 1w.
+  const offset = text.match(/^\+?(\d{1,5})\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks)$/i);
+  if (offset) {
+    const unit = offset[2].toLowerCase();
+    const ms = unit.startsWith('w') ? 604800000 : unit.startsWith('d') ? 86400000 : unit.startsWith('h') ? 3600000 : 60000;
+    return { seconds: Math.round((now.getTime() + Number(offset[1]) * ms) / 1000), style: style || 'f' };
+  }
+
+  // Optional leading day word, then an optional explicit date.
+  let dayShift = null;
+  const dayWord = text.match(/^(today|tomorrow)\b\s*/i);
+  if (dayWord) { dayShift = dayWord[1].toLowerCase() === 'tomorrow' ? 1 : 0; text = text.slice(dayWord[0].length).trim(); }
+  let ymd = null;
+  const dateMatch = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})\b\s*/);
+  if (dateMatch) { ymd = dateMatch; text = text.slice(dateMatch[0].length).trim(); }
+
+  // The remainder, if any, is a clock time: 8, 8:30, 8pm, 8:30 pm, 20:30.
+  let hh = null, mi = 0;
+  if (text) {
+    const tm = text.match(/^(\d{1,2})(?::([0-5]\d))?\s*(?:([ap])\.?m\.?)?$/i);
+    if (!tm) return null;
+    hh = Number(tm[1]);
+    mi = tm[2] ? Number(tm[2]) : 0;
+    const meridiem = tm[3] ? tm[3].toLowerCase() : null;
+    if (meridiem) {
+      if (hh < 1 || hh > 12) return null;
+      hh = (hh % 12) + (meridiem === 'p' ? 12 : 0);
+    } else if (hh > 23) return null;
+  } else if (ymd === null && dayShift === null) {
+    return null;
+  }
+
+  // A date with no clock time is a date, so show it as one unless told otherwise.
+  const resolved = style || (hh === null ? 'D' : 'f');
+  const hour = hh === null ? 0 : hh;
+
+  let when;
+  if (ymd) {
+    const y = Number(ymd[1]), mo = Number(ymd[2]) - 1, d = Number(ymd[3]);
+    when = this._wallToInstant(y, mo, d, hour, mi, 0);
+    // Reject dates that do not exist (JS rolls 2026-02-31 into March), checked
+    // in the same zone the wall-clock was read in.
+    const back = this._zonedParts(when);
+    if (back.year !== y || back.monthIndex !== mo || back.day !== d) return null;
+  } else {
+    const nowP = this._zonedParts(now);
+    when = this._wallToInstant(nowP.year, nowP.monthIndex, nowP.day + (dayShift || 0), hour, mi, 0);
+    // A bare time that already went by today means the next one. Someone
+    // saying "8pm" at nine in the evening is scheduling, not reminiscing.
+    if (dayShift === null && when.getTime() <= now.getTime()) when = new Date(when.getTime() + 86400000);
+  }
+  if (Number.isNaN(when.getTime())) return null;
+  return { seconds: Math.round(when.getTime() / 1000), style: resolved };
+},
+
+/** `/time 8pm` → `<t:1780853820:f>` */
+_buildTimeToken(arg, now = new Date()) {
+  const parsed = this._parseTimeExpression(arg, now);
+  return parsed ? `<t:${parsed.seconds}:${parsed.style}>` : null;
 },
 
 _formatContent(str) {
@@ -367,7 +774,7 @@ _formatContent(str) {
     const rest = str.slice('spoiler-img:'.length);
     if (this._isImageUrl(rest) || /^\/uploads\//i.test(rest) || rest.startsWith('e2e-img:')) {
       const inner = this._formatContent(rest);
-      const label = this._escapeHtml((typeof t === 'function' && t('app.messages.spoiler')) || 'Spoiler');
+      const label = this._escapeHtml(t('app.messages.spoiler'));
       return `<div class="spoiler-media" role="button" tabindex="0" title="${label}"><span class="spoiler-media-tag">\u{1F441}️ ${label}</span>${inner}</div>`;
     }
   }
@@ -377,7 +784,7 @@ _formatContent(str) {
   if (e2eImgMatch) {
     const mime = this._escapeHtml(e2eImgMatch[1]);
     const url = this._escapeHtml(e2eImgMatch[2]);
-    return `<img data-e2e-src="${url}" data-e2e-mime="${mime}" class="chat-image e2e-img-pending" alt="Encrypted image" title="🔒 End-to-end encrypted image">`;
+    return `<img data-e2e-src="${url}" data-e2e-mime="${mime}" class="chat-image e2e-img-pending" alt="${t('app.messages.e2e_image_alt')}" title="${t('app.messages.e2e_image_title')}">`;
   }
 
   // E2E encrypted file: e2e-file:{"mime":...,"size":N,"url":"/uploads/...","name":"..."}
@@ -387,22 +794,26 @@ _formatContent(str) {
     try {
       const meta = JSON.parse(str.slice(9));
       if (meta && typeof meta.url === 'string' && meta.url.startsWith('/uploads/')) {
-        const name = this._escapeHtml(typeof meta.name === 'string' ? meta.name : 'file');
+        const name = this._escapeHtml(typeof meta.name === 'string' ? meta.name : t('app.messages.file'));
         const url = this._escapeHtml(meta.url);
         const mime = this._escapeHtml(typeof meta.mime === 'string' ? meta.mime : 'application/octet-stream');
         const size = Number(meta.size) || 0;
         const sizeStr = this._escapeHtml(this._formatFileSize ? this._formatFileSize(size) : (size + ' B'));
-        return `<div class="file-attachment e2e-file-pending" data-e2e-url="${url}" data-e2e-mime="${mime}" data-e2e-name="${name}" title="🔒 End-to-end encrypted file — click to download">
+        // A voice message in a DM shows as one, with its length, and a click
+        // decrypts it into a player (#5665).
+        const voiceDur = this._voiceMessageLength(name);
+        const label = voiceDur !== null ? t('app.messages.voice_message') : name;
+        return `<div class="file-attachment e2e-file-pending${voiceDur !== null ? ' voice-message' : ''}" data-e2e-url="${url}" data-e2e-mime="${mime}" data-e2e-name="${name}" title="${t('app.messages.e2e_file_title')}">
           <button type="button" class="file-download-link e2e-file-download">
-            <span class="file-icon">🔒</span>
-            <span class="file-name">${name}</span>
-            <span class="file-size">(${sizeStr})</span>
+            <span class="file-icon">${voiceDur !== null ? '🎤' : '🔒'}</span>
+            <span class="file-name">${label}</span>
+            <span class="file-size">(${voiceDur !== null ? voiceDur : sizeStr})</span>
             <span class="file-download-arrow">⬇</span>
           </button>
         </div>`;
       }
     } catch {}
-    return `<span class="muted-text">[Encrypted file — unable to parse]</span>`;
+    return `<span class="muted-text">${t('app.messages.e2e_file_parse_error')}</span>`;
   }
 
   // Decode legacy HTML entities from old server-side sanitization.
@@ -419,8 +830,10 @@ _formatContent(str) {
     const fileSize = this._escapeHtml(fileMatch[3]);
     const ext = fileName.split('.').pop().toLowerCase();
     const icon = { pdf: '📄', zip: '📦', '7z': '📦', rar: '📦', tar: '📦', gz: '📦',
-      mp3: '🎵', ogg: '🎵', wav: '🎵', flac: '🎵', aac: '🎵', wma: '🎵',
+      mp3: '🎵', ogg: '🎵', oga: '🎵', wav: '🎵', flac: '🎵', aac: '🎵', wma: '🎵',
+      m4a: '🎵', opus: '🎵', weba: '🎵',
       mp4: '🎬', webm: '🎬', mkv: '🎬', avi: '🎬', mov: '🎬', flv: '🎬',
+      m4v: '🎬', ogv: '🎬',
       doc: '📝', docx: '📝', xls: '📊', xlsx: '📊', ppt: '📊', pptx: '📊',
       txt: '📄', csv: '📄', json: '📄', md: '📄', log: '📄',
       exe: '⚙️', msi: '⚙️', bat: '⚙️', cmd: '⚙️', ps1: '⚙️', sh: '⚙️',
@@ -433,16 +846,29 @@ _formatContent(str) {
       'cpl','inf','reg','dll','ocx','sys','drv',
       'sh','app','dmg','pkg','deb','rpm','appimage',
     ]);
-    // Audio/video get inline players
-    if (['mp3', 'ogg', 'wav'].includes(ext)) {
-      return `<div class="file-attachment">
-        <div class="file-info">${icon} <span class="file-name">${fileName}</span> <span class="file-size">(${fileSize})</span></div>
-        <audio controls preload="none" src="${fileUrl}"></audio>
+    // A voice message from the mic button: a small player with its length
+    // rather than a file name and size (#5665).
+    const voiceDur = this._voiceMessageLength(fileName);
+    if (voiceDur !== null) {
+      return `<div class="file-attachment voice-message">
+        <div class="file-info"><span class="file-type-icon" aria-hidden="true">🎤</span> <span class="file-name">${t('app.messages.voice_message')}</span> <span class="file-size">(${voiceDur})</span></div>
+        <audio controls preload="metadata" src="${fileUrl}" class="file-audio"></audio>
       </div>`;
     }
-    if (['mp4', 'webm'].includes(ext)) {
+    // Audio/video get inline players. The extension lists are optimistic —
+    // a container being playable depends on the codecs inside it, not just the
+    // extension (a .mov holding ProRes or HEVC won't decode in most browsers).
+    // _setupVideos swaps the player back out for a download link
+    // if the element fires `error`, so listing a format here is safe.
+    if (['mp3', 'ogg', 'oga', 'wav', 'm4a', 'aac', 'flac', 'opus', 'weba'].includes(ext)) {
       return `<div class="file-attachment">
-        <div class="file-info">${icon} <span class="file-name">${fileName}</span> <span class="file-size">(${fileSize})</span></div>
+        <div class="file-info"><span class="file-type-icon" aria-hidden="true">${icon}</span> <span class="file-name">${fileName}</span> <span class="file-size">(${fileSize})</span></div>
+        <audio controls preload="none" src="${fileUrl}" class="file-audio"></audio>
+      </div>`;
+    }
+    if (['mp4', 'webm', 'mov', 'm4v', 'ogv'].includes(ext)) {
+      return `<div class="file-attachment">
+        <div class="file-info"><span class="file-type-icon" aria-hidden="true">${icon}</span> <span class="file-name">${fileName}</span> <span class="file-size">(${fileSize})</span></div>
         <div class="file-video-wrap">
           <video controls preload="none" src="${fileUrl}" class="file-video"></video>
         </div>
@@ -460,17 +886,31 @@ _formatContent(str) {
 
   // Render server-hosted stickers inline at sticker dimensions (CSS-controlled)
   if (/^\/uploads\/stickers\/[\w\-.]+\.(jpg|jpeg|png|gif|webp|svg)$/i.test(str.trim())) {
-    return `<img src="${this._escapeHtml(str.trim())}" class="sticker-img" alt="sticker">`;
+    return `<img ${this._lazySrcAttr(`src="${this._escapeHtml(str.trim())}"`)} class="sticker-img" alt="sticker">`;
   }
 
   // Render server-hosted images inline (early return)
-  // No loading="lazy" — content-visibility:auto on .message already skips off-screen
-  // rendering; lazy loading on top creates 0→real-height jumps when scrolling history.
+  // Inline images go through the lazy media queue (app-media.js): the loader
+  // fetches them near the viewport, closest first, and pins their box so
+  // scrolling history never jumps.
   // SVG is included — browsers render SVGs in <img> tags safely (no script execution). (#5309)
-  if (/^\/uploads\/[\w\-]+\.(jpg|jpeg|png|gif|webp|svg)$/i.test(str.trim())) {
+  // Basename allows dots (`photo.edit.jpg`) and one extra path segment so this
+  // matches `_isImageUrl` / Haven Mobile. The previous `[\w\-]+` pattern
+  // classified those as images then emitted no <img>, so the bubble was blank.
+  if (/^\/uploads\/(?:[\w\-]+\/)?[\w\-.]+\.(jpg|jpeg|png|gif|webp|svg)$/i.test(str.trim())) {
     const u = str.trim();
     if (this._isImageHidden && this._isImageHidden(u)) return this._hiddenImagePlaceholder(u);
-    return `<img src="${this._escapeHtml(u)}" class="chat-image" alt="image">`;
+    return `<img ${this._lazySrcAttr(`src="${this._escapeHtml(u)}"`)} class="chat-image" alt="image">`;
+  }
+
+  // Remote image-only messages (Ferry Discord attachments, pasted CDN URLs).
+  // Must run on the unescaped string so signed query params keep their `&`.
+  {
+    const u = str.trim();
+    if (this._isImageUrl(u) && /^https?:\/\//i.test(u)) {
+      if (this._isImageHidden && this._isImageHidden(u)) return this._hiddenImagePlaceholder(u);
+      return `<img ${this._lazySrcAttr(this._imgSrcAttr(u))} class="chat-image" alt="image">`;
+    }
   }
 
   // ── Extract fenced code blocks before escaping ──
@@ -481,26 +921,69 @@ _formatContent(str) {
     return `\x00CODEBLOCK_${idx}\x00`;
   });
 
-  let html = this._escapeHtml(withPlaceholders);
+  // ── Timestamps: <t:1780853820> / <t:1780853820:R> ──
+  // Extracted before escaping (the token has angle brackets) and after the
+  // code fences above, so a token inside ``` stays literal.
+  const timestamps = [];
+  const withTimestamps = withPlaceholders.replace(/<t:(-?\d{1,15})(?::([tTdDfFR]))?>/g, (full, secs, style) => {
+    const rendered = this._formatTimestampToken(Number(secs), style || 'f');
+    if (!rendered) return full;
+    const idx = timestamps.length;
+    timestamps.push(rendered);
+    return `\x00TIMESTAMP_${idx}\x00`;
+  });
+
+  // ── Discord custom emotes: <:name:id> / <a:name:id> ──
+  // Relayed by Ferry, or typed by someone who wants the emote to show on the
+  // Discord side of a bridge. Pulled out before escaping like the timestamps,
+  // and before the :name: pass below so the shortcode inside the token is not
+  // resolved on its own. A Haven emoji of the same name wins; otherwise the
+  // picture comes from the server's emote cache (/api/ferry/emote/), which
+  // answers 404 on a server without the bridge, and the :name: text stays.
+  const emotes = [];
+  const withEmotes = withTimestamps.replace(/<(a?):([A-Za-z0-9_]{2,32}):(\d{15,25})>/g, (full, anim, name, id) => {
+    const idx = emotes.length;
+    emotes.push(this._discordEmoteHtml(name, id, !!anim));
+    return `\x00DEMOTE_${idx}\x00`;
+  });
+
+  let html = this._escapeHtml(withEmotes);
+
+  // ── Colour spans: c#RRGGBB…#c and c#(R,G,B)…#c ──
+  // Marked out before the link pass, so a closing #c is never swallowed into
+  // the URL in front of it, and restored last, so the colour reaches text
+  // inside a quote or a spoiler as well (#5661).
+  const colorOpens = [];
+  html = html.replace(/c#([0-9a-fA-F]{6})([\s\S]+?)#c/g, (full, hex, inner) => {
+    const idx = colorOpens.length;
+    colorOpens.push(`<span style="color:#${hex}">`);
+    return `\x00COLOR_${idx}\x00${inner}\x00ENDCOLOR\x00`;
+  });
+  html = html.replace(/c#\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)([\s\S]+?)#c/g, (full, r, g, b, inner) => {
+    const [rr, gg, bb] = [r, g, b].map(v => Math.min(255, parseInt(v, 10)));
+    const idx = colorOpens.length;
+    colorOpens.push(`<span style="color:rgb(${rr},${gg},${bb})">`);
+    return `\x00COLOR_${idx}\x00${inner}\x00ENDCOLOR\x00`;
+  });
 
   // ── Markdown images & links (extract before auto-linking) ──
   const mdLinks = [];
   // ![alt](url)
   html = html.replace(/!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g, (full, alt, url) => {
-    try { new URL(url); } catch { return full; }
-    const safeUrl = url.replace(/['"<>]/g, '');
+    const safeUrl = this._rawHttpUrl(url);
+    if (!safeUrl) return full;
     const idx = mdLinks.length;
     mdLinks.push((this._isImageHidden && this._isImageHidden(safeUrl))
       ? this._hiddenImagePlaceholder(safeUrl)
-      : `<img src="${safeUrl}" class="chat-image" alt="${alt || 'image'}">`);
+      : `<img ${this._imgSrcAttr(safeUrl)} class="chat-image" alt="${alt || 'image'}">`);
     return `\x00MDLINK_${idx}\x00`;
   });
   // [text](url)
   html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (full, text, url) => {
-    try { new URL(url); } catch { return full; }
-    const safeUrl = url.replace(/['"<>]/g, '');
+    const safeUrl = this._rawHttpUrl(url);
+    if (!safeUrl) return full;
     const idx = mdLinks.length;
-    mdLinks.push(`<a href="${safeUrl}" target="_blank" rel="noopener noreferrer nofollow" title="${safeUrl}" data-masked-link="true">${text}</a>`);
+    mdLinks.push(`<a href="${this._escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer nofollow" title="${this._escapeHtml(safeUrl)}" data-masked-link="true">${text}</a>`);
     return `\x00MDLINK_${idx}\x00`;
   });
 
@@ -510,16 +993,15 @@ _formatContent(str) {
   html = html.replace(
     /\bhttps?:\/\/[a-zA-Z0-9\-._~:/?#\[\]@!$&()*+,;=%]+/g,
     (url) => {
-      try { new URL(url); } catch { return url; }
-      const safeUrl = url.replace(/['"<>]/g, '');
+      const safeUrl = this._rawHttpUrl(url);
+      if (!safeUrl) return url;
       const idx = autoLinks.length;
-      if (/\.(jpg|jpeg|png|gif|webp)(\?[^"'<>]*)?$/i.test(safeUrl) ||
-          /^https:\/\/media\d*\.giphy\.com\//i.test(safeUrl)) {
+      if (this._isRemoteImageUrl(safeUrl)) {
         autoLinks.push((this._isImageHidden && this._isImageHidden(safeUrl))
           ? this._hiddenImagePlaceholder(safeUrl)
-          : `<img src="${safeUrl}" class="chat-image" alt="image" loading="lazy">`);
+          : `<img ${this._imgSrcAttr(safeUrl)} class="chat-image" alt="image" loading="lazy">`);
       } else {
-        autoLinks.push(`<a href="${safeUrl}" target="_blank" rel="noopener noreferrer nofollow">${safeUrl}</a>`);
+        autoLinks.push(`<a href="${this._escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer nofollow">${this._escapeHtml(safeUrl)}</a>`);
       }
       return `\x00AUTOLINK_${idx}\x00`;
     }
@@ -580,6 +1062,16 @@ _formatContent(str) {
       if (this.user && this.user.id) nameToUserId.set(low, this.user.id);
     }
   }
+  // Role mentions (#5579): every role name is a valid @target, styled as a
+  // role and lit up for a viewer who holds it.
+  const roleByName = new Map();
+  const myRoleIds = new Set(((this.user && this.user.roles) || []).map(r => r && r.id));
+  for (const r of (this._mentionableRoles || [])) {
+    if (!r || !r.name) continue;
+    const low = r.name.toLowerCase();
+    roleByName.set(low, { name: r.name, color: r.color, mine: myRoleIds.has(r.id) });
+    validNames.add(low);
+  }
   const allNames = [...validNames].sort((a, b) => b.length - a.length);
   const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // Build alt list of known names; also keep a generic fallback for any
@@ -593,6 +1085,12 @@ _formatContent(str) {
     const isKnown = validNames.has(lower);
     const isSelf  = lower === selfLogin;
     if (!isKnown && !isSelf) return match;
+    // A role, unless a member shares the name, in which case the person wins.
+    const role = roleByName.get(lower);
+    if (role && !nameToUserId.has(lower) && !isSelf) {
+      const style = role.color ? ` style="--role-color:${this._escapeHtml(role.color)}"` : '';
+      return `<span class="mention mention-role${role.mine ? ' mention-self' : ''}"${style}>@${this._escapeHtml(role.name)}</span>`;
+    }
     // Prefer the viewer's personal nickname for that user, then the
     // server-side display name, then the raw token. (#5290)
     const uid = nameToUserId.get(lower);
@@ -616,20 +1114,37 @@ _formatContent(str) {
   // ## headings or message IDs (#1234) don't get linkified spuriously.
   if (Array.isArray(this.channels) && this.channels.length) {
     const chanByName = new Map();
+    const nameByCode = new Map();
+    // Names a channel used to have, so a #old-name typed before a rename
+    // still points at it and reads as the name it has now (#5602). A current
+    // name always wins over another channel's former one.
+    const formerByName = new Map();
     for (const c of this.channels) {
       if (c && c.name && c.code && !c.is_dm) {
         chanByName.set(String(c.name).toLowerCase(), c.code);
+        nameByCode.set(c.code, String(c.name));
+        let former = [];
+        try { former = typeof c.former_names === 'string' ? JSON.parse(c.former_names) : (c.former_names || []); } catch { former = []; }
+        if (Array.isArray(former)) for (const old of former) {
+          if (typeof old === 'string' && old) formerByName.set(old.toLowerCase(), c.code);
+        }
       }
     }
     if (chanByName.size > 0) {
+      // Names with spaces are typed as #foo_bar — try the literal form
+      // first, then fall back to a space-substituted lookup so spaced
+      // channel names resolve too.
+      const lookup = (map, lower) => map.get(lower) || map.get(lower.replace(/_/g, ' '));
       html = html.replace(/(?<![\w#&])#([\p{L}\p{N}\p{Emoji_Presentation}_-][\p{L}\p{N}\p{Emoji_Presentation}_-]{0,49})/gu, (match, name) => {
         const lower = name.toLowerCase();
-        // Names with spaces are typed as #foo_bar — try the literal form
-        // first, then fall back to a space-substituted lookup so spaced
-        // channel names resolve too.
-        let code = chanByName.get(lower) || chanByName.get(lower.replace(/_/g, ' '));
-        if (!code) return match;
-        return `<span class="channel-link" data-channel-code="${this._escapeHtml(code)}">#${this._escapeHtml(name)}</span>`;
+        let code = lookup(chanByName, lower);
+        let label = name;
+        if (!code) {
+          code = lookup(formerByName, lower);
+          if (!code) return match;
+          label = (nameByCode.get(code) || name).replace(/\s+/g, '_');
+        }
+        return `<span class="channel-link" data-channel-code="${this._escapeHtml(code)}">#${this._escapeHtml(label)}</span>`;
       });
     }
   }
@@ -637,14 +1152,15 @@ _formatContent(str) {
   // Render spoilers (||text||) — CSP-safe, uses delegated click handler
   html = html.replace(/\|\|(.+?)\|\|/g, '<span class="spoiler">$1</span>');
 
-  // Render custom emojis :name:
-  if (this.customEmojis && this.customEmojis.length > 0) {
-    html = html.replace(/:([a-zA-Z0-9_-]+):/g, (match, name) => {
-      const emoji = this.customEmojis.find(e => e.name === name.toLowerCase());
-      if (emoji) return `<img src="${this._escapeHtml(emoji.url)}" alt=":${this._escapeHtml(name)}:" title=":${this._escapeHtml(name)}:" class="custom-emoji">`;
-      return match;
-    });
-  }
+  // Render custom + bundled built-in image emojis :name:
+  html = html.replace(/:([a-zA-Z0-9_-]+):/g, (match, name) => {
+    const emoji = this._findNamedEmoji(name);
+    if (emoji) return `<img src="${this._escapeHtml(emoji.url)}" alt=":${this._escapeHtml(name)}:" title=":${this._escapeHtml(name)}:" class="custom-emoji">`;
+    return match;
+  });
+
+  // Render __underline__
+  html = html.replace(/__(.+?)__/g, '<u>$1</u>');
 
   // Render /me action text (italic)
   if (html.startsWith('_') && html.endsWith('_') && html.length > 2) {
@@ -667,8 +1183,13 @@ _formatContent(str) {
   html = html.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
 
   // Render grouped > blockquotes and preserve attribution lines inside the quote.
+  // A line quotes only when the > is followed by a space, another >, or
+  // nothing at all: ">implying" and ">.<" stay as typed (#5654).
   const blockquotes = [];
-  html = html.replace(/(^|\n)((?:&gt;[^\n]*(?:\n|$))+)/g, (full, pre, block) => {
+  html = html.replace(/(^|\n)((?:&gt;(?:[ \t][^\n]*|&gt;[^\n]*)?(?:\n|$))+)/g, (full, pre, block) => {
+    // A lone ">" with nothing on it is only a blank line inside a quote,
+    // never a quote by itself.
+    if (block.split('\n').every(line => /^&gt;\s*$/.test(line))) return full;
     const lines = block.trim().split('\n').map(line => line.replace(/^&gt;\s?/, ''));
     let authorHtml = '';
     if (lines[0] && /^@[^\s].+ wrote:$/.test(lines[0])) {
@@ -676,9 +1197,15 @@ _formatContent(str) {
     }
     const textHtml = lines.join('<br>');
     const idx = blockquotes.length;
-    blockquotes.push(`${pre}<blockquote class="chat-blockquote">${authorHtml}<div class="chat-blockquote-body">${textHtml}</div></blockquote>`);
-    return `\x00BLOCKQUOTE_${idx}\x00`;
+    blockquotes.push(`<blockquote class="chat-blockquote">${authorHtml}<div class="chat-blockquote-body">${textHtml}</div></blockquote>`);
+    // The line break after the quote stays in the text, so a list that
+    // follows still starts on its own line; the <br> it turns into is
+    // dropped again when the quote is put back (#5661).
+    return `${pre}\x00BLOCKQUOTE_${idx}\x00${block.endsWith('\n') ? '\n' : ''}`;
   });
+
+  // (Colour spans were marked out before the link pass and are put back at
+  // the very end.)
 
   // ── Headings: # H1, ## H2, ### H3 at start of line ──
   html = html.replace(/(^|\n)(#{1,3})\s+(.+)/g, (_, pre, hashes, text) => {
@@ -798,7 +1325,7 @@ _formatContent(str) {
   });
 
   blockquotes.forEach((block, idx) => {
-    html = html.replace(`\x00BLOCKQUOTE_${idx}\x00`, block);
+    html = html.replace(new RegExp(`(?:<br>)?\\x00BLOCKQUOTE_${idx}\\x00(?:<br>)?`), () => block);
   });
 
   // ── Restore fenced code blocks ──
@@ -820,23 +1347,53 @@ _formatContent(str) {
     html = html.replace(`\x00AUTOLINK_${idx}\x00`, link);
   });
 
+  // ── Restore timestamps ──
+  // Function replacement, so a formatted date containing $& or $1 cannot
+  // be read as a replacement pattern.
+  timestamps.forEach((el, idx) => {
+    html = html.replace(`\x00TIMESTAMP_${idx}\x00`, () => el);
+  });
+
+  // ── Restore Discord emotes ──
+  emotes.forEach((el, idx) => {
+    html = html.replace(`\x00DEMOTE_${idx}\x00`, () => el);
+  });
+
+  // ── Colour spans go back last, around whatever was rendered inside them ──
+  colorOpens.forEach((open, idx) => {
+    html = html.replace(`\x00COLOR_${idx}\x00`, () => open);
+  });
+  html = html.replace(/\x00ENDCOLOR\x00/g, '</span>');
+
   if (emojiOnly) html = `<span class="emoji-only-msg">${html}</span>`;
 
   return html;
 },
 
+// "1:05" for a voice-message-1m05s.weba name, "" for a voice message with
+// no length in its name, null for any other file (#5665).
+_voiceMessageLength(name) {
+  if (!/^voice-message/i.test(String(name || ''))) return null;
+  const m = String(name).match(/(\d+)m(\d+)s/);
+  return m ? `${Number(m[1])}:${String(m[2]).padStart(2, '0')}` : '';
+},
+
 _formatTime(dateStr) {
   const date = new Date(dateStr);
   const now = new Date();
-  const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  const isToday = date.toDateString() === now.toDateString();
+  const time = this._fmtTime(date);
+  // Compare the calendar day in the reader's chosen zone (falls back to the
+  // device zone when unset), so "today"/"yesterday" don't drift across a date
+  // boundary when a timezone is picked.
+  const dayKey = (d) => this._fmtDate(d, { year: 'numeric', month: '2-digit', day: '2-digit' });
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
-  const isYesterday = date.toDateString() === yesterday.toDateString();
+  const isToday = dayKey(date) === dayKey(now);
+  const isYesterday = dayKey(date) === dayKey(yesterday);
 
   if (isToday) return t('utils.today_at', { time });
   if (isYesterday) return t('utils.yesterday_at', { time });
-  return `${date.toLocaleDateString()} ${time}`;
+  return `${this._fmtDate(date)} ${time}`;
 },
 
 _getUserColor(username) {
@@ -862,6 +1419,40 @@ _scrollToBottom(force) {
   if (force || this._coupledToBottom) {
     el.scrollTop = el.scrollHeight;
   }
+},
+
+// Jump to the newest message. Shared by the jump-to-bottom button and the
+// Escape hotkey. When the DOM window has been trimmed (_noMoreFuture === false)
+// the newest messages aren't loaded, so re-fetch from the present; otherwise a
+// plain scroll reaches the true bottom instantly.
+_jumpToLatest() {
+  document.getElementById('jump-to-bottom')?.classList.remove('visible');
+  if (this._noMoreFuture === false) {
+    this._reloadChannelFromPresent();
+  } else {
+    this._scrollToBottom(true);
+    this._coupledToBottom = true;
+  }
+},
+
+// Snap the feed back to the live present by re-running the fresh channel load.
+// Needed when the DOM window has been trimmed (newest messages aren't in the
+// DOM, i.e. _noMoreFuture === false) — a plain _scrollToBottom only reaches the
+// artificial bottom of the loaded window. This mirrors the reset the own-message
+// and tab-resync paths already use, so message-history renders the initial-load
+// branch and _renderMessages lands at the true bottom.
+_reloadChannelFromPresent() {
+  if (!this.currentChannel || !this.socket?.connected) return;
+  this._coupledToBottom = true;
+  this._oldestMsgId = null;
+  this._noMoreHistory = false;
+  this._loadingHistory = false;
+  this._historyBefore = null;
+  this._newestMsgId = null;
+  this._noMoreFuture = true;
+  this._loadingFuture = false;
+  this._historyAfter = null;
+  this.socket.emit('get-messages', { code: this.currentChannel });
 },
 
 // Debounced version used by image/media load handlers. Multiple images in the
@@ -903,10 +1494,13 @@ _showToast(message, type = 'info', action = null, duration = 4000) {
   setTimeout(() => toast.remove(), duration);
 },
 
-/** Show a one-time notice about the Account Recovery feature */
+/** Show a one-time notice about the Account Recovery feature.
+ *  Whether to show it at all is decided server-side (no recovery codes yet AND
+ *  not previously dismissed) — see get-recovery-notice-state. This only guards
+ *  against showing twice within a single session (e.g. socket reconnects). */
 _showRecoveryNotice() {
-  // Guard: only show once
-  if (localStorage.getItem('haven_recovery_notice_v1')) return;
+  if (this._recoveryNoticeShown) return;
+  this._recoveryNoticeShown = true;
 
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay recovery-notice-overlay';
@@ -931,18 +1525,24 @@ _showRecoveryNotice() {
 
   document.body.appendChild(overlay);
 
-  const dismiss = () => {
+  // Persist "never show again" per-account (not localStorage), same as the
+  // promo modals. A plain close is session-only; the notice returns next login
+  // unless the user generates recovery codes (which the server check suppresses
+  // it on) or ticks the box here.
+  const persistIfChecked = () => {
     if (document.getElementById('recovery-notice-dsa')?.checked) {
-      localStorage.setItem('haven_recovery_notice_v1', '1');
+      this.socket.emit('set-preference', { key: 'recovery_notice_seen', value: 'true' });
     }
+  };
+
+  const dismiss = () => {
+    persistIfChecked();
     overlay.remove();
   };
 
   document.getElementById('recovery-notice-close').addEventListener('click', dismiss);
   document.getElementById('recovery-notice-go').addEventListener('click', () => {
-    if (document.getElementById('recovery-notice-dsa')?.checked) {
-      localStorage.setItem('haven_recovery_notice_v1', '1');
-    }
+    persistIfChecked();
     overlay.remove();
     // Open settings modal and navigate to recovery section
     document.getElementById('open-settings-btn')?.click();
@@ -963,13 +1563,13 @@ _showExternalLinkWarning(displayText, url) {
   overlay.innerHTML = `
     <div class="risky-download-modal">
       <div class="risky-download-icon">🔗</div>
-      <h3 style="color:var(--text-primary,#dbdee1)">External Link</h3>
-      <p>You're about to visit:</p>
-      <p style="background:var(--bg-tertiary,#232428);padding:8px 12px;border-radius:6px;font-size:13px;word-break:break-all;color:var(--accent,#5865f2)">${this._escapeHtml(url)}</p>
-      <p class="risky-download-desc">Make sure you trust this link before continuing.</p>
+      <h3 style="color:var(--text-primary,#dbdee1)">${t('modals.external_link.title')}</h3>
+      <p>${t('modals.external_link.about_to_visit')}</p>
+      <p style="background:var(--bg-tertiary,#232428);padding:8px 12px;border-radius:6px;font-size:0.8125rem;word-break:break-all;color:var(--accent,#5865f2)">${this._escapeHtml(url)}</p>
+      <p class="risky-download-desc">${t('modals.external_link.trust_warning')}</p>
       <div class="risky-download-actions">
-        <button class="risky-download-cancel">Cancel</button>
-        <button class="risky-download-confirm" style="background:var(--accent,#5865f2)">Open Link</button>
+        <button class="risky-download-cancel">${t('modals.common.cancel')}</button>
+        <button class="risky-download-confirm" style="background:var(--accent,#5865f2)">${t('modals.external_link.open')}</button>
       </div>
     </div>
   `;
@@ -994,16 +1594,12 @@ _showRiskyDownloadWarning(fileName, ext, url) {
   overlay.innerHTML = `
     <div class="risky-download-modal">
       <div class="risky-download-icon">⚠️</div>
-      <h3>Potentially Harmful File</h3>
+      <h3>${t('modals.risky_download.title')}</h3>
       <p><strong>${this._escapeHtml(fileName)}</strong></p>
-      <p class="risky-download-desc">
-        <strong>.${this._escapeHtml(ext)}</strong> files can be dangerous and may harm your
-        device if they come from an untrusted source. Only download this if
-        you trust the sender.
-      </p>
+      <p class="risky-download-desc">${t('modals.risky_download.warning_html', { ext: this._escapeHtml(ext) })}</p>
       <div class="risky-download-actions">
-        <button class="risky-download-cancel">Cancel</button>
-        <button class="risky-download-confirm">Download Anyway</button>
+        <button class="risky-download-cancel">${t('modals.common.cancel')}</button>
+        <button class="risky-download-confirm">${t('modals.risky_download.download_anyway')}</button>
       </div>
     </div>
   `;
@@ -1030,6 +1626,46 @@ _showRiskyDownloadWarning(fileName, ext, url) {
 // ═══════════════════════════════════════════════════════
 // EMOJI PICKER (categorized + searchable)
 // ═══════════════════════════════════════════════════════
+
+// Skin-tone preference, cached in memory and mirrored to localStorage
+// (same pattern as _getQuickEmojis). Stored as base emoji everywhere; the
+// tone is applied only at display and insert time via _toneEmoji.
+_getEmojiSkinTone() {
+  if (this._skinTone === undefined) this._skinTone = localStorage.getItem(SKIN_TONE_KEY) || 'default';
+  return this._skinTone;
+},
+
+_saveEmojiSkinTone(tone) {
+  this._skinTone = tone;
+  localStorage.setItem(SKIN_TONE_KEY, tone);
+},
+
+// Apply a specific tone to one emoji. Only single-person "modifier base"
+// emoji are toned; multi-person sequences (couples, people holding hands)
+// carry more than one base and are left as-is.
+_applySkinTone(emoji, tone) {
+  const mod = SKIN_TONE_MODIFIERS[tone];
+  if (!mod || typeof emoji !== 'string') return emoji;
+  // Prefer the set derived from the server's emoji list; fall back to the
+  // built-in one when the standard list hasn't loaded.
+  const base = this._emojiModifierBase || EMOJI_MODIFIER_BASE;
+  const cps = [...emoji];
+  if (cps.filter(c => base.has(c)).length !== 1) return emoji;
+  const out = [];
+  for (let i = 0; i < cps.length; i++) {
+    out.push(cps[i]);
+    if (base.has(cps[i])) {
+      out.push(mod);
+      if (cps[i + 1] === '\uFE0F') i++; // skip VS16: the modifier already implies emoji style
+    }
+  }
+  return out.join('');
+},
+
+// Apply the user's current tone — used at every render/insert surface.
+_toneEmoji(emoji) {
+  return this._applySkinTone(emoji, this._getEmojiSkinTone());
+},
 
 _toggleEmojiPicker(anchorEl) {
   const picker = document.getElementById('emoji-picker');
@@ -1069,8 +1705,8 @@ _toggleEmojiPicker(anchorEl) {
     });
     return b;
   };
-  sectionRow.appendChild(mkSectionBtn('emoji', t('emoji.section_emoji') || 'Emoji'));
-  sectionRow.appendChild(mkSectionBtn('sticker', t('emoji.section_sticker') || 'Stickers'));
+  sectionRow.appendChild(mkSectionBtn('emoji', t('emoji.section_emoji')));
+  sectionRow.appendChild(mkSectionBtn('sticker', t('emoji.section_sticker')));
   picker.appendChild(sectionRow);
 
   // ── Sticker section ──
@@ -1080,7 +1716,7 @@ _toggleEmojiPicker(anchorEl) {
     const stickerSearch = document.createElement('input');
     stickerSearch.type = 'text';
     stickerSearch.className = 'emoji-search-input';
-    stickerSearch.placeholder = t('emoji.sticker_search_placeholder') || 'Search stickers';
+    stickerSearch.placeholder = t('emoji.sticker_search_placeholder');
     stickerSearch.maxLength = 30;
     stickerSearchRow.appendChild(stickerSearch);
     picker.appendChild(stickerSearchRow);
@@ -1129,10 +1765,10 @@ _toggleEmojiPicker(anchorEl) {
         list = stickers.filter(s => (s.pack_name || 'General') === self._activeStickerPack);
       }
       if (list.length === 0) {
-        grid.innerHTML = `<p class="muted-text" style="padding:12px;font-size:12px;width:100%;text-align:center">${
+        grid.innerHTML = `<p class="muted-text" style="padding:12px;font-size:0.75rem;width:100%;text-align:center">${
           stickers.length === 0
-            ? (t('emoji.no_stickers') || 'No stickers yet — an admin can upload some from the Manage Stickers panel')
-            : (t('emoji.no_results') || 'No results')
+            ? t('emoji.no_stickers')
+            : t('emoji.no_results')
         }</p>`;
         return;
       }
@@ -1189,31 +1825,79 @@ _toggleEmojiPicker(anchorEl) {
   searchInput.placeholder = t('emoji.search_placeholder');
   searchInput.maxLength = 30;
   searchRow.appendChild(searchInput);
+
+  // Skin-tone selector: a hand button whose glyph reflects the current tone,
+  // opening a dropdown of Default + the five tones. Picking one saves the
+  // preference and re-renders so every emoji adopts it.
+  const skinBtn = document.createElement('button');
+  skinBtn.className = 'emoji-skin-btn';
+  skinBtn.title = t('emoji.skin_tone');
+  const skinMenu = document.createElement('div');
+  skinMenu.className = 'emoji-skin-menu';
+  skinMenu.style.display = 'none';
+  const paintSkinBtn = () => { skinBtn.textContent = this._toneEmoji('✋'); };
+  paintSkinBtn();
+  ['default', 'light', 'medium-light', 'medium', 'medium-dark', 'dark'].forEach(tone => {
+    const opt = document.createElement('button');
+    opt.className = 'emoji-skin-opt';
+    opt.textContent = this._applySkinTone('✋', tone);
+    opt.title = t(`emoji.skin_tones.${tone.replace('-', '_')}`);
+    opt.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      this._saveEmojiSkinTone(tone);
+      paintSkinBtn();
+      skinMenu.style.display = 'none';
+      renderGrid(searchInput.value.trim() || null);
+    });
+    skinMenu.appendChild(opt);
+  });
+  skinBtn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    skinMenu.style.display = skinMenu.style.display === 'none' ? 'flex' : 'none';
+  });
+  searchRow.appendChild(skinBtn);
+  searchRow.appendChild(skinMenu);
   picker.appendChild(searchRow);
 
-  // Build combined categories (standard + custom)
-  const allCategories = { ...this.emojiCategories };
+  // Build combined categories — custom first so they sit front and centre,
+  // then the standard sets.
+  const allCategories = {};
   const hasCustom = this.customEmojis && this.customEmojis.length > 0;
   if (hasCustom) {
     allCategories['Custom'] = this.customEmojis.map(e => `:${e.name}:`);
   }
+  Object.assign(allCategories, this.emojiCategories);
+  this._emojiActiveCategory = Object.keys(allCategories)[0];
 
-  // Category tabs
+  // Category tabs — clicking scrolls the grid to that section rather than
+  // swapping it out, so every category is reachable by scrolling too.
   const tabRow = document.createElement('div');
   tabRow.className = 'emoji-tab-row';
-  const catIcons = { 'Smileys':'😀', 'People':'👋', 'Animals':'🐶', 'Food':'🍕', 'Activities':'🎮', 'Travel':'🚀', 'Objects':'💡', 'Symbols':'❤️', 'Custom':'⭐' };
+  const catIcons = { 'Smileys':'😀', 'People':'👋', 'Animals':'🐶', 'Food':'🍕', 'Activities':'🎮', 'Travel':'🚀', 'Objects':'💡', 'Symbols':'❤️', 'Flags':'🚩', 'Custom':'⭐' };
+  const catTabs = {};
+  const catSections = {}; // cat -> non-sticky section wrapper, our stable scroll anchor
+  const setActiveTab = (cat) => {
+    for (const [c, tab] of Object.entries(catTabs)) tab.classList.toggle('active', c === cat);
+  };
   for (const cat of Object.keys(allCategories)) {
     const tab = document.createElement('button');
     tab.className = 'emoji-tab' + (cat === this._emojiActiveCategory ? ' active' : '');
     tab.textContent = catIcons[cat] || cat.charAt(0);
     tab.title = t(`emoji.categories.${cat.toLowerCase()}`) || cat;
     tab.addEventListener('click', () => {
-      this._emojiActiveCategory = cat;
-      searchInput.value = '';
-      renderGrid();
-      tabRow.querySelectorAll('.emoji-tab').forEach(t => t.classList.remove('active'));
-      tab.classList.add('active');
+      if (searchInput.value.trim()) { searchInput.value = ''; renderGrid(); }
+      const section = catSections[cat];
+      // Scroll to the section wrapper, not its header: the wrapper isn't
+      // sticky, so its offsetTop is always the true layout position.
+      if (section) {
+        grid.scrollTop = section.offsetTop;
+        // Move the keyboard highlight to this category's first emoji, so
+        // arrowing/Enter continues from where the user just jumped to.
+        highlightFirstEmoji(section);
+      }
+      setActiveTab(cat);
     });
+    catTabs[cat] = tab;
     tabRow.appendChild(tab);
   }
   picker.appendChild(tabRow);
@@ -1224,15 +1908,60 @@ _toggleEmojiPicker(anchorEl) {
   picker.appendChild(grid);
 
   const self = this;
+  function appendEmojiButton(parent, emoji) {
+    const btn = document.createElement('button');
+    btn.className = 'emoji-item';
+    // Check if it's a custom emoji (:name:)
+    const customMatch = typeof emoji === 'string' && emoji.match(/^:([a-zA-Z0-9_-]+):$/);
+    // Standard emoji get the current skin tone; custom emoji pass through.
+    const value = customMatch ? emoji : self._toneEmoji(emoji);
+    if (customMatch) {
+      const ce = self._findNamedEmoji(customMatch[1]);
+      if (ce) {
+        btn.innerHTML = `<img src="${self._escapeHtml(ce.url)}" alt=":${self._escapeHtml(ce.name)}:" class="custom-emoji">`;
+        btn.title = `:${ce.name}:`;
+      } else {
+        btn.textContent = emoji;
+        btn.title = emoji;
+      }
+    } else {
+      btn.textContent = value;
+      // Use the first keyword (canonical name) as the tooltip,
+      // matching the reaction picker behavior.
+      const names = self.emojiNames && self.emojiNames[emoji];
+      btn.title = names ? names.split(/\s+/)[0] : emoji;
+    }
+    btn.addEventListener('click', () => {
+      // Insert into the active edit textarea if editing, otherwise the main input
+      const input = self._activeEditTextarea || document.getElementById('message-input');
+      const start = input.selectionStart;
+      const end = input.selectionEnd;
+      input.value = input.value.substring(0, start) + value + input.value.substring(end);
+      input.selectionStart = input.selectionEnd = start + value.length;
+      input.focus();
+    });
+    parent.appendChild(btn);
+  }
+
+  // Keyboard nav: highlight the first emoji so arrow keys + Enter work the
+  // moment the picker opens (Discord-style). Re-run after every grid render.
+  // Pass a section to highlight the first emoji within it (e.g. after a
+  // category jump); defaults to the first emoji in the whole grid.
+  const highlightFirstEmoji = (scope) => {
+    grid.querySelectorAll('.emoji-item.kb-active').forEach(el => el.classList.remove('kb-active'));
+    const first = (scope || grid).querySelector('.emoji-item');
+    if (first) first.classList.add('kb-active');
+  };
+
   function renderGrid(filter) {
     grid.innerHTML = '';
-    let emojis;
+    for (const k in catSections) delete catSections[k];
     if (filter) {
-      const q = filter.toLowerCase();
+      const q = filter.toLowerCase().trim();
       const matched = new Set();
-      // Search by emoji name keywords
+      // Search by keyword, literal character, and punctuation alias
       for (const [emoji, keywords] of Object.entries(self.emojiNames)) {
-        if (keywords.toLowerCase().includes(q)) matched.add(emoji);
+        if (self._emojiSearchMatch(emoji, keywords, filter)) matched.add(emoji);
       }
       // Also search by category name
       for (const [cat, list] of Object.entries(self.emojiCategories)) {
@@ -1244,54 +1973,104 @@ _toggleEmojiPicker(anchorEl) {
           if (e.name.toLowerCase().includes(q)) matched.add(`:${e.name}:`);
         });
       }
-      emojis = matched.size > 0 ? [...matched] : [];
-    } else {
-      emojis = allCategories[self._emojiActiveCategory] || self.emojis;
-    }
-    if (filter && emojis.length === 0) {
-      grid.innerHTML = `<p class="muted-text" style="padding:12px;font-size:12px;width:100%;text-align:center">${t('emoji.no_results')}</p>`;
+      // Search bundled built-in image emoji by name + keywords
+      if (self.builtinEmojis) {
+        self.builtinEmojis.forEach(e => {
+          if (e.name.includes(q) || (e.keywords && e.keywords.toLowerCase().includes(q))) matched.add(`:${e.name}:`);
+        });
+      }
+      if (matched.size === 0) {
+        grid.innerHTML = `<p class="muted-text" style="padding:12px;font-size:0.75rem;width:100%;text-align:center">${t('emoji.no_results')}</p>`;
+        return;
+      }
+      const results = document.createElement('div');
+      results.className = 'emoji-cat-grid';
+      matched.forEach(e => appendEmojiButton(results, e));
+      grid.appendChild(results);
+      highlightFirstEmoji();
       return;
     }
-    emojis.forEach(emoji => {
-      const btn = document.createElement('button');
-      btn.className = 'emoji-item';
-      // Check if it's a custom emoji (:name:)
-      const customMatch = typeof emoji === 'string' && emoji.match(/^:([a-zA-Z0-9_-]+):$/);
-      if (customMatch) {
-        const ce = self.customEmojis.find(e => e.name === customMatch[1]);
-        if (ce) {
-          btn.innerHTML = `<img src="${self._escapeHtml(ce.url)}" alt=":${self._escapeHtml(ce.name)}:" class="custom-emoji">`;
-          btn.title = `:${ce.name}:`;
-        } else {
-          btn.textContent = emoji;
-          btn.title = emoji;
-        }
-      } else {
-        btn.textContent = emoji;
-        // Use the first keyword (canonical name) as the tooltip,
-        // matching the reaction picker behavior.
-        const names = self.emojiNames && self.emojiNames[emoji];
-        btn.title = names ? names.split(/\s+/)[0] : emoji;
-      }
-      btn.addEventListener('click', () => {
-        // Insert into the active edit textarea if editing, otherwise the main input
-        const input = self._activeEditTextarea || document.getElementById('message-input');
-        const start = input.selectionStart;
-        const end = input.selectionEnd;
-        input.value = input.value.substring(0, start) + emoji + input.value.substring(end);
-        input.selectionStart = input.selectionEnd = start + emoji.length;
-        input.focus();
-      });
-      grid.appendChild(btn);
-    });
+    // No filter: render every category as its own section (sticky header +
+    // its emoji grid) so scrolling flows through all of them and adjacent
+    // headers push each other out cleanly.
+    for (const [cat, list] of Object.entries(allCategories)) {
+      const section = document.createElement('div');
+      section.className = 'emoji-cat';
+      const header = document.createElement('div');
+      header.className = 'emoji-cat-header';
+      header.textContent = t(`emoji.categories.${cat.toLowerCase()}`) || cat;
+      section.appendChild(header);
+      const catGrid = document.createElement('div');
+      catGrid.className = 'emoji-cat-grid';
+      list.forEach(e => appendEmojiButton(catGrid, e));
+      section.appendChild(catGrid);
+      grid.appendChild(section);
+      catSections[cat] = section;
+    }
+    highlightFirstEmoji();
   }
+
+  // Scroll-spy: highlight the tab of whichever section is at the top. Compares
+  // stable offsetTop values against scrollTop — no sticky-poisoned measurements.
+  grid.addEventListener('scroll', () => {
+    if (searchInput.value.trim()) return;
+    const y = grid.scrollTop;
+    let current = null;
+    for (const cat of Object.keys(catSections)) {
+      if (catSections[cat].offsetTop - y <= 8) current = cat;
+      else break;
+    }
+    if (current && current !== self._emojiActiveCategory) {
+      self._emojiActiveCategory = current;
+      setActiveTab(current);
+    }
+  });
 
   searchInput.addEventListener('input', () => {
     const q = searchInput.value.trim();
     renderGrid(q || null);
+    if (!q) setActiveTab(self._emojiActiveCategory = Object.keys(allCategories)[0]);
   });
 
   renderGrid();
+
+  // Arrow-key navigation + Enter to pick, bound once to the picker. Reads its
+  // state from the DOM on each keypress so it survives the grid being rebuilt
+  // on search/category changes. Enter reuses the emoji's own click handler, so
+  // there's a single source of truth for what "picking" an emoji does.
+  if (!picker._havenNavBound) {
+    picker._havenNavBound = true;
+    picker.addEventListener('keydown', (e) => {
+      if (picker.style.display === 'none') return;
+      const items = [...picker.querySelectorAll('.emoji-grid .emoji-item')];
+      if (!items.length) return;
+      const active = picker.querySelector('.emoji-item.kb-active');
+      const setActive = (el) => {
+        if (!el) return;
+        items.forEach(i => i.classList.remove('kb-active'));
+        el.classList.add('kb-active');
+        el.scrollIntoView({ block: 'nearest' });
+      };
+      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        const idx = active ? items.indexOf(active) : -1;
+        if (idx === -1) { setActive(items[0]); return; }
+        if (e.key === 'ArrowRight') setActive(items[Math.min(idx + 1, items.length - 1)]);
+        else if (e.key === 'ArrowLeft') setActive(items[Math.max(idx - 1, 0)]);
+        else setActive(this._emojiGridVerticalNav(items, idx, e.key === 'ArrowDown' ? 1 : -1));
+      } else if (e.key === 'Enter' && active) {
+        e.preventDefault();
+        active.click(); // insert the selected emoji (same as clicking it)
+        if (e.shiftKey) {
+          // Shift+Enter: keep the menu open to pick more; clicking moved focus
+          // to the message box, so hand it back to the search field.
+          picker.querySelector('.emoji-search-input')?.focus();
+        } else {
+          this._toggleEmojiPicker(); // plain Enter closes after one pick
+        }
+      }
+    });
+  }
 
   // On mobile with the iOS keyboard open, dynamically position the picker
   // above the input area using the visual viewport so it doesn't push
@@ -1325,6 +2104,32 @@ _toggleEmojiPicker(anchorEl) {
 
   picker.style.display = 'flex';
   searchInput.focus();
+
+  // Always open scrolled to the top, so the view and the keyboard highlight
+  // both start on the first category in every browser. Chromium discards the
+  // old scroll when the grid is rebuilt; Firefox/Safari can preserve it, which
+  // would leave the view on the last-used category while the highlight resets.
+  grid.scrollTop = 0;
+},
+
+// Find the emoji one visual row above/below the current one (dir: -1 up, 1 down).
+// Emoji wrap into rows of varying counts across category sections, so this walks
+// by geometry rather than a fixed column count: nearest row wins first, then the
+// closest horizontal neighbour in that row.
+_emojiGridVerticalNav(items, idx, dir) {
+  const cur = items[idx].getBoundingClientRect();
+  const curX = cur.left + cur.width / 2;
+  const curY = cur.top + cur.height / 2;
+  let best = null, bestScore = Infinity;
+  for (let i = 0; i < items.length; i++) {
+    if (i === idx) continue;
+    const r = items[i].getBoundingClientRect();
+    const dy = (r.top + r.height / 2) - curY;
+    if (dir === 1 ? dy <= 2 : dy >= -2) continue; // must be strictly below/above
+    const score = Math.abs(dy) * 1000 + Math.abs((r.left + r.width / 2) - curX);
+    if (score < bestScore) { bestScore = score; best = items[i]; }
+  }
+  return best || items[idx];
 },
 
 // ═══════════════════════════════════════════════════════
@@ -1339,6 +2144,7 @@ _setupGifPicker() {
   if (!btn || !picker) return;
 
   this._gifDebounce = null;
+  this._gifTab = 'search';
 
   btn.addEventListener('click', () => {
     if (picker.style.display === 'flex') {
@@ -1350,7 +2156,12 @@ _setupGifPicker() {
     picker.style.display = 'flex';
     searchInput.value = '';
     searchInput.focus();
-    this._loadTrendingGifs();
+    // Re-open on whichever tab was last used this session
+    this._switchGifTab(this._gifTab);
+  });
+
+  picker.querySelectorAll('.gif-tab').forEach(tab => {
+    tab.addEventListener('click', () => this._switchGifTab(tab.dataset.gifTab));
   });
 
   // Close when clicking outside
@@ -1361,10 +2172,15 @@ _setupGifPicker() {
     }
   });
 
-  // Search on typing with debounce
+  // Search on typing with debounce — on the Favorites tab the same box
+  // filters the saved list locally instead of hitting GIPHY.
   searchInput.addEventListener('input', () => {
     clearTimeout(this._gifDebounce);
     const q = searchInput.value.trim();
+    if (this._gifTab === 'favorites') {
+      this._renderGifFavorites(q);
+      return;
+    }
     if (!q) {
       this._loadTrendingGifs();
       return;
@@ -1372,8 +2188,20 @@ _setupGifPicker() {
     this._gifDebounce = setTimeout(() => this._searchGifs(q), 350);
   });
 
-  // Click on a GIF to send it
+  // Star toggles favorite; clicking the GIF itself sends it
   grid.addEventListener('click', (e) => {
+    const star = e.target.closest('.gif-fav-btn');
+    if (star) {
+      const favorited = this._toggleGifFavorite({
+        full: star.dataset.full,
+        tiny: star.dataset.tiny,
+        title: star.dataset.title,
+      });
+      // On the Favorites tab an un-starred GIF should leave the grid
+      if (this._gifTab === 'favorites') this._renderGifFavorites(searchInput.value.trim());
+      else this._paintGifStar(star, favorited);
+      return;
+    }
     const img = e.target.closest('img');
     if (!img || !img.dataset.full) return;
     this._sendGifMessage(img.dataset.full);
@@ -1381,14 +2209,46 @@ _setupGifPicker() {
   });
 },
 
+_switchGifTab(tab) {
+  const picker = document.getElementById('gif-picker');
+  const searchInput = document.getElementById('gif-search-input');
+  if (!picker || !searchInput) return;
+
+  this._gifTab = tab === 'favorites' ? 'favorites' : 'search';
+  picker.querySelectorAll('.gif-tab').forEach(el => {
+    el.classList.toggle('active', el.dataset.gifTab === this._gifTab);
+  });
+  clearTimeout(this._gifDebounce);
+
+  const q = searchInput.value.trim();
+  if (this._gifTab === 'favorites') {
+    searchInput.placeholder = t('gifs.search_favorites');
+    this._renderGifFavorites(q);
+  } else {
+    searchInput.placeholder = t('header.gif_search_placeholder');
+    if (q) this._searchGifs(q);
+    else this._loadTrendingGifs();
+  }
+},
+
+// The proxy reports which provider served the batch — keep the picker
+// footer honest ("Powered by Tenor" / "KLIPY" / "GIPHY").
+_setGifFooter(provider) {
+  if (!provider) return;
+  const label = provider === 'tenor' ? 'Tenor' : provider === 'klipy' ? 'KLIPY' : 'GIPHY';
+  const footer = document.querySelector('.gif-picker-footer');
+  if (footer) footer.textContent = t('gifs.powered_by', { provider: label });
+},
+
 _loadTrendingGifs() {
   const grid = document.getElementById('gif-grid');
-  grid.innerHTML = '<div class="gif-picker-empty">Loading...</div>';
+  grid.innerHTML = `<div class="gif-picker-empty">${t('thread_list.loading')}</div>`;
   fetch('/api/gif/trending?limit=20', {
     headers: { 'Authorization': `Bearer ${this.token}` }
   })
     .then(r => r.json())
     .then(data => {
+      if (this._gifTab === 'favorites') return; // tab switched mid-flight
       if (data.error === 'gif_not_configured') {
         this._showGifSetupGuide(grid);
         return;
@@ -1397,10 +2257,12 @@ _loadTrendingGifs() {
         grid.innerHTML = `<div class="gif-picker-empty">${this._escapeHtml(data.error)}</div>`;
         return;
       }
+      this._setGifFooter(data.provider);
       this._renderGifGrid(data.results || []);
     })
     .catch(() => {
-      grid.innerHTML = '<div class="gif-picker-empty">Failed to load GIFs</div>';
+      if (this._gifTab === 'favorites') return;
+      grid.innerHTML = `<div class="gif-picker-empty">${t('gifs.load_failed')}</div>`;
     });
 },
 
@@ -1412,6 +2274,7 @@ _searchGifs(query) {
   })
     .then(r => r.json())
     .then(data => {
+      if (this._gifTab === 'favorites') return; // tab switched mid-flight
       if (data.error === 'gif_not_configured') {
         this._showGifSetupGuide(grid);
         return;
@@ -1425,9 +2288,11 @@ _searchGifs(query) {
         grid.innerHTML = `<div class="gif-picker-empty">${t('gifs.no_results')}</div>`;
         return;
       }
+      this._setGifFooter(data.provider);
       this._renderGifGrid(results);
     })
     .catch(() => {
+      if (this._gifTab === 'favorites') return;
       grid.innerHTML = `<div class="gif-picker-empty">${t('gifs.search_failed')}</div>`;
     });
 },
@@ -1435,6 +2300,8 @@ _searchGifs(query) {
 _showGifSetupGuide(grid) {
   const isAdmin = this.user && this.user.isAdmin;
   if (isAdmin) {
+    // GIPHY is the supported provider. Tenor is no longer offered here;
+    // an existing tenor_api_key still works on the server if no GIPHY key is set.
     grid.innerHTML = `
       <div class="gif-setup-guide">
         <h3>🎞️ ${t('gifs.setup.title')}</h3>
@@ -1447,13 +2314,13 @@ _showGifSetupGuide(grid) {
           <li>${t('gifs.setup.step_5')}</li>
         </ol>
         <div class="gif-setup-input-row">
-          <input type="text" id="gif-giphy-key-input" placeholder="${t('gifs.setup.key_placeholder')}" spellcheck="false" autocomplete="off" />
-          <button id="gif-giphy-key-save">${t('gifs.setup.save_btn')}</button>
+          <input type="text" id="gif-provider-key-input" placeholder="${t('gifs.setup.key_placeholder')}" spellcheck="false" autocomplete="off" />
+          <button id="gif-provider-key-save">${t('gifs.setup.save_btn')}</button>
         </div>
         <p class="gif-setup-note">💡 ${t('gifs.setup.note')}</p>
       </div>`;
-    const saveBtn = document.getElementById('gif-giphy-key-save');
-    const input = document.getElementById('gif-giphy-key-input');
+    const saveBtn = document.getElementById('gif-provider-key-save');
+    const input = document.getElementById('gif-provider-key-input');
     saveBtn.addEventListener('click', () => {
       const key = input.value.trim();
       if (!key) return;
@@ -1478,13 +2345,88 @@ _renderGifGrid(results) {
   grid.innerHTML = '';
   results.forEach(gif => {
     if (!gif.tiny) return;
+    const full = gif.full || gif.tiny;
+    const item = document.createElement('div');
+    item.className = 'gif-item';
+
     const img = document.createElement('img');
     img.src = gif.tiny;
     img.alt = gif.title || 'GIF';
     img.loading = 'lazy';
-    img.dataset.full = gif.full || gif.tiny;
-    grid.appendChild(img);
+    img.dataset.full = full;
+
+    const star = document.createElement('button');
+    star.type = 'button';
+    star.className = 'gif-fav-btn';
+    star.dataset.full = full;
+    star.dataset.tiny = gif.tiny;
+    star.dataset.title = gif.title || '';
+    this._paintGifStar(star, this._isGifFavorited(full));
+
+    item.append(img, star);
+    grid.appendChild(item);
   });
+},
+
+/** Sync a star button's glyph, state class and tooltip to `favorited`. */
+_paintGifStar(star, favorited) {
+  star.classList.toggle('favorited', favorited);
+  star.textContent = favorited ? '★' : '☆';
+  star.title = favorited ? t('gifs.unfavorite') : t('gifs.favorite');
+  star.setAttribute('aria-label', star.title);
+  star.setAttribute('aria-pressed', String(favorited));
+},
+
+_renderGifFavorites(query = '') {
+  const grid = document.getElementById('gif-grid');
+  const q = query.trim().toLowerCase();
+  let favs = this._getGifFavorites();
+  if (q) favs = favs.filter(g => (g.title || '').toLowerCase().includes(q));
+  if (!favs.length) {
+    grid.innerHTML = `<div class="gif-picker-empty">${q ? t('gifs.no_favorite_matches') : t('gifs.no_favorites')}</div>`;
+    return;
+  }
+  this._renderGifGrid(favs);
+},
+
+_getGifFavorites() {
+  if (this._gifFavorites) return this._gifFavorites;
+  try {
+    const raw = JSON.parse(localStorage.getItem(GIF_FAVORITES_KEY) || '[]');
+    this._gifFavorites = Array.isArray(raw)
+      ? raw.filter(g => g && typeof g.full === 'string' && typeof g.tiny === 'string')
+      : [];
+  } catch {
+    this._gifFavorites = [];
+  }
+  return this._gifFavorites;
+},
+
+_isGifFavorited(full) {
+  return this._getGifFavorites().some(g => g.full === full);
+},
+
+/** Toggle a GIF in the favorites list. Returns its new favorited state. */
+_toggleGifFavorite(gif) {
+  if (!gif || !gif.full || !gif.tiny) return false;
+  const favs = this._getGifFavorites();
+  const idx = favs.findIndex(g => g.full === gif.full);
+  if (idx !== -1) {
+    favs.splice(idx, 1);
+    this._saveGifFavorites();
+    return false;
+  }
+  // Newest first, oldest trimmed once the cap is hit
+  favs.unshift({ full: gif.full, tiny: gif.tiny, title: gif.title || '' });
+  if (favs.length > GIF_FAVORITES_MAX) favs.length = GIF_FAVORITES_MAX;
+  this._saveGifFavorites();
+  return true;
+},
+
+_saveGifFavorites() {
+  try {
+    localStorage.setItem(GIF_FAVORITES_KEY, JSON.stringify(this._gifFavorites || []));
+  } catch { /* quota exceeded — favorites are best-effort */ }
 },
 
 _sendGifMessage(url) {
@@ -1540,7 +2482,7 @@ _showGifSlashResults(query) {
   const picker = document.createElement('div');
   picker.id = 'gif-slash-picker';
   picker.className = 'gif-slash-picker';
-  picker.innerHTML = '<div class="gif-slash-loading">Searching GIFs...</div>';
+  picker.innerHTML = `<div class="gif-slash-loading">${t('gifs.searching')}</div>`;
 
   // Position above the message input
   const inputArea = document.querySelector('.message-input-area');
@@ -1564,12 +2506,12 @@ _showGifSlashResults(query) {
     .then(r => r.json())
     .then(data => {
       if (data.error === 'gif_not_configured') {
-        picker.innerHTML = '<div class="gif-slash-loading">GIF search not configured — an admin needs to set up the GIPHY API key (use the GIF button 🎞️)</div>';
+        picker.innerHTML = `<div class="gif-slash-loading">${t('gifs.setup.unavailable_desc')}</div>`;
         return;
       }
       if (data.error) { picker.innerHTML = `<div class="gif-slash-loading">${this._escapeHtml(data.error)}</div>`; return; }
       const results = data.results || [];
-      if (results.length === 0) { picker.innerHTML = '<div class="gif-slash-loading">No GIFs found</div>'; return; }
+      if (results.length === 0) { picker.innerHTML = `<div class="gif-slash-loading">${t('gifs.no_results')}</div>`; return; }
 
       picker.innerHTML = `<div class="gif-slash-header"><span>/gif ${this._escapeHtml(query)}</span><button class="icon-btn small gif-slash-close">&times;</button></div><div class="gif-slash-grid"></div>`;
       const grid = picker.querySelector('.gif-slash-grid');
@@ -1592,7 +2534,7 @@ _showGifSlashResults(query) {
       });
     })
     .catch(() => {
-      picker.innerHTML = '<div class="gif-slash-loading">GIF search failed</div>';
+      picker.innerHTML = `<div class="gif-slash-loading">${t('gifs.search_failed')}</div>`;
     });
 },
 
@@ -1612,22 +2554,28 @@ _renderPollWidget(msgId, poll) {
     const pct = totalVotes > 0 ? Math.round((count / totalVotes) * 100) : 0;
     const myVote = voters.some(v => v.user_id === myId);
     const voterNames = poll.anonymous ? '' : voters.map(v => this._escapeHtml(v.username)).join(', ');
-    return `<button class="poll-option${myVote ? ' poll-voted' : ''}" data-msg-id="${msgId}" data-option="${i}" title="${voterNames}">
-      <div class="poll-option-bar" style="width:${pct}%"></div>
+    // An option can carry a picture (#5648). It is part of the button, so a
+    // click on it is a vote, not the lightbox.
+    const img = Array.isArray(poll.images) && typeof poll.images[i] === 'string' && /^\/uploads\//.test(poll.images[i])
+      ? `<img class="poll-option-img" src="${this._escapeHtml(poll.images[i])}" alt="" loading="lazy">` : '';
+    return `<button class="poll-option${myVote ? ' poll-voted' : ''}${img ? ' has-image' : ''}" data-msg-id="${msgId}" data-option="${i}" title="${voterNames}">
+      <div class="poll-option-bar" style="width:${pct}%"></div>${img}
       <span class="poll-option-text">${this._escapeHtml(opt)}</span>
       <span class="poll-option-count">${count} (${pct}%)</span>
     </button>`;
   }).join('');
 
   const settings = [];
-  if (poll.multiVote) settings.push('Multiple votes');
-  if (poll.anonymous) settings.push('Anonymous');
+  if (poll.multiVote) settings.push(t('poll.multiple_votes'));
+  if (poll.anonymous) settings.push(t('poll.anonymous'));
   const settingsHtml = settings.length ? `<div class="poll-settings-info">${settings.join(' · ')}</div>` : '';
 
+  // A picture poll can sit in columns (#5648).
+  const cols = Number(poll.columns) > 1 ? Math.min(5, Math.floor(Number(poll.columns))) : 0;
   return `<div class="poll-widget" data-msg-id="${msgId}">
     <div class="poll-question">${this._escapeHtml(poll.question)}</div>
-    <div class="poll-options">${optionsHtml}</div>
-    <div class="poll-footer">${totalVotes} vote${totalVotes !== 1 ? 's' : ''}${settingsHtml ? ' · ' : ''}${settingsHtml}</div>
+    <div class="poll-options${cols ? ' poll-grid' : ''}"${cols ? ` style="--poll-cols:${cols}"` : ''}>${optionsHtml}</div>
+    <div class="poll-footer">${t(totalVotes === 1 ? 'poll.votes_one' : 'poll.votes_other', { count: totalVotes })}${settingsHtml ? ' · ' : ''}${settingsHtml}</div>
   </div>`;
 },
 
@@ -1661,7 +2609,7 @@ _updatePollVotes(messageId, votes, totalVotes) {
   if (footer) {
     const settingsInfo = footer.querySelector('.poll-settings-info');
     const settingsHtml = settingsInfo ? ' · ' + settingsInfo.outerHTML : '';
-    footer.innerHTML = `${totalVotes} vote${totalVotes !== 1 ? 's' : ''}${settingsHtml}`;
+    footer.innerHTML = `${t(totalVotes === 1 ? 'poll.votes_one' : 'poll.votes_other', { count: totalVotes })}${settingsHtml}`;
   }
 
   if (wasAtBottom) this._scrollToBottom(true);
@@ -1688,7 +2636,7 @@ _renderReactions(msgId, reactions) {
     const customMatch = g.emoji.match(/^:([a-zA-Z0-9_-]+):$/);
     let emojiDisplay = g.emoji;
     if (customMatch && this.customEmojis) {
-      const ce = this.customEmojis.find(e => e.name === customMatch[1]);
+      const ce = this._findNamedEmoji(customMatch[1]);
       if (ce) emojiDisplay = `<img src="${this._escapeHtml(ce.url)}" alt=":${this._escapeHtml(ce.name)}:" class="custom-emoji reaction-custom-emoji">`;
     }
     return `<button class="reaction-badge${isOwn ? ' own' : ''}" data-emoji="${this._escapeHtml(g.emoji)}" data-users="${usersJson}" title="${names}">${emojiDisplay} ${g.users.length}</button>`;
@@ -1772,8 +2720,13 @@ _saveQuickEmojis(emojis) {
 },
 
 _showQuickEmojiEditor(picker, msgEl, msgId) {
-  // Remove any existing editor
-  document.querySelectorAll('.quick-emoji-editor').forEach(el => el.remove());
+  // Remove any existing editor AND any open full picker. Both panels carry the
+  // .reaction-full-picker class and both are absolutely positioned at
+  // bottom:100%/right:0 on the same message, so leaving one behind stacks two
+  // 320px panels on the exact same spot — which reads as "the emoji pane
+  // covered everything and I can't reach the slot row". _showFullReactionPicker
+  // already clears both directions; this is the missing mirror of that.
+  document.querySelectorAll('.quick-emoji-editor, .reaction-full-picker').forEach(el => el.remove());
 
   const editor = document.createElement('div');
   editor.className = 'quick-emoji-editor reaction-full-picker';
@@ -1785,7 +2738,7 @@ _showQuickEmojiEditor(picker, msgEl, msgId) {
 
   const hint = document.createElement('p');
   hint.className = 'muted-text';
-  hint.style.cssText = 'font-size:11px;padding:0 8px 6px;margin:0';
+  hint.style.cssText = 'font-size:0.6875rem;padding:0 8px 6px;margin:0';
   hint.textContent = t('emoji.customize_quick_hint');
   editor.appendChild(hint);
 
@@ -1803,7 +2756,7 @@ _showQuickEmojiEditor(picker, msgEl, msgId) {
       // Check for custom emoji
       const customMatch = emoji.match(/^:([a-zA-Z0-9_-]+):$/);
       if (customMatch && this.customEmojis) {
-        const ce = this.customEmojis.find(e => e.name === customMatch[1]);
+        const ce = this._findNamedEmoji(customMatch[1]);
         if (ce) {
           slot.innerHTML = `<img src="${this._escapeHtml(ce.url)}" alt="${this._escapeHtml(emoji)}" class="custom-emoji" style="width:20px;height:20px">`;
           slot.title = `:${ce.name}:`;
@@ -1812,7 +2765,7 @@ _showQuickEmojiEditor(picker, msgEl, msgId) {
           slot.title = emoji;
         }
       } else {
-        slot.textContent = emoji;
+        slot.textContent = this._toneEmoji(emoji);
         slot.title = (this.emojiNames && this.emojiNames[emoji]) ? this.emojiNames[emoji] : emoji;
       }
       slot.addEventListener('click', (e) => {
@@ -1845,7 +2798,9 @@ _showQuickEmojiEditor(picker, msgEl, msgId) {
       emojis.forEach(emoji => {
         const btn = document.createElement('button');
         btn.className = 'reaction-full-btn';
-        btn.textContent = emoji;
+        const named = this._findNamedEmoji((typeof emoji === 'string' && (emoji.match(/^:([a-zA-Z0-9_-]+):$/) || [])[1]) || '');
+        if (named) btn.innerHTML = `<img src="${this._escapeHtml(named.url)}" alt="${this._escapeHtml(emoji)}" class="custom-emoji" style="width:22px;height:22px">`;
+        else btn.textContent = this._toneEmoji(emoji);
         btn.addEventListener('click', (e) => {
           e.stopPropagation();
           if (activeSlot !== null) {
@@ -1899,6 +2854,34 @@ _showQuickEmojiEditor(picker, msgEl, msgId) {
   editor.appendChild(doneBtn);
 
   msgEl.appendChild(editor);
+
+  // Placement parity with _showReactionPicker. Without this the editor is
+  // positioned by CSS alone (always above the message), so opening it on a
+  // message near the top of the viewport — or inside a PiP panel, which clips
+  // overflow — pushes the slot row off-screen.
+  const pipParent = msgEl.closest('.dm-pip-panel, .thread-panel.pip');
+  if (pipParent) {
+    const msgRect = msgEl.getBoundingClientRect();
+    document.body.appendChild(editor);
+    editor.style.position = 'fixed';
+    editor.style.zIndex = '100021';
+    requestAnimationFrame(() => {
+      const r = editor.getBoundingClientRect();
+      let top = msgRect.top - r.height - 6;
+      if (top < 4) top = Math.min(msgRect.bottom + 6, window.innerHeight - r.height - 8);
+      editor.style.top = Math.max(4, top) + 'px';
+      editor.style.right = Math.max(8, window.innerWidth - msgRect.right) + 'px';
+      editor.style.left = 'auto';
+      editor.style.bottom = 'auto';
+    });
+  } else {
+    requestAnimationFrame(() => {
+      const r = editor.getBoundingClientRect();
+      const container = msgEl.closest('#thread-messages, #messages, #dm-pip-messages');
+      const containerTop = container ? container.getBoundingClientRect().top : 0;
+      if (r.top < containerTop + 4) editor.classList.add('flip-below');
+    });
+  }
 },
 
 _showReactionPicker(msgEl, msgId) {
@@ -1938,8 +2921,9 @@ _showReactionPicker(msgEl, msgId) {
     btn.className = 'reaction-pick-btn';
     // Check for custom emoji
     const customMatch = emoji.match(/^:([a-zA-Z0-9_-]+):$/);
+    const value = this._toneEmoji(emoji); // custom emoji pass through unchanged
     if (customMatch && this.customEmojis) {
-      const ce = this.customEmojis.find(e => e.name === customMatch[1]);
+      const ce = this._findNamedEmoji(customMatch[1]);
       if (ce) {
         btn.innerHTML = `<img src="${this._escapeHtml(ce.url)}" alt="${this._escapeHtml(emoji)}" class="custom-emoji" style="width:20px;height:20px">`;
         btn.title = `:${ce.name}:`;
@@ -1948,11 +2932,11 @@ _showReactionPicker(msgEl, msgId) {
         btn.title = emoji;
       }
     } else {
-      btn.textContent = emoji;
+      btn.textContent = value;
       btn.title = (this.emojiNames && this.emojiNames[emoji]) ? this.emojiNames[emoji] : emoji;
     }
     btn.addEventListener('click', () => {
-      this.socket.emit('add-reaction', { messageId: msgId, emoji });
+      this.socket.emit('add-reaction', { messageId: msgId, emoji: value });
       picker.remove();
       msgEl.classList.remove('showing-picker');
       if (this._reactionPickerClose) {
@@ -2070,10 +3054,7 @@ _showFullReactionPicker(msgEl, msgId, quickPicker) {
     const lowerFilter = filter ? filter.toLowerCase() : '';
     for (const [category, emojis] of Object.entries(this.emojiCategories)) {
       const matching = lowerFilter
-        ? emojis.filter(e => {
-            const names = this.emojiNames[e] || '';
-            return e.includes(lowerFilter) || names.toLowerCase().includes(lowerFilter) || category.toLowerCase().includes(lowerFilter);
-          })
+        ? emojis.filter(e => this._emojiSearchMatch(e, this.emojiNames[e] || '', filter) || category.toLowerCase().includes(lowerFilter))
         : emojis;
       if (matching.length === 0) continue;
 
@@ -2087,10 +3068,12 @@ _showFullReactionPicker(msgEl, msgId, quickPicker) {
       matching.forEach(emoji => {
         const btn = document.createElement('button');
         btn.className = 'reaction-full-btn';
-        btn.textContent = emoji;
-        btn.title = this.emojiNames[emoji] || '';
+        const named = this._findNamedEmoji((typeof emoji === 'string' && (emoji.match(/^:([a-zA-Z0-9_-]+):$/) || [])[1]) || '');
+        const value = this._toneEmoji(emoji); // custom emoji pass through unchanged
+        if (named) { btn.innerHTML = `<img src="${this._escapeHtml(named.url)}" alt="${this._escapeHtml(emoji)}" title="${this._escapeHtml(emoji)}" class="custom-emoji">`; }
+        else { btn.textContent = value; btn.title = this.emojiNames[emoji] || ''; }
         btn.addEventListener('click', () => {
-          this.socket.emit('add-reaction', { messageId: msgId, emoji });
+          this.socket.emit('add-reaction', { messageId: msgId, emoji: value });
           panel.remove();
           quickPicker.remove();
           msgEl.classList.remove('showing-picker');
@@ -2181,8 +3164,19 @@ _showFullReactionPicker(msgEl, msgId, quickPicker) {
 // THREADS
 // ═══════════════════════════════════════════════════════
 
-_renderThreadPreview(parentId, thread) {
-  if (!thread || !thread.count) return '';
+_renderThreadPreview(parentId, thread, opts = {}) {
+  if (!thread) return '';
+  if (!thread.count) {
+    // A forum topic with no replies yet gets the same button as an
+    // invitation, so a fresh topic reads as a topic rather than a message.
+    if (!opts.forum) return '';
+    return `
+    <button class="thread-preview thread-preview-empty" data-thread-parent="${parentId}">
+      <span class="thread-preview-count">${t('thread_runtime.reply_to_topic')}</span>
+      <span class="thread-preview-arrow">›</span>
+    </button>
+  `;
+  }
   const participantAvatars = (thread.participants || []).map(p => {
     if (p.avatar) {
       return `<img class="thread-participant-avatar" src="${this._escapeHtml(p.avatar)}" alt="${this._escapeHtml(p.username)}" title="${this._escapeHtml(p.username)}">`;
@@ -2196,7 +3190,7 @@ _renderThreadPreview(parentId, thread) {
   return `
     <button class="thread-preview" data-thread-parent="${parentId}">
       ${participantAvatars}
-      <span class="thread-preview-count">${thread.count} ${thread.count === 1 ? 'Reply' : 'Replies'}</span>
+      <span class="thread-preview-count">${t(thread.count === 1 ? 'thread_runtime.reply_one' : 'thread_runtime.reply_other', { count: thread.count })}</span>
       <span class="thread-preview-time">${timeAgo}</span>
       <span class="thread-preview-arrow">›</span>
     </button>
@@ -2207,12 +3201,12 @@ _relativeTime(isoStr) {
   if (!isoStr) return '';
   const diff = Date.now() - new Date(isoStr).getTime();
   const mins = Math.floor(diff / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
+  if (mins < 1) return t('thread_runtime.just_now');
+  if (mins < 60) return t('thread_runtime.minutes_ago', { count: mins });
   const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return t('thread_runtime.hours_ago', { count: hours });
   const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+  return t('thread_runtime.days_ago', { count: days });
 },
 
 _setThreadParentHeader(meta = {}) {
@@ -2220,7 +3214,7 @@ _setThreadParentHeader(meta = {}) {
   const nameEl = document.getElementById('thread-parent-name');
   if (!wrap || !nameEl) return;
 
-  const baseUsername = (meta.username || '').trim() || 'Thread starter';
+  const baseUsername = (meta.username || '').trim() || t('thread_runtime.starter');
   // Apply the local user's nickname assignment so threads match the rest of
   // the UI (members list, message author, mentions). Falls back to the
   // server-provided display name when no nickname is set. (#5291)
@@ -2245,7 +3239,7 @@ _setThreadParentHeader(meta = {}) {
 _setThreadReply(msgEl, msgId) {
   const author = msgEl.querySelector('.thread-msg-author')?.textContent
     || this._getNickname?.(parseInt(msgEl.dataset.userId, 10), msgEl.dataset.username)
-    || msgEl.dataset.username || 'someone';
+    || msgEl.dataset.username || t('voice.someone');
   const rawContent = msgEl.dataset.rawContent || msgEl.querySelector('.thread-msg-content')?.textContent || '';
   const preview = rawContent.length > 70 ? rawContent.substring(0, 70) + '…' : rawContent;
   this._threadReplyingTo = { id: msgId, username: author, content: rawContent };
@@ -2254,7 +3248,7 @@ _setThreadReply(msgEl, msgId) {
   const text = document.getElementById('thread-reply-preview-text');
   if (!bar || !text) return;
   bar.style.display = 'flex';
-  text.innerHTML = `Replying to <strong>${this._escapeHtml(author)}</strong>: ${this._escapeHtml(preview)}`;
+  text.innerHTML = t('thread_runtime.replying_to', { author: this._escapeHtml(author), preview: this._escapeHtml(preview) });
 
   const input = document.getElementById('thread-input');
   if (input) input.focus();
@@ -2270,9 +3264,9 @@ _quoteThreadMessage(msgEl) {
   const rawContent = msgEl.dataset.rawContent || msgEl.querySelector('.thread-msg-content')?.textContent || '';
   const author = msgEl.querySelector('.thread-msg-author')?.textContent
     || this._getNickname?.(parseInt(msgEl.dataset.userId, 10), msgEl.dataset.username)
-    || msgEl.dataset.username || 'someone';
+    || msgEl.dataset.username || t('voice.someone');
   const quotedLines = rawContent.split('\n').map(l => `> ${l}`).join('\n');
-  const quoteText = `> @${author} wrote:\n${quotedLines}\n`;
+  const quoteText = `${t('thread_runtime.wrote', { author })}\n${quotedLines}\n`;
 
   const input = document.getElementById('thread-input');
   if (!input) return;
@@ -2338,9 +3332,7 @@ _updateThreadMentionsPill() {
   }
   pill.style.display = '';
   cnt.textContent = String(list.length);
-  pill.title = list.length === 1
-    ? `1 mention in a thread — click to open`
-    : `${list.length} mentions in threads — click to open the most recent`;
+  pill.title = t(list.length === 1 ? 'thread_runtime.mention_one' : 'thread_runtime.mention_other', { count: list.length });
 },
 _openMostRecentThreadMention() {
   if (!this._threadMentions) return;
@@ -2400,14 +3392,50 @@ _openDMPiP(code) {
   // Title: partner name
   const partnerName = ch.dm_target ? this._getNickname(ch.dm_target.id, ch.dm_target.username) : 'DM';
   const titleEl = document.getElementById('dm-pip-title');
-  if (titleEl) titleEl.textContent = ch.is_self_dm ? `📝 ${partnerName} (you)` : `@ ${partnerName}`;
+  if (titleEl) titleEl.textContent = ch.is_self_dm ? `📝 ${t('dm_runtime.self_title', { name: partnerName })}` : `@ ${partnerName}`;
 
-  // Header avatar — pulled from the partner's online presence (best effort)
+  this._refreshDMPipHeader(ch, partnerName);
+  // Ask for the DM's own online list so the header is right straight away,
+  // not only after the next presence change (#5574).
+  this.socket.emit('request-online-users', { code });
+
+  // Banner background: use server banner as a subtle backdrop
+  const bannerEl = document.getElementById('dm-pip-banner');
+  const bannerUrl = this.serverSettings && this.serverSettings.server_banner;
+  if (bannerEl) {
+    if (bannerUrl) {
+      bannerEl.style.backgroundImage = `url("${bannerUrl.replace(/"/g, '\\"')}")`;
+      panel.classList.remove('no-banner');
+    } else {
+      bannerEl.style.backgroundImage = '';
+      panel.classList.add('no-banner');
+    }
+  }
+  this._openDMPiPBody(ch, code, panel);
+},
+
+// Header avatar and status dot for the open DM PiP. Runs when the panel opens
+// and again on every presence broadcast (#5574): it used to render once, from
+// whatever the online list held at that moment, so a PiP opened before the
+// list arrived, or whose partner came online later, kept the grey dot and the
+// initial for as long as the panel stayed open.
+_refreshDMPipHeader(ch, partnerName) {
+  if (!ch) {
+    const code = this._activeDMPip;
+    ch = code ? (this.channels || []).find(c => c.code === code) : null;
+    if (!ch) return;
+  }
+  if (!partnerName) partnerName = ch.dm_target ? this._getNickname(ch.dm_target.id, ch.dm_target.username) : 'DM';
   const avatarWrap = document.getElementById('dm-pip-avatar-wrap');
   if (avatarWrap) {
     const partnerId = ch.dm_target && ch.dm_target.id;
-    const onlinePartner = partnerId && this._lastOnlineUsers
-      ? this._lastOnlineUsers.find(u => u.id === partnerId)
+    // The DM's own list first: the list for the channel on screen only has
+    // the partner in it when they happen to share that channel (#5574).
+    const dmList = this._onlineByChannel && this._onlineByChannel.get(ch.code);
+    const onlinePartner = partnerId
+      ? ((dmList && dmList.find(u => u.id === partnerId))
+        || (this._lastOnlineUsers ? this._lastOnlineUsers.find(u => u.id === partnerId) : null)
+        || null)
       : null;
     const avatarUrl = (onlinePartner && onlinePartner.avatar) || (ch.dm_target && ch.dm_target.avatar);
     const shape = (onlinePartner && onlinePartner.avatarShape)
@@ -2427,14 +3455,14 @@ _openDMPiP(code) {
       statusClass = s === 'dnd' ? 'dnd'
         : s === 'away' ? 'away'
         : s === 'invisible' ? 'invisible'
-        : (onlinePartner.online === false ? 'away' : '');
+        : (onlinePartner.online === false ? 'offline' : '');
     } else {
-      statusClass = 'away'; // partner not in online list → treat as offline/away
+      statusClass = 'offline'; // partner not in online list
     }
-    const statusLabel = statusClass === 'dnd' ? 'Do Not Disturb'
-      : statusClass === 'away' ? 'Offline / Away'
-      : statusClass === 'invisible' ? 'Invisible'
-      : 'Online';
+    const statusLabel = statusClass === 'dnd' ? t('app.profile.dnd')
+      : (statusClass === 'away' || statusClass === 'offline') ? t('dm_runtime.offline_away')
+      : statusClass === 'invisible' ? t('app.profile.invisible')
+      : t('app.profile.online');
     const statusDot = `<span class="dm-pip-status-dot${statusClass ? ' ' + statusClass : ''}" title="${this._escapeHtml(statusLabel)}"></span>`;
     if (avatarUrl) {
       avatarWrap.style.backgroundColor = '';
@@ -2446,19 +3474,10 @@ _openDMPiP(code) {
       avatarWrap.innerHTML = `<span class="dm-pip-avatar-initial">${this._escapeHtml(initial)}</span>${statusDot}`;
     }
   }
+},
 
-  // Banner background — use server banner as a subtle backdrop
-  const bannerEl = document.getElementById('dm-pip-banner');
-  const bannerUrl = this.serverSettings && this.serverSettings.server_banner;
-  if (bannerEl) {
-    if (bannerUrl) {
-      bannerEl.style.backgroundImage = `url("${bannerUrl.replace(/"/g, '\\"')}")`;
-      panel.classList.remove('no-banner');
-    } else {
-      bannerEl.style.backgroundImage = '';
-      panel.classList.add('no-banner');
-    }
-  }
+// The rest of opening a DM PiP: everything after the header and banner.
+_openDMPiPBody(ch, code, panel) {
 
   // Restore geometry from localStorage
   this._applyDMPiPGeometry(panel);
@@ -2467,7 +3486,7 @@ _openDMPiP(code) {
 
   // Clear messages and request fresh
   const msgsEl = document.getElementById('dm-pip-messages');
-  if (msgsEl) msgsEl.innerHTML = '<div class="dm-pip-loading">Loading…</div>';
+  if (msgsEl) msgsEl.innerHTML = `<div class="dm-pip-loading">${t('thread_list.loading')}</div>`;
   // E2E: ensure partner key is loaded before history arrives so messages decrypt.
   // For self-DMs the "partner" is the user themselves, so seed our own public
   // key directly instead of round-tripping through the server. Avoids any
@@ -2488,7 +3507,7 @@ _openDMPiP(code) {
   this._dmPipLoadingTimer = setTimeout(() => {
     const stillLoading = document.querySelector('#dm-pip-messages .dm-pip-loading');
     if (stillLoading && this._activeDMPip === code) {
-      stillLoading.textContent = 'No messages yet.';
+      stillLoading.textContent = t('dm_runtime.no_messages');
     }
   }, 6000);
 
@@ -2613,6 +3632,9 @@ _appendDMPiPMessage(msg) {
   try { this._setupVideos?.(el); } catch {}
   try { this._decryptE2EImages?.(el); } catch {}
   try { this._decryptE2EFiles?.(el); } catch {}
+  // DM PiP is unambiguously a DM view, so enforce directly rather than
+  // routing through _isDmContainer. (#5483)
+  try { this._enforceDmLinkPolicy?.(el); } catch {}
   try { this._wireBurnMessages?.(el); } catch {}
   if (wasAtBottom) list.scrollTop = list.scrollHeight;
 },
@@ -2631,6 +3653,10 @@ _renderDMPiPHistory(messages) {
   try { this._setupVideos?.(list); } catch {}
   try { this._decryptE2EImages?.(list); } catch {}
   try { this._decryptE2EFiles?.(list); } catch {}
+  // DM PiP is unambiguously a DM view, so enforce directly rather than
+  // routing through _isDmContainer. (#5483)
+  try { this._enforceDmLinkPolicy?.(list); } catch {}
+  try { this._maybeShowDmSafetyNotice?.(list); } catch {}
   try { this._wireBurnMessages?.(list); } catch {}
   list.scrollTop = list.scrollHeight;
 },
@@ -2645,7 +3671,7 @@ _setDMPiPReply(msgEl, msgId) {
       prev = prev.previousElementSibling;
     }
   }
-  author = author || 'someone';
+  author = author || t('voice.someone');
   const content = msgEl.querySelector('.message-content')?.textContent || '';
   const preview = content.length > 60 ? content.substring(0, 60) + '…' : content;
   this._dmPipReplyingTo = { id: msgId, username: author, content };
@@ -2653,7 +3679,7 @@ _setDMPiPReply(msgEl, msgId) {
   if (bar) {
     bar.style.display = 'flex';
     const txt = document.getElementById('dm-pip-reply-preview-text');
-    if (txt) txt.innerHTML = `Replying to <strong>${this._escapeHtml(author)}</strong>: ${this._escapeHtml(preview)}`;
+    if (txt) txt.innerHTML = t('thread_runtime.replying_to', { author: this._escapeHtml(author), preview: this._escapeHtml(preview) });
   }
   document.getElementById('dm-pip-input')?.focus();
 },
@@ -2675,9 +3701,9 @@ _quoteDMPiPMessage(msgEl) {
       prev = prev.previousElementSibling;
     }
   }
-  author = author || 'someone';
+  author = author || t('voice.someone');
   const quotedLines = rawContent.split('\n').map(l => `> ${l}`).join('\n');
-  const quoteText = `> @${author} wrote:\n${quotedLines}\n`;
+  const quoteText = `${t('thread_runtime.wrote', { author })}\n${quotedLines}\n`;
   const input = document.getElementById('dm-pip-input');
   if (!input) return;
   input.value = input.value ? `${input.value}\n${quoteText}` : quoteText;
@@ -2729,24 +3755,36 @@ _sendDMPiPMessage() {
           unflip:     () => `${arg ? arg + ' ' : ''}┬─┬ ノ( ゜-゜ノ)`,
           lenny:      () => `${arg ? arg + ' ' : ''}( ͡° ͜ʖ ͡°)`,
           disapprove: () => `${arg ? arg + ' ' : ''}ಠ_ಠ`,
-          bbs:        () => `🕐 ${displayName} will be back soon`,
+          bbs:        () => t('commands.output.bbs', { name: displayName }),
           boobs:      () => `( . Y . )`,
           butt:       () => `( . )( . )`,
-          brb:        () => `⏳ ${displayName} will be right back`,
-          afk:        () => `💤 ${displayName} is away from keyboard`,
+          brb:        () => t('commands.output.brb', { name: displayName }),
+          afk:        () => t('commands.output.afk', { name: displayName }),
           me:         () => arg ? `_${displayName} ${arg}_` : null,
-          flip:       () => `🪙 ${displayName} flipped a coin: **${Math.random() < 0.5 ? 'Heads' : 'Tails'}**!`,
+          flip:       () => t('commands.output.flip', {
+            name: displayName,
+            side: t(Math.random() < 0.5 ? 'commands.output.heads' : 'commands.output.tails'),
+          }),
           roll:       () => {
             const m = (arg || '1d6').match(/^(\d{1,2})?d(\d{1,4})$/i);
-            if (!m) return `🎲 ${displayName} rolled: **${Math.floor(Math.random() * 6) + 1}**`;
+            if (!m) return t('commands.output.roll_simple', {
+              name: displayName,
+              result: Math.floor(Math.random() * 6) + 1,
+            });
             const count = Math.min(parseInt(m[1] || '1'), 20);
             const sides = Math.min(parseInt(m[2]), 1000);
             const rolls = Array.from({ length: count }, () => Math.floor(Math.random() * sides) + 1);
             const total = rolls.reduce((a, b) => a + b, 0);
-            return `🎲 ${displayName} rolled ${count}d${sides}: [${rolls.join(', ')}] = **${total}**`;
+            return t('commands.output.roll', {
+              name: displayName,
+              count,
+              sides,
+              rolls: rolls.join(', '),
+              total,
+            });
           },
-          hug:        () => arg ? `🤗 ${displayName} hugs ${arg}` : null,
-          wave:       () => `👋 ${displayName} waves${arg ? ' ' + arg : ''}`,
+          hug:        () => arg ? t('commands.output.hug', { name: displayName, target: arg }) : null,
+          wave:       () => t('commands.output.wave', { name: displayName, text: arg ? ` ${arg}` : '' }),
         };
         if (clientSlash[cmd]) {
           const transformed = clientSlash[cmd]();
@@ -2783,6 +3821,9 @@ _openThread(parentId) {
   this._activeThreadParent = parentId;
   // Clear any pending thread mentions for this thread/channel
   this._clearThreadMentionsForParent(this.currentChannel, parentId);
+  // The server records the read position when it serves the thread; drop the
+  // forum card's dot right away rather than on the next reload (#5641).
+  if (this._forumActive && this._forumMarkTopicRead) this._forumMarkTopicRead(parentId);
   const panel = document.getElementById('thread-panel');
   if (!panel) return;
   panel.style.display = 'flex';
@@ -2794,8 +3835,8 @@ _openThread(parentId) {
 
   // Update header
   const msgEl = document.querySelector(`[data-msg-id="${parentId}"]`);
-  const author = msgEl?.querySelector('.message-author')?.textContent || 'Thread starter';
-  document.getElementById('thread-panel-title').textContent = 'Thread';
+  const author = msgEl?.querySelector('.message-author')?.textContent || t('thread_runtime.starter');
+  document.getElementById('thread-panel-title').textContent = t('msg_toolbar.thread');
   const parentPreview = msgEl?.querySelector('.message-content')?.textContent || '';
   document.getElementById('thread-parent-preview').textContent = parentPreview.length > 120 ? parentPreview.substring(0, 120) + '…' : parentPreview;
 
@@ -2806,6 +3847,9 @@ _openThread(parentId) {
   const parentUserIdRaw = msgEl?.dataset?.userId;
   const parentUserId = parentUserIdRaw ? parseInt(parentUserIdRaw, 10) : null;
   this._setThreadParentHeader({ userId: parentUserId, username: author, avatar, avatarShape });
+  // A forum topic opens across the chat column with a title bar; this runs
+  // after the header above so the bar's title is what shows (#5659).
+  this._forumApplyThreadChrome?.(parentId);
 
   // Focus input
   const input = document.getElementById('thread-input');
@@ -2820,7 +3864,7 @@ _setThreadPiPEnabled(enabled) {
   const isOn = !!enabled;
   panel.classList.toggle('pip', isOn);
   pipBtn.textContent = isOn ? '▣' : '⧉';
-  pipBtn.title = isOn ? 'Dock thread panel' : 'Pop out thread (PiP)';
+  pipBtn.title = t(isOn ? 'thread_runtime.dock_panel' : 'thread_runtime.pop_out');
   pipBtn.setAttribute('aria-pressed', isOn ? 'true' : 'false');
   localStorage.setItem('haven_thread_panel_pip', isOn ? '1' : '0');
 
@@ -2874,25 +3918,36 @@ _closeThread() {
     panel.style.display = 'none';
     panel.dataset.parentId = '';
   }
+  this._forumApplyThreadChrome?.(null);
 },
 
 _sendThreadMessage() {
   const input = document.getElementById('thread-input');
   if (!input) return;
   const content = input.value.trim();
-  if (!content) return;
   const parentId = this._activeThreadParent;
   if (!parentId) return;
+  const hasPending = !!(this._threadPending && this._threadPending.length);
+  // Nothing to send — no text and no held attachments.
+  if (!content && !hasPending) return;
   const replyTo = this._threadReplyingTo ? this._threadReplyingTo.id : null;
 
-  this.socket.emit('send-thread-message', { parentId, content, replyTo }, (resp) => {
-    if (resp && resp.error) {
-      this._showToast(resp.error, 'error');
-      return;
-    }
-    this._clearThreadReply();
-  });
-  input.value = '';
+  if (content) {
+    this.socket.emit('send-thread-message', { parentId, content, replyTo }, (resp) => {
+      if (resp && resp.error) {
+        this._showToast(resp.error, 'error');
+        return;
+      }
+      this._clearThreadReply();
+    });
+    input.value = '';
+  }
+
+  // Flush any pasted/dropped attachments that were held until now.
+  if (hasPending) {
+    this._flushThreadPending?.(parentId);
+    if (!content) this._clearThreadReply();
+  }
 },
 
 _appendThreadMessage(msg) {
@@ -2922,12 +3977,12 @@ _appendThreadMessage(msg) {
   const iEdit = iconPair('✏️', '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20l4.5-1 9-9-3.5-3.5-9 9L4 20z" stroke-width="1.8" stroke-linejoin="round"></path><path d="M13.5 6.5l3.5 3.5" stroke-width="1.8" stroke-linecap="round"></path></svg>');
   const iDelete = iconPair('🗑️', '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14" stroke-width="1.8" stroke-linecap="round"></path><path d="M9 7V5h6v2" stroke-width="1.8" stroke-linecap="round"></path><path d="M7 7l1 12h8l1-12" stroke-width="1.8" stroke-linejoin="round"></path></svg>');
   const iMore = iconPair('⋯', '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="1.6" fill="currentColor" stroke="none"></circle><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"></circle><circle cx="18" cy="12" r="1.6" fill="currentColor" stroke="none"></circle></svg>');
-  const threadCoreToolbarBtns = `<button data-thread-action="react" title="React" aria-label="React">${iReact}</button><button data-thread-action="reply" title="Reply">${iReply}</button><button data-thread-action="quote" title="Quote">${iQuote}</button>`;
+  const threadCoreToolbarBtns = `<button data-thread-action="react" title="${t('msg_toolbar.react')}" aria-label="${t('msg_toolbar.react')}">${iReact}</button><button data-thread-action="reply" title="${t('msg_toolbar.reply')}">${iReply}</button><button data-thread-action="quote" title="${t('msg_toolbar.quote')}">${iQuote}</button>`;
   let threadOverflowToolbarBtns = '';
-  if (canEdit) threadOverflowToolbarBtns += `<button data-thread-action="edit" title="Edit">${iEdit}</button>`;
-  if (canDelete) threadOverflowToolbarBtns += `<button data-thread-action="delete" title="Delete">${iDelete}</button>`;
+  if (canEdit) threadOverflowToolbarBtns += `<button data-thread-action="edit" title="${t('msg_toolbar.edit')}">${iEdit}</button>`;
+  if (canDelete) threadOverflowToolbarBtns += `<button data-thread-action="delete" title="${t('msg_toolbar.delete')}">${iDelete}</button>`;
   const threadOverflowHtml = threadOverflowToolbarBtns
-    ? `<div class="thread-msg-more"><button class="thread-msg-more-btn" type="button" aria-label="More actions">${iMore}</button><div class="thread-msg-overflow">${threadOverflowToolbarBtns}</div></div>`
+    ? `<div class="thread-msg-more"><button class="thread-msg-more-btn" type="button" aria-label="${t('app.actions.message_actions')}">${iMore}</button><div class="thread-msg-overflow">${threadOverflowToolbarBtns}</div></div>`
     : '';
 
   // Group consecutive replies from the same author (within 5 min, no reply
@@ -2959,7 +4014,7 @@ _appendThreadMessage(msg) {
   if (msg.avatar) el.dataset.avatar = msg.avatar;
   if (msg.persona_id) el.dataset.personaId = String(msg.persona_id);
   if (threadCompact) {
-    const shortTime = new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const shortTime = this._fmtTime(msg.created_at);
     el.innerHTML = `
       <div class="thread-msg-row">
         <div class="thread-msg-avatar thread-msg-compact-spacer"><span class="thread-compact-time">${this._escapeHtml(shortTime)}</span></div>
@@ -2995,8 +4050,11 @@ _appendThreadMessage(msg) {
     `;
   }
   container.appendChild(el);
+  // Link cards in threads, the same as in the channel (#5620).
+  this._fetchLinkPreviews(el);
   try { this._decryptE2EImages?.(el); } catch {}
   try { this._decryptE2EFiles?.(el); } catch {}
+  try { if (this._isDmContainer(el)) this._enforceDmLinkPolicy?.(el); } catch {}
   try { this._setupVideos?.(el); } catch {}
   container.scrollTop = container.scrollHeight;
 },
@@ -3048,8 +4106,10 @@ _promoteThreadCompactToFull(compactEl) {
 _updateThreadPreview(parentId, thread) {
   const msgEl = document.querySelector(`[data-msg-id="${parentId}"]`);
   if (!msgEl) return;
+  if (msgEl.classList.contains('forum-topic')) { this._forumBump && this._forumBump(parentId, thread); return; }
   const oldPreview = msgEl.querySelector('.thread-preview');
-  const newHtml = this._renderThreadPreview(parentId, thread);
+  const ch = this.channels && this.channels.find(c => c.code === this.currentChannel);
+  const newHtml = this._renderThreadPreview(parentId, thread, { forum: !!(ch && ch.is_forum) });
   if (oldPreview) {
     oldPreview.outerHTML = newHtml;
   } else if (newHtml) {
@@ -3080,6 +4140,15 @@ _renderReplyBanner(replyCtx) {
 },
 
 _setReply(msgEl, msgId) {
+  // In a forum a reply to a topic belongs in the topic's thread: that is what
+  // bumps it, and it keeps the answer under the question instead of posting
+  // a second topic that quotes the first. (#144)
+  const forumCh = this.channels && this.channels.find(c => c.code === this.currentChannel);
+  if (forumCh && forumCh.is_forum && msgEl && msgEl.closest && msgEl.closest('#messages')) {
+    this._clearReply();
+    this._openThread(msgId);
+    return;
+  }
   // Get message info — works for both full messages and compact messages
   let author = msgEl.querySelector('.message-author')?.textContent;
   if (!author) {
@@ -3091,7 +4160,7 @@ _setReply(msgEl, msgId) {
       prev = prev.previousElementSibling;
     }
   }
-  author = author || 'someone';
+  author = author || t('voice.someone');
   const content = msgEl.querySelector('.message-content')?.textContent || '';
   const preview = content.length > 60 ? content.substring(0, 60) + '…' : content;
 
@@ -3100,7 +4169,7 @@ _setReply(msgEl, msgId) {
   const bar = document.getElementById('reply-bar');
   bar.style.display = 'flex';
   document.getElementById('reply-preview-text').innerHTML =
-    `Replying to <strong>${this._escapeHtml(author)}</strong>: ${this._escapeHtml(preview)}`;
+    t('thread_runtime.replying_to', { author: this._escapeHtml(author), preview: this._escapeHtml(preview) });
   document.getElementById('message-input').focus();
 },
 
@@ -3123,11 +4192,11 @@ _quoteMessage(msgEl) {
       prev = prev.previousElementSibling;
     }
   }
-  author = author || 'someone';
+  author = author || t('voice.someone');
 
   // Build the blockquote text — each line prefixed with >
   const quotedLines = rawContent.split('\n').map(l => `> ${l}`).join('\n');
-  const quoteText = `> @${author} wrote:\n${quotedLines}\n`;
+  const quoteText = `${t('thread_runtime.wrote', { author })}\n${quotedLines}\n`;
 
   const input = document.getElementById('message-input');
   // If there's already text, add a newline before the quote
@@ -3170,14 +4239,23 @@ _startEditMessage(msgEl, msgId) {
   textarea.value = rawText;
   textarea.rows = 1;
   textarea.maxLength = parseInt(this.serverSettings?.max_message_chars) || 2000;
+  // The same drag bar the composer has, so a long message can be pulled
+  // open while editing it. It sits under the box, and dragging it down makes
+  // the box taller, since the message above it may be at the very top of
+  // the chat with nowhere to drag up to (#5662).
+  const grip = document.createElement('div');
+  grip.className = 'pip-input-resizer edit-resizer';
+  grip.setAttribute('aria-hidden', 'true');
   contentEl.appendChild(textarea);
+  contentEl.appendChild(grip);
+  this._bindInputResizer?.(grip);
 
   // Track active edit textarea for emoji picker redirection
   this._activeEditTextarea = textarea;
 
   const btnRow = document.createElement('div');
   btnRow.className = 'edit-actions';
-  btnRow.innerHTML = `<button class="edit-emoji-btn" title="${t('app.input_bar.emoji_btn') || 'Emoji'}">😀</button><button class="edit-save-btn">${t('modals.common.save')}</button><button class="edit-cancel-btn">${t('modals.common.cancel')}</button>`;
+  btnRow.innerHTML = `<button class="edit-emoji-btn" title="${t('app.input_bar.emoji_btn')}">😀</button><button class="edit-save-btn">${t('modals.common.save')}</button><button class="edit-cancel-btn">${t('modals.common.cancel')}</button>`;
   contentEl.appendChild(btnRow);
 
   // Emoji button in edit bar opens the picker
@@ -3213,7 +4291,20 @@ _startEditMessage(msgEl, msgId) {
     e.stopPropagation();
     e.preventDefault();
     let newContent = textarea.value.trim();
-    if (!newContent) return cancel();
+    if (!newContent) {
+      // Discord-style: clearing the whole message and confirming the edit
+      // offers to delete the message rather than silently cancelling it.
+      // Enter confirms the prompt via the shared confirm modal.
+      cancel();
+      if (await this._showConfirmModal(t('confirm.delete_message'), '', { danger: true, confirmLabel: t('msg_toolbar.delete') })) {
+        const pip = msgEl.closest('#dm-pip-messages') ? this._activeDMPip : null;
+        const attachments = this._getMessageAttachments?.(msgId);
+        this.socket.emit('delete-message', pip
+          ? { messageId: msgId, channelCode: pip, attachments }
+          : { messageId: msgId, attachments });
+      }
+      return;
+    }
     if (newContent === rawText) return cancel();
 
     // E2E: encrypt edited DM content. The PiP can edit a DM that isn't
@@ -3236,6 +4327,17 @@ _startEditMessage(msgEl, msgId) {
 
   textarea.addEventListener('keydown', (e) => {
     e.stopPropagation();
+
+    // Ctrl/Cmd+E toggles the emoji picker for this edit. The global shortcut
+    // in app-ui.js can't fire here because we stopPropagation above, so it's
+    // re-handled locally; _activeEditTextarea (set above) routes the pick into
+    // this textarea rather than the main composer.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key === 'e') {
+      e.preventDefault();
+      this._activeEditTextarea = textarea;
+      this._toggleEmojiPicker();
+      return;
+    }
 
     // Handle @mention and :emoji dropdown navigation in edit mode
     const mentionDd = document.getElementById('mention-dropdown');
@@ -3265,6 +4367,12 @@ _startEditMessage(msgEl, msgId) {
       if (e.key === 'Escape') { this._hideEmojiDropdown(); return; }
     }
 
+    // Markdown formatting shortcuts
+    if (this._handleMarkdownShortcuts(textarea, e)) {
+      e.preventDefault();
+      return;
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       btnRow.querySelector('.edit-save-btn').click();
@@ -3272,6 +4380,13 @@ _startEditMessage(msgEl, msgId) {
     if (e.key === 'Escape') {
       e.preventDefault();
       cancel();
+    }
+  });
+
+  textarea.addEventListener('paste', (e) => {
+    if (this._handleMarkdownLinkPaste(textarea, e)) {
+      e.preventDefault();
+      return;
     }
   });
 
@@ -3286,6 +4401,306 @@ _startEditMessage(msgEl, msgId) {
   contentEl.addEventListener('click', (e) => {
     e.stopPropagation();
   }, { once: false });
+},
+
+// ═══════════════════════════════════════════════════════
+// CLIENT-SIDE LINK POLICY (#5483, v3.44.0)
+// ═══════════════════════════════════════════════════════
+//
+// End-to-end encrypted DMs are ciphertext by the time they reach the server,
+// so the send-message automod path cannot see their links at all. The setting
+// existed and did nothing for them, which is worse than not having it.
+//
+// The recipient's client CAN see them, after decryption and before rendering,
+// and that is the check worth having. A hostile sender can run a patched
+// client and skip any check on their own side, but they cannot reach into the
+// recipient's browser and switch this off. So the enforcement that protects
+// the person at risk is the one that runs where the risk lands.
+//
+// The rules themselves come from /js/automod-rules.js, the same file the
+// server requires, so the two cannot drift into disagreeing.
+
+// Is this container showing DM content?
+//
+// The first version of this looked for a [data-dm-render] attribute that does
+// not exist: the DM PiP renderer marks a JS property on the message object,
+// not the DOM. So the only branch that ever fired was the current-channel
+// check, and a DM popped out over a normal channel was never recognised.
+// @birdcrazy caught it (#5483). Detect the PiP container by its actual id.
+_isDmContainer(containerEl) {
+  try {
+    if (containerEl) {
+      if (containerEl.id === 'dm-pip-messages') return true;
+      if (containerEl.closest && containerEl.closest('#dm-pip-messages, #dm-pip')) return true;
+      if (containerEl.querySelector && containerEl.querySelector('#dm-pip-messages')) return true;
+    }
+    const ch = (this.channels || []).find(c => c.code === this.currentChannel);
+    return !!(ch && ch.is_dm);
+  } catch { return false; }
+},
+
+_initLinkPolicy() {
+  this._linkPolicy = null;
+  const apply = (p) => { this._linkPolicy = p && p.enabled ? p : null; };
+  this.socket.on('link-policy', apply);
+  this.socket.emit('get-link-policy', null, apply);
+},
+
+// Returns null when the text is fine, or { rule, host, url, message }.
+// Safe to call before the policy has loaded: no policy means no verdict.
+_checkLinkPolicy(text) {
+  if (!this._linkPolicy || !window.HavenAutomodRules) return null;
+  try {
+    return window.HavenAutomodRules.checkText(text, this._linkPolicy);
+  } catch { return null; }
+},
+
+// True when links in this text should be rendered inert rather than clickable.
+// Applied to DM content specifically, since that is the path the server cannot
+// inspect. Channel messages were already blocked at send time.
+_dmLinkBlocked(text) {
+  if (!this._linkPolicy || !this._linkPolicy.scanDms) return null;
+  return this._checkLinkPolicy(text);
+},
+
+// One-time identity disclosure on DMs. Haven does not verify who anyone is,
+// and on an open server someone can register a display name that matches a
+// person you trust (the owner, a mod) and DM you as them. This is a nudge to
+// check, not a control. Dismissed globally, remembered in localStorage.
+_maybeShowDmSafetyNotice(container) {
+  if (!container) return;
+  try { if (localStorage.getItem('haven_dm_safety_dismissed') === '1') return; } catch {}
+  // Already present in this container — don't stack copies on re-render.
+  if (container.querySelector(':scope > .dm-safety-notice')) return;
+
+  const notice = document.createElement('div');
+  notice.className = 'dm-safety-notice';
+  notice.innerHTML =
+    '<span class="dm-safety-icon" aria-hidden="true">🛡️</span>' +
+    `<span class="dm-safety-text">${t('dm_runtime.safety_notice')}</span>` +
+    `<button type="button" class="dm-safety-dismiss">${t('dm_runtime.safety_dismiss')}</button>`;
+
+  notice.querySelector('.dm-safety-dismiss').addEventListener('click', () => {
+    try { localStorage.setItem('haven_dm_safety_dismissed', '1'); } catch {}
+    // Clear it everywhere it might be showing (main pane + any open PiP).
+    document.querySelectorAll('.dm-safety-notice').forEach(n => n.remove());
+  });
+
+  container.insertBefore(notice, container.firstChild);
+},
+
+// Neutralise disallowed links in an already-rendered DM message container.
+//
+// Scoped to DMs on purpose. Channel messages were checked at send time, so
+// running this there would only ever affect history that predates the current
+// policy, and silently breaking old links nobody complained about is not a
+// trade worth making.
+//
+// Anchors become plain text with a warning; images from disallowed hosts
+// become a click-to-reveal placeholder rather than loading. The media proxy
+// already stops the IP leak, so this is about the click, not the fetch.
+_enforceDmLinkPolicy(containerEl) {
+  if (!containerEl) return;
+  const policy = this._linkPolicy;
+  const R = window.HavenAutomodRules;
+  if (!policy || !policy.scanDms || !R) return;
+
+  const hostBlocked = (rawUrl) => {
+    if (!rawUrl) return false;
+    try {
+      const u = new URL(rawUrl, location.href);
+      if (u.origin === location.origin) return false;   // our own uploads / proxy
+      return !R.checkHost(u.hostname, policy).allowed;
+    } catch { return false; }
+  };
+
+  containerEl.querySelectorAll('.message-content a[href]').forEach(a => {
+    if (a.dataset.policyChecked) return;
+    a.dataset.policyChecked = '1';
+    if (!hostBlocked(a.href)) return;
+
+    let host = a.href;
+    try { host = new URL(a.href).hostname; } catch {}
+    const span = document.createElement('span');
+    span.className = 'blocked-link';
+    span.title = t('dm_runtime.blocked_link_tooltip', { host });
+    span.textContent = a.textContent;
+    const badge = document.createElement('span');
+    badge.className = 'blocked-link-badge';
+    badge.textContent = ` ⚠ ${t('dm_runtime.blocked_link_badge')}`;
+    span.appendChild(badge);
+    a.replaceWith(span);
+  });
+
+  containerEl.querySelectorAll('.message-content img[data-mp-origin], .message-content img.chat-image').forEach(img => {
+    if (img.dataset.policyChecked) return;
+    img.dataset.policyChecked = '1';
+    const origin = img.dataset.mpOrigin || img.getAttribute('data-mp-src') || img.src;
+    if (!hostBlocked(origin)) return;
+    const ph = document.createElement('span');
+    ph.className = 'hidden-image';
+    ph.setAttribute('role', 'button');
+    ph.tabIndex = 0;
+    ph.dataset.hiddenSrc = origin;
+    ph.textContent = t('dm_runtime.blocked_image');
+    img.replaceWith(ph);
+  });
+},
+
+// ═══════════════════════════════════════════════════════
+// MEDIA PROXY (v3.43.0)
+// ═══════════════════════════════════════════════════════
+//
+// Remote images are fetched by the Haven server and served from its cache, so
+// the browser never contacts a third-party host. Before this, simply scrolling
+// past a message containing an image URL sent your IP address and browser
+// details to whoever owned that URL.
+//
+// The rule this code enforces: NEVER emit a raw external src. If the media
+// token has not arrived yet, the URL is parked in data-mp-src and filled in
+// once the token lands. Failing closed means a slow token fetch costs a moment
+// of blank image, not a silent leak.
+
+async _loadMediaToken() {
+  try {
+    const r = await fetch('/api/media-token', {
+      headers: { 'Authorization': `Bearer ${this.token}` }
+    });
+    if (!r.ok) throw new Error('media token request failed');
+    const d = await r.json();
+    this._mediaProxyEnabled = d.enabled !== false;
+    this._mediaToken = d.token || null;
+  } catch {
+    // Older server, or the endpoint is unavailable. Fall back to direct
+    // loading so images do not silently break on a mismatched version.
+    this._mediaProxyEnabled = false;
+    this._mediaToken = null;
+  }
+  this._flushPendingMedia();
+},
+
+// The media token carries a day stamp and the server honours only today's and
+// yesterday's, so it goes stale after about two days. It used to be fetched
+// once at startup and never again, which was fine for a tab that gets closed
+// and fatal for one that does not: leave Haven open over a weekend and every
+// remote image posted after the token expired came back 401 and rendered as a
+// blank gap, with no error and no retry. Reloading fixed it, which is why this
+// looked random and unreproducible. Refreshed on a timer, on reconnect, and on
+// a failed image below.
+_renderSessionsList(sessions) {
+  const el = document.getElementById('sessions-list');
+  if (!el) return;
+  if (!sessions.length) {
+    el.innerHTML = `<p class="muted-text">${this._escapeHtml(t('settings.sessions_section.none'))}</p>`;
+    return;
+  }
+  const rel = (ms) => {
+    if (!ms) return '';
+    const mins = Math.floor((Date.now() - ms) / 60000);
+    if (mins < 1) return t('settings.sessions_section.just_now');
+    if (mins < 60) return t('settings.sessions_section.mins', { n: mins });
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return t('settings.sessions_section.hours', { n: hrs });
+    return t('settings.sessions_section.days', { n: Math.floor(hrs / 24) });
+  };
+  el.innerHTML = sessions.map(s => {
+    const tag = s.current
+      ? `<span class="session-current-tag">${this._escapeHtml(t('settings.sessions_section.this_device'))}</span>`
+      : '';
+    const ip = s.ip ? this._escapeHtml(s.ip) : '';
+    return `<div class="session-item${s.current ? ' is-current' : ''}">
+      <span class="session-device">${this._escapeHtml(s.device || '')}</span>${tag}
+      <span class="session-meta">${ip}${ip && s.since ? '<br>' : ''}${this._escapeHtml(rel(s.since))}</span>
+    </div>`;
+  }).join('');
+},
+
+// Ask for the list when the pane is actually on screen. There is no session
+// table behind this, so it is a snapshot of live sockets, not history.
+_refreshSessions() {
+  this.socket?.emit('get-sessions');
+},
+
+_refreshMediaToken() {
+  // One request even when a screen full of images fails at the same moment.
+  if (!this._mediaTokenRefresh) {
+    this._mediaTokenRefresh = Promise.resolve(this._loadMediaToken())
+      .finally(() => { this._mediaTokenRefresh = null; });
+  }
+  return this._mediaTokenRefresh;
+},
+
+// Re-fetch well inside the window rather than near the edge, so a machine that
+// sleeps through the boundary still wakes up with time to spare.
+_startMediaTokenRefresh() {
+  if (this._mediaTokenTimer) return;
+  this._mediaTokenTimer = setInterval(() => {
+    if (this._mediaProxyEnabled !== false) this._refreshMediaToken();
+  }, 6 * 60 * 60 * 1000);
+},
+
+// Last line of defence: an image the proxy refused gets one more go with a
+// fresh token. Covers the cases a timer cannot, like a laptop asleep past the
+// rollover or a clock that disagrees with the server's.
+_setupMediaTokenRetry() {
+  if (this._mediaRetryBound) return;
+  this._mediaRetryBound = true;
+  // Capture phase: `error` from an <img> does not bubble.
+  document.addEventListener('error', (e) => {
+    const el = e.target;
+    if (!el || el.tagName !== 'IMG') return;
+    const src = el.getAttribute('src') || '';
+    if (!src.startsWith('/api/media-proxy?')) return;
+    if (el.dataset.mpRetried) return;       // one retry per image, never a loop
+    el.dataset.mpRetried = '1';
+    const stale = this._mediaToken;
+    this._refreshMediaToken().then(() => {
+      if (!this._mediaToken || this._mediaToken === stale) return;
+      try {
+        const u = new URL(src, location.href);
+        u.searchParams.set('mt', this._mediaToken);
+        el.setAttribute('src', u.pathname + u.search);
+      } catch { /* malformed src, leave it alone */ }
+    });
+  }, true);
+},
+
+// Returns a URL safe to put in a src attribute, or null when proxying is on
+// but the token has not arrived yet (caller must defer).
+_proxyMediaUrl(url) {
+  if (typeof url !== 'string' || !url) return url;
+  // Local paths, data: URIs and blobs never leave the origin.
+  if (!/^https?:\/\//i.test(url)) return url;
+  if (this._mediaProxyEnabled === false) return url;
+  try {
+    if (new URL(url, location.href).origin === location.origin) return url;
+  } catch { return url; }
+  if (!this._mediaToken) return null;   // enabled but not ready — defer
+  return `/api/media-proxy?url=${encodeURIComponent(url)}&mt=${encodeURIComponent(this._mediaToken)}`;
+},
+
+// Builds the src attribute for an <img>, deferring when necessary. Returns an
+// already-escaped attribute string.
+// data-mp-origin keeps the original remote URL alongside the proxied src, so
+// the DM link policy can judge the real host rather than the proxy URL that
+// always points back at us. (#5483)
+_imgSrcAttr(url) {
+  const p = this._proxyMediaUrl(url);
+  const origin = /^https?:\/\//i.test(url || '') ? ` data-mp-origin="${this._escapeHtml(url)}"` : '';
+  return (p !== null
+    ? `src="${this._escapeHtml(p)}"`
+    : `data-mp-src="${this._escapeHtml(url)}"`) + origin;
+},
+
+// Fill in any images that rendered before the token was available.
+_flushPendingMedia() {
+  document.querySelectorAll('[data-mp-src]').forEach(el => {
+    const raw = el.getAttribute('data-mp-src');
+    const p = this._proxyMediaUrl(raw);
+    if (p === null) return;            // still not ready
+    el.removeAttribute('data-mp-src');
+    el.setAttribute('src', p);
+  });
 },
 
 // ═══════════════════════════════════════════════════════
@@ -3371,8 +4786,17 @@ _showAdminActionModal(action, userId, username) {
   const banIpGroup = document.getElementById('admin-ban-ip-group');
   const banIpCheckbox = document.getElementById('admin-ban-ip-checkbox');
   if (banIpGroup) {
-    const canBanIp = !!(this.user && this.user.isAdmin) ||
-                     !!(this.user && Array.isArray(this.user.permissions) && this.user.permissions.includes('ban_ip'));
+    // ban_ip is a server-wide permission, so it arrives in globalPermissions;
+    // checking only `permissions` (the channel-scoped set) meant the option
+    // stayed hidden for moderators who genuinely held it. (v3.43.0)
+    const _has = (p) => {
+      if (!this.user) return false;
+      if (this.user.isAdmin) return true;
+      const scoped = Array.isArray(this.user.permissions) ? this.user.permissions : [];
+      const global = Array.isArray(this.user.globalPermissions) ? this.user.globalPermissions : [];
+      return scoped.includes('*') || global.includes('*') || scoped.includes(p) || global.includes(p);
+    };
+    const canBanIp = _has('ban_ip');
     banIpGroup.style.display = (action === 'ban' && canBanIp) ? 'block' : 'none';
     if (banIpCheckbox) banIpCheckbox.checked = false;
   }
@@ -3390,7 +4814,7 @@ _showAdminActionModal(action, userId, username) {
 // gates on the target user having 2FA enabled, (3) reveal modal that
 // shows the temp password once for the admin to transmit out-of-band.
 _confirmAdminResetPassword(userId, username) {
-  this._closeUserGearMenu();
+  this._hideUserContextMenu();
   this._closeProfilePopup();
   const safeName = this._escapeHtml(username);
   const overlay = document.createElement('div');
@@ -3400,24 +4824,24 @@ _confirmAdminResetPassword(userId, username) {
   overlay.innerHTML = `
     <div class="modal admin-reset-pw-modal">
       <div class="modal-header">
-        <h4>🔑 ${t('modals.admin_reset_pw.title') || 'Reset Password'}</h4>
+        <h4>🔑 ${t('modals.admin_reset_pw.title')}</h4>
         <button class="modal-close-btn admin-reset-pw-close">&times;</button>
       </div>
       <div class="modal-body">
-        <p>${(t('modals.admin_reset_pw.confirm_prompt') || 'Generate a one-time temporary password for <b>{username}</b>?').replace('{username}', safeName)}</p>
+        <p>${t('modals.admin_reset_pw.confirm_prompt').replace('{username}', safeName)}</p>
         <div style="background:rgba(231,76,60,0.12);border:1px solid rgba(231,76,60,0.4);border-radius:8px;padding:8px 12px;margin:10px 0;font-size:0.85rem;">
-          <strong>⚠️ ${t('modals.admin_reset_pw.dm_warning_title') || 'Encrypted DM history will be lost'}</strong>
-          <p style="margin:6px 0 0 0;">${t('modals.admin_reset_pw.dm_warning_body') || "The user's E2E wrap key is derived from their password. Once they finish the forced change-password flow with a new password, their encrypted DM history becomes permanently unreadable on their side. The user can avoid this by signing in with their <em>original</em> password (which we keep on file as an escape hatch) instead of the temp one, which silently cancels this reset."}</p>
+          <strong>⚠️ ${t('modals.admin_reset_pw.dm_warning_title')}</strong>
+          <p style="margin:6px 0 0 0;">${t('modals.admin_reset_pw.dm_warning_body')}</p>
         </div>
         <div style="background:rgba(241,196,15,0.12);border:1px solid rgba(241,196,15,0.4);border-radius:8px;padding:8px 12px;margin:10px 0;font-size:0.85rem;">
-          <strong>🔐 ${t('modals.admin_reset_pw.mfa_required_title') || 'Two-factor authentication required'}</strong>
-          <p style="margin:6px 0 0 0;">${t('modals.admin_reset_pw.mfa_required_body') || 'The target user must have 2FA enabled before an admin can reset their password. Otherwise the temp password alone would be enough to take over the account. If they have not enabled 2FA, this will fail with a clear error.'}</p>
+          <strong>🔐 ${t('modals.admin_reset_pw.mfa_required_title')}</strong>
+          <p style="margin:6px 0 0 0;">${t('modals.admin_reset_pw.mfa_required_body')}</p>
         </div>
-        <p style="font-size:0.8rem;color:var(--text-muted);margin-top:8px;">${t('modals.admin_reset_pw.transmit_hint') || 'You will be shown the temp password once. Deliver it to the user out-of-band (in person, on a phone call, etc.). It is never shown again.'}</p>
+        <p style="font-size:0.8rem;color:var(--text-muted);margin-top:8px;">${t('modals.admin_reset_pw.transmit_hint')}</p>
       </div>
       <div class="modal-actions">
-        <button class="btn-sm admin-reset-pw-cancel">${t('modals.common.cancel') || 'Cancel'}</button>
-        <button class="btn-sm btn-accent btn-danger-fill admin-reset-pw-confirm">${t('modals.admin_reset_pw.confirm_btn') || 'Generate Temp Password'}</button>
+        <button class="btn-sm admin-reset-pw-cancel">${t('modals.common.cancel')}</button>
+        <button class="btn-sm btn-accent btn-danger-fill admin-reset-pw-confirm">${t('modals.admin_reset_pw.confirm_btn')}</button>
       </div>
     </div>
   `;
@@ -3429,13 +4853,18 @@ _confirmAdminResetPassword(userId, username) {
   overlay.querySelector('.admin-reset-pw-confirm').addEventListener('click', () => {
     const confirmBtn = overlay.querySelector('.admin-reset-pw-confirm');
     confirmBtn.disabled = true;
-    confirmBtn.textContent = t('modals.admin_reset_pw.working') || 'Working...';
+    confirmBtn.textContent = t('modals.admin_reset_pw.working');
     this.socket.emit('admin-reset-user-password', { userId }, (resp) => {
       close();
       if (!resp || resp.error) {
-        const msg = resp?.code === 'mfa_required'
-          ? (t('modals.admin_reset_pw.errors.mfa_required') || resp.error)
-          : (resp?.error || t('modals.admin_reset_pw.errors.generic') || 'Failed to reset password');
+        // The 2FA gate (#5300) is intended behavior, not a failure. Showing it
+        // as a red error toast made people think the feature was broken (#5451),
+        // so explain it calmly in its own info modal instead.
+        if (resp?.code === 'mfa_required') {
+          this._showAdminResetMfaRequired(username);
+          return;
+        }
+        const msg = resp?.error || t('modals.admin_reset_pw.errors.generic');
         if (this._showToast) this._showToast(msg, 'error', 8000);
         else alert(msg);
         return;
@@ -3443,6 +4872,42 @@ _confirmAdminResetPassword(userId, username) {
       this._showAdminResetPwReveal(resp.username, resp.tempPassword);
     });
   });
+},
+
+// Shown when an admin tries to reset the password of a user who has not yet
+// enabled 2FA. This is a deliberate security requirement (#5300), not a bug,
+// so it gets a plain informational modal that says exactly why and what to do
+// next, rather than a red error toast that reads like something broke (#5451).
+_showAdminResetMfaRequired(username) {
+  const safeName = this._escapeHtml(username);
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay admin-reset-mfa-overlay';
+  overlay.style.display = 'flex';
+  overlay.style.zIndex = '100003';
+  overlay.innerHTML = `
+    <div class="modal admin-reset-mfa-modal">
+      <div class="modal-header">
+        <h4>🔐 ${t('modals.admin_reset_pw.mfa_required_title')}</h4>
+        <button class="modal-close-btn admin-reset-mfa-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p>${t('modals.admin_reset_pw.mfa_blocked_prompt').replace('{username}', safeName)}</p>
+        <div style="background:rgba(52,152,219,0.12);border:1px solid rgba(52,152,219,0.4);border-radius:8px;padding:8px 12px;margin:10px 0;font-size:0.85rem;">
+          <strong>💡 ${t('modals.admin_reset_pw.mfa_blocked_why_title')}</strong>
+          <p style="margin:6px 0 0 0;">${t('modals.admin_reset_pw.mfa_blocked_why_body')}</p>
+        </div>
+        <p style="font-size:0.85rem;color:var(--text-muted);margin-top:8px;">${t('modals.admin_reset_pw.mfa_blocked_action').replace('{username}', safeName)}</p>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-sm btn-accent admin-reset-mfa-ok" type="button">${t('modals.common.got_it')}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.querySelector('.admin-reset-mfa-close').addEventListener('click', close);
+  overlay.querySelector('.admin-reset-mfa-ok').addEventListener('click', close);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 },
 
 _showAdminResetPwReveal(username, tempPassword) {
@@ -3455,21 +4920,21 @@ _showAdminResetPwReveal(username, tempPassword) {
   overlay.innerHTML = `
     <div class="modal admin-reset-pw-reveal-modal">
       <div class="modal-header">
-        <h4>🔑 ${t('modals.admin_reset_pw.reveal_title') || 'Temp Password Generated'}</h4>
+        <h4>🔑 ${t('modals.admin_reset_pw.reveal_title')}</h4>
       </div>
       <div class="modal-body">
-        <p>${(t('modals.admin_reset_pw.reveal_prompt') || 'One-time temp password for <b>{username}</b>:').replace('{username}', safeName)}</p>
+        <p>${t('modals.admin_reset_pw.reveal_prompt').replace('{username}', safeName)}</p>
         <div style="display:flex;gap:8px;align-items:center;margin:12px 0;">
           <code id="admin-reset-pw-value" style="flex:1;font-family:monospace;font-size:1.2rem;letter-spacing:0.05em;padding:10px 12px;background:var(--bg-secondary,#222);border:1px solid var(--border-color,#444);border-radius:6px;user-select:all;">${safePw}</code>
-          <button class="btn-sm admin-reset-pw-copy" type="button">📋 ${t('modals.common.copy') || 'Copy'}</button>
+          <button class="btn-sm admin-reset-pw-copy" type="button">📋 ${t('modals.common.copy')}</button>
         </div>
         <div style="background:rgba(231,76,60,0.12);border:1px solid rgba(231,76,60,0.4);border-radius:8px;padding:8px 12px;font-size:0.85rem;">
-          <strong>⚠️ ${t('modals.admin_reset_pw.reveal_warning_title') || 'Save this now'}</strong>
-          <p style="margin:6px 0 0 0;">${t('modals.admin_reset_pw.reveal_warning_body') || 'This password is never shown again. Deliver it to the user out-of-band. The user will be forced to change it on next login (or sign in with their original password to cancel the reset and keep their DM history).'}</p>
+          <strong>⚠️ ${t('modals.admin_reset_pw.reveal_warning_title')}</strong>
+          <p style="margin:6px 0 0 0;">${t('modals.admin_reset_pw.reveal_warning_body')}</p>
         </div>
       </div>
       <div class="modal-actions">
-        <button class="btn-sm btn-accent admin-reset-pw-reveal-close" type="button">${t('modals.common.done') || 'Done'}</button>
+        <button class="btn-sm btn-accent admin-reset-pw-reveal-close" type="button">${t('modals.common.done')}</button>
       </div>
     </div>
   `;
@@ -3481,17 +4946,21 @@ _showAdminResetPwReveal(username, tempPassword) {
       await navigator.clipboard.writeText(tempPassword);
       const btn = overlay.querySelector('.admin-reset-pw-copy');
       const orig = btn.textContent;
-      btn.textContent = '✓ ' + (t('modals.common.copied') || 'Copied');
+      btn.textContent = '✓ ' + t('modals.common.copied');
       setTimeout(() => { btn.textContent = orig; }, 1500);
     } catch {
-      if (this._showToast) this._showToast(t('modals.common.copy_failed') || 'Copy failed', 'error');
+      if (this._showToast) this._showToast(t('modals.common.copy_failed'), 'error');
     }
   });
 },
 
 _confirmTransferAdmin(userId, username) {
-  // Build a custom modal for transfer admin with password verification
-  this._closeUserGearMenu();
+  // Build a custom modal for transfer admin with a confirmation step.
+  // An SSO admin has no Haven password, so they confirm with an authenticator
+  // code instead. The server decides which it will accept and rejects the
+  // wrong one, this only picks which field to put in front of you. (#5539)
+  this._hideUserContextMenu();
+  const ssoConfirm = !!this.user?.isSso;
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay transfer-admin-overlay';
   overlay.style.display = 'flex';
@@ -3510,8 +4979,8 @@ _confirmTransferAdmin(userId, username) {
         </div>
         <p class="transfer-admin-note">${t('modals.transfer_admin.note')}</p>
         <div class="form-group">
-          <label class="form-label">${t('modals.transfer_admin.password_label')}</label>
-          <input type="password" id="transfer-admin-pw" class="form-input" placeholder="${t('modals.transfer_admin.password_placeholder')}" autocomplete="current-password">
+          <label class="form-label">${ssoConfirm ? t('modals.transfer_admin.totp_label') : t('modals.transfer_admin.password_label')}</label>
+          <input type="${ssoConfirm ? 'text' : 'password'}" id="transfer-admin-pw" class="form-input" placeholder="${ssoConfirm ? t('modals.transfer_admin.totp_placeholder') : t('modals.transfer_admin.password_placeholder')}" ${ssoConfirm ? 'inputmode="numeric" maxlength="6" autocomplete="one-time-code"' : 'autocomplete="current-password"'}>
         </div>
         <p id="transfer-admin-error" class="transfer-admin-error"></p>
       </div>
@@ -3536,16 +5005,19 @@ _confirmTransferAdmin(userId, username) {
   pwInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') confirmBtn.click(); });
 
   confirmBtn.addEventListener('click', () => {
-    const password = pwInput.value.trim();
-    if (!password) {
-      errorEl.textContent = t('modals.transfer_admin.error_required');
+    const secret = pwInput.value.trim();
+    if (!secret) {
+      errorEl.textContent = ssoConfirm
+        ? t('modals.transfer_admin.error_totp_required')
+        : t('modals.transfer_admin.error_required');
       errorEl.style.display = '';
       pwInput.focus();
       return;
     }
     confirmBtn.disabled = true;
     confirmBtn.textContent = t('modals.transfer_admin.transferring');
-    this.socket.emit('transfer-admin', { userId, password }, (res) => {
+    const payload = ssoConfirm ? { userId, totpCode: secret } : { userId, password: secret };
+    this.socket.emit('transfer-admin', payload, (res) => {
       if (res && res.error) {
         errorEl.textContent = res.error;
         errorEl.style.display = '';
@@ -3555,7 +5027,7 @@ _confirmTransferAdmin(userId, username) {
         pwInput.focus();
       } else if (res && res.success) {
         close();
-        this._showToast(res.message || 'Admin transferred', 'info');
+        this._showToast(t('modals.transfer_admin.success'), 'info');
       }
     });
   });

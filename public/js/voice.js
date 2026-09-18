@@ -29,6 +29,7 @@ class VoiceManager {
     this.isScreenSharing = false;
     this.isWebcamActive = false;
     this.peers = new Map();         // userId → { connection, stream, username }
+    this._relayPeers = new Set();   // userIds whose selected ICE pair runs through a TURN relay (#5426)
     this.currentChannel = null;
     this.isMuted = false;
     this.isDeafened = false;
@@ -45,13 +46,31 @@ class VoiceManager {
     this.onTalkingChange = null;    // callback(userId, isTalking)
     this.screenSharers = new Set();  // userIds currently sharing
     this.webcamUsers = new Set();    // userIds currently broadcasting webcam
+    // userIds whose current screen share we have actually handed to the UI.
+    // Reset on every screen-share-started so a *re*share has to prove itself
+    // again — see _watchForScreenStream for why "a live receiver exists" is
+    // not the same thing as "the viewer is seeing the stream".
+    this._screenDelivered = new Set();
     this.screenGainNodes = new Map(); // userId → GainNode for screen share audio
+    this._nativeScreenPeers = new Map(); // sharerId → { connection, sessionId }
+    this._pendingNativeScreenCandidates = new Map();
+    this._nativeScreenAnnouncements = new Map(); // sharerId → active native sessionId
+    this._nativeScreenPeerCapabilities = new Map(); // peerId → {version, codecs, isBot}
+    this._nativeScreenSenderStates = new Map(); // peer/session → answer + queued ICE state
+    this._nativeScreenSharing = false;
+    this._nativeScreenSessionId = null;
+    this._nativeScreenCodec = null;
+    this._screenStartOperation = 0;
+    this._screenStartInFlight = false;
+    this._pendingScreenStop = null;
+    this._screenWatchdogTimers = new Map();
     this.onScreenAudio = null;       // callback(userId) — screen share audio available
     this.talkingState = new Map();  // userId → boolean
     this.analysers = new Map();     // userId → { analyser, dataArray, interval }
     this.onScreenShareStarted = null; // callback(userId, username) — someone started streaming
     this.onWebcamStatusChange = null; // callback() — webcam started/stopped, re-render user list
     this.onConnectivityWarning = null; // (#5399) callback(message) — fired when no STUN server responds
+    this.onScreenShareWarning = null; // callback() — native transport stopped for compatibility
     this._connectivityWarned = false;  // only warn once per session to avoid toast spam
     this.deafenedUsers = new Set();   // userIds we've muted our audio towards
     this._localTalkInterval = null;
@@ -59,13 +78,15 @@ class VoiceManager {
     this._noiseGateGain = null;
     this._noiseGateAnalyser = null;
     this._vcDest = null;             // MediaStreamDestination node for mixing soundboard audio into VC
+    this._botAudio = null;           // Current server-hosted bot audio playback
 
     // Voice audio bitrate cap (0 = auto, otherwise kbps from server)
     this.audioBitrate = 0;
 
     // RNNoise noise suppression state
     this._rnnoiseNode = null;        // AudioWorkletNode for RNNoise
-    this._rnnoiseReady = false;      // true once WASM is loaded in the worklet
+    this._rnnoiseReady = false;      // true ONLY once the worklet posts {type:'ready'}
+    this._rnnoiseWasmBytes = null;   // ArrayBuffer of rnnoise.wasm (posted into worklet)
     this._rnnoiseSource = null;      // MediaStreamSource feeding the chain
     // Noise mode: 'off' | 'gate' | 'suppress'
     const savedMode = localStorage.getItem('haven_noise_mode');
@@ -102,19 +123,14 @@ class VoiceManager {
     // Result was every Haven server using default ICE config lost external
     // WebRTC simultaneously — LAN-to-LAN still worked because host
     // candidates don't need STUN, but anyone outside the server's subnet
-    // got stuck on "ICE: Connecting...". Defaults below are split into a
-    // preferred non-Google pool plus a Google fallback that only engages
-    // if every preferred server fails the runtime probe.
+    // got stuck on "ICE: Connecting...". The defaults below are a pool of
+    // three independent, non-Google providers. If they all fail the runtime
+    // probe the client keeps them and warns the user to configure STUN/TURN,
+    // rather than falling back to Google.
     this._stunPreferred = [
       'stun:stun.cloudflare.com:3478',
       'stun:stun.relay.metered.ca:80',
       'stun:global.stun.twilio.com:3478',
-    ];
-    this._stunFallback = [
-      // Last-ditch only. Google is widely reliable but we'd rather not send
-      // our users' NAT-discovery traffic there if we can avoid it.
-      'stun:stun.l.google.com:19302',
-      'stun:stun1.l.google.com:19302',
     ];
     this.rtcConfig = {
       iceServers: this._stunPreferred.map(urls => ({ urls })),
@@ -126,12 +142,17 @@ class VoiceManager {
     // Fetch server-provided ICE config (may include TURN)
     this._fetchIceServers();
 
-    // Probe the default pool in the background and prune dead servers so
-    // future RTCPeerConnections don't waste gathering time on them. Only
-    // applies if the admin hasn't configured their own ICE servers.
-    this._probeDefaultStun();
+    // The STUN probe (prune dead servers so later peer connections do not
+    // wait on them) used to run on page load. It opens an RTCPeerConnection,
+    // which gathers LAN candidates, and Chrome now asks every visitor of a
+    // public site for local-network access the moment that happens, so
+    // opening chat at all raised the prompt. It waits for the first voice
+    // join instead. Amnibro traced it.
+    this._stunProbeStarted = false;
+    this._pendingConfiguredStun = null;
 
     this._setupSocketListeners();
+    this._setupNativeScreenBridge();
   }
 
   // ── Fetch ICE servers from backend (STUN + optional TURN) ──
@@ -164,9 +185,44 @@ class VoiceManager {
           this._adminIceServersLoaded = true;
           console.log(`🧊 ICE servers loaded (${data.iceServers.length} servers${data.iceServers.some(s => String(s.urls).includes('turn:')) ? ', TURN enabled' : ''})`);
         }
+        // Relay-only mode (v3.42.0). The server sends this when the admin has
+        // enabled voice_force_relay and a TURN server is actually configured.
+        // It makes the browser drop host and srflx candidates, so peers in a
+        // call never learn each other's real IP addresses. Also suppress the
+        // STUN health probe below, which exists to pick good srflx servers and
+        // is meaningless (and would log spurious failures) when srflx
+        // candidates are being discarded on purpose.
+        if (data.iceTransportPolicy === 'relay') {
+          this.rtcConfig.iceTransportPolicy = 'relay';
+          this._relayOnly = true;
+          console.log('🧊 Relay-only voice: peer IP addresses stay hidden behind TURN');
+        } else {
+          delete this.rtcConfig.iceTransportPolicy;
+          this._relayOnly = false;
+        }
+        // After the relay-only flag is settled, not before: the probe measures
+        // srflx candidates, which relay-only discards on purpose, so running it
+        // any earlier reports every server dead on a perfectly healthy setup.
+        // Fire and forget; a dead entry here used to fail completely silently.
+        if (this._adminIceServersLoaded) {
+          if (this._stunProbeStarted) this._probeConfiguredStun(data.iceServers);
+          else this._pendingConfiguredStun = data.iceServers;
+        }
       }
     } catch (err) {
       console.warn('Could not fetch ICE servers, using defaults:', err && err.message);
+    }
+  }
+
+  // Run the STUN probes once, on the first voice join (see the constructor).
+  _ensureStunProbed() {
+    if (this._stunProbeStarted) return;
+    this._stunProbeStarted = true;
+    try { this._probeDefaultStun(); } catch { /* fire and forget */ }
+    if (this._pendingConfiguredStun) {
+      const list = this._pendingConfiguredStun;
+      this._pendingConfiguredStun = null;
+      try { this._probeConfiguredStun(list); } catch { /* fire and forget */ }
     }
   }
 
@@ -175,9 +231,201 @@ class VoiceManager {
   // Validates each default STUN URL by spinning up a throwaway
   // RTCPeerConnection and waiting for a srflx (server-reflexive)
   // candidate, which only appears if the STUN server actually responds.
-  // Survivors replace the iceServers list. If every preferred server is
-  // dead, the Google fallback pool is brought in so users aren't left
-  // with zero working STUN.
+  // Survivors replace the iceServers list. If every server is dead, the
+  // client keeps the list and warns the user to configure STUN/TURN.
+
+  // Does this STUN server actually answer a binding request? A server that
+  // resolves and accepts packets but never produces a srflx candidate is
+  // indistinguishable from a working one until a call fails, which is the whole
+  // problem this measures.
+  // Test one ICE server the way a real call would use it, and report what came
+  // back rather than just pass or fail.
+  //
+  // Written for the admin-facing connectivity test. Every thread about voice not
+  // working has gone the same way: it fails for users, the admin has no way to
+  // see why, and the answer only turns up after someone walks them through a
+  // third-party ICE test page and reads the candidate list for them. The browser
+  // already knows all of this at gathering time. (#5542)
+  _probeIceServer(server, timeoutMs = 5000) {
+    return new Promise(resolve => {
+      const urls = [].concat((server && server.urls) || []).map(String);
+      const isTurn = urls.some(u => /^turns?:/i.test(u));
+      const result = { urls: urls.join(', '), isTurn, srflx: false, relay: false, error: '' };
+      let settled = false;
+      let pc;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        try { pc && pc.close(); } catch { /* ignore */ }
+        resolve(result);
+      };
+      try {
+        pc = new RTCPeerConnection({ iceServers: [server] });
+        // The browser reports why a server could not be used here: a bad
+        // hostname, a refused allocation, a timeout. That message is the single
+        // most useful thing in the whole test, so keep the first one.
+        pc.onicecandidateerror = e => {
+          if (result.error) return;
+          const text = (e && e.errorText) || '';
+          const code = (e && e.errorCode) || 0;
+          if (text || code) result.error = text ? `${text}${code ? ` (${code})` : ''}` : `error ${code}`;
+        };
+        pc.createDataChannel('probe');
+        pc.onicecandidate = e => {
+          // A null candidate means gathering finished on its own.
+          if (!e.candidate) return done();
+          const cand = e.candidate.candidate || '';
+          if (cand.includes('typ srflx')) result.srflx = true;
+          if (cand.includes('typ relay')) result.relay = true;
+          // Stop as soon as we have the answer this server was asked for.
+          if (isTurn ? result.relay : result.srflx) done();
+        };
+        pc.createOffer().then(o => pc.setLocalDescription(o)).catch(() => done());
+        setTimeout(done, timeoutMs);
+      } catch {
+        done();
+      }
+    });
+  }
+
+  // Run the whole configured ICE list and turn it into something an admin can
+  // act on. Returns plain data; the wording lives in the settings panel.
+  async diagnoseConnectivity(iceServers) {
+    const servers = (iceServers || []).filter(s => s && s.urls);
+    const results = await Promise.all(servers.map(s => this._probeIceServer(s)));
+
+    const stun = results.filter(r => !r.isTurn);
+    const turn = results.filter(r => r.isTurn);
+    const liveStun = stun.filter(r => r.srflx);
+    const liveTurn = turn.filter(r => r.relay);
+
+    return {
+      results,
+      stunTotal: stun.length,
+      stunLive: liveStun.length,
+      deadStun: stun.filter(r => !r.srflx),
+      turnTotal: turn.length,
+      turnLive: liveTurn.length,
+      deadTurn: turn.filter(r => !r.relay),
+      // No server-reflexive candidate anywhere means nobody learns their own
+      // public address, and two people on different networks have nothing to
+      // exchange. That is the failure this whole test exists to catch early.
+      canCrossNetworks: liveStun.length > 0 || liveTurn.length > 0,
+      hasRelay: liveTurn.length > 0
+    };
+  }
+
+  _probeStunUrl(url, timeoutMs = 2500) {
+    return new Promise(resolve => {
+      let settled = false;
+      let pc;
+      const done = ok => {
+        if (settled) return;
+        settled = true;
+        try { pc && pc.close(); } catch { /* ignore */ }
+        resolve({ url, ok });
+      };
+      try {
+        pc = new RTCPeerConnection({ iceServers: [{ urls: url }] });
+        // DataChannel forces ICE gathering even without media tracks.
+        pc.createDataChannel('probe');
+        pc.onicecandidate = e => {
+          if (!e.candidate) return;
+          const cand = e.candidate.candidate || '';
+          if (cand.includes('typ srflx')) done(true);
+        };
+        pc.createOffer()
+          .then(o => pc.setLocalDescription(o))
+          .catch(() => done(false));
+        setTimeout(() => done(false), timeoutMs);
+      } catch {
+        done(false);
+      }
+    });
+  }
+
+  // Check the STUN servers an admin configured, and say so when they are dead.
+  //
+  // The default pool has been probed since #5399, but a configured list was
+  // exempt on the grounds that the probe must not overwrite an admin's choice.
+  // That left the worst case unreported: setting STUN_URLS replaces the working
+  // defaults wholesale and skips the probe, so a list containing a decommissioned
+  // server produces no srflx candidates and nothing anywhere says why. Browsers
+  // publish only mDNS host candidates now, so with no srflx two browsers on
+  // different networks have nothing left to try, while native clients keep
+  // working because they still publish a real address. That combination reads as
+  // "Haven broke web calls" rather than "this STUN server is gone", and it cost
+  // one admin days (#5542).
+  //
+  // This only reports. The configuration is left exactly as the admin set it.
+  async _probeConfiguredStun(iceServers) {
+    try {
+      // Relay-only deliberately discards srflx candidates, so every server
+      // would probe as dead. Same reason the default probe skips it.
+      if (this._relayOnly) return;
+      const urls = [];
+      for (const entry of iceServers || []) {
+        for (const u of [].concat(entry && entry.urls || [])) {
+          if (typeof u === 'string' && /^stuns?:/i.test(u)) urls.push(u);
+        }
+      }
+      if (!urls.length) return;
+
+      const results = await Promise.all(urls.map(u => this._probeStunUrl(u)));
+      const dead = results.filter(r => !r.ok).map(r => r.url);
+      if (!dead.length) return;
+
+      const hasTurn = (iceServers || []).some(entry =>
+        [].concat(entry && entry.urls || []).some(u => /^turns?:/i.test(String(u))));
+
+      console.error(`[Voice] Configured STUN server(s) not responding: ${dead.join(', ')}`);
+      if (dead.length < urls.length || hasTurn) return;
+
+      // Nothing configured works and there is no relay, so as it stands calls
+      // between two networks cannot connect at all. Reporting that was the
+      // first half of #5542; this is the other half.
+      //
+      // Setting STUN_URLS replaces the built-in pool rather than adding to it,
+      // so a single typo in one entry takes browser-to-browser voice out
+      // entirely for everyone off the LAN. That is never what the admin was
+      // choosing. "Use my server" is a preference; "have no working voice" is
+      // not something anyone picks on purpose, and the reporter here lost days
+      // to a mistyped port before the difference was visible anywhere.
+      //
+      // Narrow on purpose. It engages only when every configured server failed
+      // the probe AND there is no TURN, which is exactly the case where the
+      // alternative is nothing at all. An admin who deliberately wants only
+      // their own servers has a relay configured too, and that path returns
+      // above without reaching this. The stored setting is never written to;
+      // this lasts for the session and the warning still names what to fix.
+      const revived = await Promise.all(this._stunPreferred.map(u => this._probeStunUrl(u)));
+      const live = revived.filter(r => r.ok).map(r => r.url);
+
+      if (live.length) {
+        const keep = (iceServers || []).filter(entry =>
+          ![].concat(entry && entry.urls || []).some(u => /^stuns?:/i.test(String(u))));
+        this.rtcConfig.iceServers = keep.concat(live.map(urls => ({ urls })));
+        console.warn(
+          `[Voice] Falling back to Haven's built-in STUN pool for this session (${live.join(', ')}). ` +
+          'The configured servers stay saved and untouched.'
+        );
+      }
+
+      if (!this._connectivityWarned && typeof this.onConnectivityWarning === 'function') {
+        this._connectivityWarned = true;
+        this.onConnectivityWarning(live.length
+          ? `None of this server's configured STUN servers are responding (${dead.join(', ')}). ` +
+            'Haven is using its built-in servers for now so calls keep working, but an admin ' +
+            'should fix or clear that setting in Settings, Voice & Connectivity.'
+          : `None of this server's configured STUN servers are responding (${dead.join(', ')}). ` +
+            'Calls will only work on your local network until an admin fixes them in ' +
+            'Settings, Voice & Connectivity, or clears the setting to fall back on the defaults.'
+        );
+      }
+    } catch (err) {
+      console.warn('[Voice] Configured STUN probe failed:', err && err.message);
+    }
+  }
 
   async _probeDefaultStun() {
     try {
@@ -186,35 +434,11 @@ class VoiceManager {
       // those with probe results.
       await new Promise(r => setTimeout(r, 250));
       if (this._adminIceServersLoaded) return;
+      // Relay-only deliberately discards srflx candidates, which is exactly
+      // what this probe measures. Probing would report every STUN server dead.
+      if (this._relayOnly) return;
 
-      const probeOne = (url, timeoutMs = 2500) => new Promise(resolve => {
-        let settled = false;
-        let pc;
-        const done = ok => {
-          if (settled) return;
-          settled = true;
-          try { pc && pc.close(); } catch { /* ignore */ }
-          resolve({ url, ok });
-        };
-        try {
-          pc = new RTCPeerConnection({ iceServers: [{ urls: url }] });
-          // DataChannel forces ICE gathering even without media tracks.
-          pc.createDataChannel('probe');
-          pc.onicecandidate = e => {
-            if (!e.candidate) return;
-            const cand = e.candidate.candidate || '';
-            if (cand.includes('typ srflx')) done(true);
-          };
-          pc.createOffer()
-            .then(o => pc.setLocalDescription(o))
-            .catch(() => done(false));
-          setTimeout(() => done(false), timeoutMs);
-        } catch {
-          done(false);
-        }
-      });
-
-      const preferred = await Promise.all(this._stunPreferred.map(u => probeOne(u)));
+      const preferred = await Promise.all(this._stunPreferred.map(u => this._probeStunUrl(u)));
       const livePreferred = preferred.filter(p => p.ok).map(p => p.url);
 
       if (this._adminIceServersLoaded) return; // admin won the race after all
@@ -225,34 +449,206 @@ class VoiceManager {
         return;
       }
 
-      // All preferred dead — bring in the fallback pool. Probe those too
-      // so we don't list servers that themselves happen to be unreachable.
-      console.warn('[Voice] All preferred STUN servers failed probe; trying fallback pool.');
-      const fallback = await Promise.all(this._stunFallback.map(u => probeOne(u)));
-      const liveFallback = fallback.filter(p => p.ok).map(p => p.url);
-
-      if (this._adminIceServersLoaded) return;
-
-      if (liveFallback.length) {
-        this.rtcConfig.iceServers = liveFallback.map(urls => ({ urls }));
-        console.warn(`🧊 Using fallback STUN pool (${liveFallback.length} alive): ${liveFallback.join(', ')}`);
-      } else {
-        // Every server we know about is unresponsive. Keep the original
-        // preferred list anyway — peers on the same LAN can still connect
-        // via host candidates and at least one server might come back up
-        // mid-call.
-        console.error('[Voice] All known STUN servers failed probe — external WebRTC will be impaired until an admin configures TURN.');
-        // Surface this to the user instead of leaving them stuck on
-        // "ICE: Connecting..." with no explanation (#5399). LAN calls still
-        // work, so keep it a warning, not a hard error.
-        if (!this._connectivityWarned && typeof this.onConnectivityWarning === 'function') {
-          this._connectivityWarned = true;
-          this.onConnectivityWarning('Voice connection servers (STUN) are unreachable. Calls may only work on your local network until an admin sets STUN/TURN in Settings → Voice & Connectivity.');
-        }
+      // Every preferred server is unresponsive. Keep the original list
+      // anyway: peers on the same LAN still connect via host candidates, and
+      // one of the providers may come back up mid-call. We no longer fall
+      // back to Google STUN; three independent providers is enough redundancy.
+      console.error('[Voice] All preferred STUN servers failed probe; external WebRTC will be impaired until an admin configures STUN/TURN.');
+      // Surface this to the user instead of leaving them stuck on
+      // "ICE: Connecting..." with no explanation (#5399). LAN calls still
+      // work, so keep it a warning, not a hard error.
+      if (!this._connectivityWarned && typeof this.onConnectivityWarning === 'function') {
+        this._connectivityWarned = true;
+        this.onConnectivityWarning('Voice connection servers (STUN) are unreachable. Calls may only work on your local network until an admin sets STUN/TURN in Settings → Voice & Connectivity.');
       }
     } catch (err) {
       console.warn('[Voice] STUN probe failed:', err && err.message);
     }
+  }
+
+  // ── Session truth & self-repair ─────────────────────────
+  //
+  // `inVoice` / `currentChannel` are local bookkeeping, and the whole UI is
+  // driven off them by fire-and-forget calls scattered across half a dozen
+  // call sites. When they get out of step with reality there is nothing that
+  // ever puts them back — the user is stranded looking at a "Join Voice"
+  // button while still talking to their friends. The peer connections are the
+  // real source of truth: if any of them is still connected, we are in voice,
+  // whatever the flags say.
+
+  liveVoicePeerCount() {
+    let n = 0;
+    for (const [, peer] of this.peers) {
+      const cs = peer && peer.connection && peer.connection.connectionState;
+      // Only 'connected' counts. 'new'/'connecting' would also match a peer
+      // that is on its way out, and we must not resurrect a session the user
+      // genuinely left.
+      if (cs === 'connected') n++;
+    }
+    return n;
+  }
+
+  /**
+   * Repair the "UI says I left but the media session is alive" desync.
+   * Returns true if state was actually repaired.
+   */
+  reassertSessionIfLive() {
+    if (this.inVoice && this.currentChannel) return false; // flags already agree
+    const live = this.liveVoicePeerCount();
+    const micLive = !!(this.localStream &&
+      this.localStream.getTracks().some(t => t.readyState === 'live'));
+    // Peers OR a still-live local mic count as "session alive". After a
+    // maximize-triggered socket blip the peer map can briefly report 0
+    // connected while the mic track and remote audio elements are still up.
+    if (live === 0 && !micLive) return false;              // genuinely not in voice
+    let code = this.currentChannel || this._softLeftChannel;
+    if (!code) {
+      try { code = localStorage.getItem('haven_voice_channel'); } catch { /* ignore */ }
+    }
+    if (!code) return false; // live media but no idea which channel — leave it alone
+    console.warn('[Voice] Local state said not-in-voice but media is live',
+      `(peers=${live}, micLive=${micLive}) — restoring session state for`, code);
+    this.currentChannel = code;
+    this.inVoice = true;
+    this._voiceSessionGeneration = (this._voiceSessionGeneration || 0) + 1;
+    this._softLeftChannel = null;
+    try { localStorage.setItem('haven_voice_channel', code); } catch { /* ignore */ }
+    // Our socket may have been rebound while we thought we were out; rejoin so
+    // the server roster and our peers agree with us again. Throttled so a
+    // repeatedly-failing repair can't spam signalling.
+    const now = Date.now();
+    if (this.socket && this.socket.connected && now - (this._lastReassertAt || 0) > 3000) {
+      this._lastReassertAt = now;
+      this.socket.emit('voice-rejoin', { code, ...this.getNativeScreenClientInfo() });
+    }
+    return true;
+  }
+
+  deferChannelGone(timeoutMs = 6000) {
+    // Once the server has answered, reconnect flaps must not discard that
+    // answer or extend its absolute deadline beyond the original window.
+    if (this._deferredChannelGone) return;
+    this._deferChannelGoneUntil = Date.now() + timeoutMs;
+  }
+
+  resolveDeferredChannelGone(recoveredCode = null) {
+    this._deferChannelGoneUntil = 0;
+    if (this._deferredChannelGoneTimer) {
+      clearTimeout(this._deferredChannelGoneTimer);
+      this._deferredChannelGoneTimer = null;
+    }
+    const pending = this._deferredChannelGone;
+    this._deferredChannelGone = null;
+    const sameSession = pending &&
+      pending.generation === (this._voiceSessionGeneration || 0) &&
+      pending.code === this.currentChannel;
+    if (!recoveredCode && sameSession && this.inVoice) {
+      console.warn('[Voice] Server confirmed voice channel is gone — leaving locally:', pending.code);
+      try { this.leave(); } catch (e) { console.warn('[Voice] leave() during deferred voice-channel-gone failed:', e); }
+    }
+  }
+
+  /**
+   * Re-deliver every active sharer's screen to the UI. Used after the tiles
+   * were torn down while the media session stayed alive — the packets never
+   * stopped arriving, so in the common case this restores the picture without
+   * any signalling at all.
+   */
+  reassertScreenStreams() {
+    let restored = 0;
+    for (const sharerId of this.screenSharers) {
+      if (sharerId === this.localUserId) continue;
+      this._screenDelivered.delete(sharerId);
+      if (this._deliverScreenFromReceivers(sharerId)) restored++;
+      else {
+        this.requestScreenStream(sharerId);
+        this._watchForScreenStream(sharerId);
+      }
+    }
+    return restored;
+  }
+
+  // ── Perfect negotiation: glare tie-break ────────────────
+  //
+  // Exactly one side of each pair must be "polite" (yields to an incoming
+  // offer) and the other "impolite" (ignores it and lets its own offer win).
+  // Comparing user ids gives both ends the same verdict without extra
+  // signalling. If we somehow don't know our own id yet, be polite —
+  // yielding is always safe, whereas two impolite peers would deadlock.
+  _isPolite(remoteUserId) {
+    const mine = this.localUserId;
+    if (mine == null || remoteUserId == null) return true;
+    return Number(mine) < Number(remoteUserId);
+  }
+
+  _nativeScreenCodecs() {
+    const codecs = new Set();
+    try {
+      const capabilities = globalThis.RTCRtpReceiver?.getCapabilities?.('video')?.codecs || [];
+      for (const codec of capabilities) {
+        const name = String(codec?.mimeType || '').replace(/^video\//i, '').toUpperCase();
+        if (name === 'H264' || name === 'AV1' || name === 'H265') codecs.add(name);
+      }
+    } catch {}
+    // H.264 is the protocol baseline and is available in supported Chromium builds.
+    if (codecs.size === 0) codecs.add('H264');
+    return ['H264', 'AV1', 'H265'].filter(codec => codecs.has(codec));
+  }
+
+  getNativeScreenClientInfo() {
+    return {
+      nativeScreenVersion: 2,
+      nativeScreenCodecs: this._nativeScreenCodecs(),
+    };
+  }
+
+  _nativeScreenEnabled() {
+    try { return localStorage.getItem('haven_native_screen_share') === '1'; }
+    catch { return false; }
+  }
+
+  _rememberNativeScreenPeer(user) {
+    if (!user || user.id == null) return;
+    const codecs = Array.isArray(user.nativeScreenCodecs)
+      ? user.nativeScreenCodecs.filter(codec =>
+          codec === 'H264' || codec === 'AV1' || codec === 'H265'
+        )
+      : [];
+    this._nativeScreenPeerCapabilities.set(user.id, {
+      version: user.nativeScreenVersion === 2 ? 2 : 0,
+      codecs,
+      isBot: user.isBot === true,
+    });
+  }
+
+  _nativeScreenCodecIntersection() {
+    let codecs = this._nativeScreenCodecs();
+    const peerCapabilities = this._nativeScreenPeerCapabilities;
+    for (const peerId of this.peers.keys()) {
+      // Prototype-only unit harnesses predate the capability map. Real instances
+      // always initialize it in the constructor.
+      if (!peerCapabilities) continue;
+      const peer = peerCapabilities.get(peerId);
+      if (peer?.isBot) continue;
+      if (peer?.version !== 2) return [];
+      codecs = codecs.filter(codec => peer.codecs.includes(codec));
+    }
+    return codecs;
+  }
+
+  // True when an incoming offer arrives while we have an offer of our own in
+  // flight — the only situation where politeness matters.
+  _isCollision(peer, connection) {
+    return !!(peer && (peer._makingOffer || peer._awaitingAnswer ||
+      connection.signalingState !== 'stable'));
+  }
+
+  // Opt-in Debug toggle (Settings -> Debug) for the #5444 glare/ICE-restart
+  // recovery. Off by default while it's unverified in the field; read live so
+  // flipping it takes effect on the next renegotiation without a reload.
+  _glareIceRestartFixEnabled() {
+    try { return localStorage.getItem('haven_voice_glare_ice_fix') === '1'; }
+    catch { return false; }
   }
 
   // ── Socket event listeners ──────────────────────────────
@@ -265,23 +661,73 @@ class VoiceManager {
     this.socket.on('voice-channel-gone', (data) => {
       if (!this.inVoice) return;
       if (this.currentChannel && data && data.code && data.code !== this.currentChannel) return;
+      const remaining = (this._deferChannelGoneUntil || 0) - Date.now();
+      if (remaining > 0) {
+        this._deferredChannelGone = {
+          code: data?.code || this.currentChannel,
+          generation: this._voiceSessionGeneration || 0
+        };
+        if (this._deferredChannelGoneTimer) clearTimeout(this._deferredChannelGoneTimer);
+        this._deferredChannelGoneTimer = setTimeout(() => {
+          this._deferredChannelGoneTimer = null;
+          this.resolveDeferredChannelGone(false);
+        }, remaining);
+        return;
+      }
       console.warn('[Voice] Server says voice channel is gone — leaving locally:', data && data.code);
       try { this.leave(); } catch (e) { console.warn('[Voice] leave() during voice-channel-gone failed:', e); }
     });
 
     // We just joined: create peer connections + send offers to all existing users
     this.socket.on('voice-existing-users', async (data) => {
+      const channelCode = data?.channelCode;
+      const voiceGeneration = this._voiceSessionGeneration || 0;
+      const stillCurrent = () => this.inVoice && this.currentChannel === channelCode &&
+        (this._voiceSessionGeneration || 0) === voiceGeneration;
+      if (!channelCode || !stillCurrent()) return;
+      this._flushPendingScreenStop(channelCode);
+      for (const user of data.users || []) this._rememberNativeScreenPeer(user);
       // Apply audio bitrate cap from channel settings
       this.audioBitrate = data.voiceBitrate || 0;
+      if (data.rejoin && !data.skipRenegotiate) {
+        this._reannounceScreenShare(data.users || [], { channelCode, voiceGeneration }).catch(err => {
+          console.warn('[NativeScreen] Failed to restore screen share after voice rejoin:', err);
+        });
+      }
       // Fast-path: server told us this is a transient rejoin and our
       // existing RTCPeerConnections are still live. Skip creating fresh
       // peers — that would tear down working audio for no reason. See
       // [VoiceDiag] fast-path in src/socketHandlers/voice.js.
       if (data.skipRenegotiate) {
         console.log('[Voice] voice-existing-users with skipRenegotiate — keeping existing peers');
+        // Still re-arm screen recovery. A blip that kept the peer
+        // connection "connected" can still drop the screen video track
+        // (transceiver goes muted / track ends) without tearing voice
+        // down. Without this, streams that were visible at startup
+        // vanish until the sharer fully restreams.
+        this._rearmScreenWatchdogs();
+        return;
+      }
+      // Safety net: even without the skipRenegotiate flag, never tear down
+      // a healthy session. Resize/maximize used to trigger voice-rejoin →
+      // voice-existing-users without skip, and _createPeer() destroyed every
+      // live peer (killing the stream tile while audio sometimes limped on
+      // a half-closed path). Only build peers we don't already have.
+      if (this.inVoice && this.peers.size > 0) {
+        const missing = (data.users || []).filter(u => u && !this.peers.has(u.id));
+        console.warn('[Voice] voice-existing-users during live session — keeping peers, adding missing only', {
+          existing: this.peers.size,
+          missing: missing.length
+        });
+        for (const user of missing) {
+          if (!stillCurrent()) return;
+          await this._createPeer(user.id, user.username, true);
+        }
+        this._rearmScreenWatchdogs();
         return;
       }
       for (const user of data.users) {
+        if (!stillCurrent()) return;
         await this._createPeer(user.id, user.username, true);
       }
     });
@@ -290,8 +736,9 @@ class VoiceManager {
     this.socket.on('voice-user-joined', (data) => {
       // The new user handles creating offers to existing users,
       // so we just wait for their offer via 'voice-offer'.
-      if (this.onVoiceJoin && data && data.user) {
-        this.onVoiceJoin(data.user.id, data.user.username);
+      if (data?.user) {
+        this._rememberNativeScreenPeer(data.user);
+        if (this.onVoiceJoin) this.onVoiceJoin(data.user.id, data.user.username);
       }
     });
 
@@ -329,24 +776,91 @@ class VoiceManager {
 
       try {
         const conn = peer.connection;
-        // An incoming offer supersedes any local offer we were preparing or
-        // waiting to have answered. Clear those flags so the post-answer drain
-        // can safely issue one fresh follow-up offer if local changes are still pending.
+        peer._handlingRemoteOffer = true;
+
+        // ── Glare handling (perfect negotiation) ──────────────
+        //
+        // Both sides of a Haven peer connection can initiate a renegotiation
+        // (screen share start/stop, webcam, ICE restart, the server's
+        // renegotiate-screen nudge to a late joiner…), so simultaneous offers
+        // are routine. Until now BOTH sides rolled back their own offer and
+        // answered the other's. That looks symmetric but is actually broken:
+        // each peer ends up having applied the *other's* offer and its own
+        // answer, and neither peer's answer is ever applied by the other. The
+        // two halves describe different negotiations, so the ICE/DTLS
+        // parameters don't line up and media dies in both directions — while
+        // signalingState sits happily at 'stable' so nothing self-heals.
+        //
+        // This is the "rejoined voice and can't hear one specific person"
+        // report: the joiner's fresh offer collided with the renegotiate-screen
+        // offer the server asks active sharers to send to new joiners, so it
+        // only ever hit whoever happened to be streaming.
+        //
+        // Perfect negotiation needs exactly one polite peer. Tie-break on user
+        // id — deterministic and both sides compute the same answer.
+        if (this._isCollision(peer, conn) && !this._isPolite(from.id)) {
+          // Impolite peer: ignore the incoming offer. The polite side will roll
+          // its own offer back and answer ours, so we still converge — with one
+          // negotiation instead of two conflicting ones.
+          console.warn('[Voice] offer glare with', from.id, '— ignoring their offer (we are impolite)');
+          return;
+        }
+
+        // Polite peer: our offer yields. Clear the in-flight flags so the
+        // post-answer drain can re-issue one fresh follow-up offer afterwards
+        // if we still have local changes to publish.
+        const hadPendingLocalChanges = peer._makingOffer || peer._awaitingAnswer;
+        const rolledBackIceRestart = !!peer._offerIsIceRestart;
+        const activeOfferId = peer._activeOfferId;
+        if (conn.signalingState !== 'stable') {
+          this._clearOfferAnswerTimer(peer);
+          try {
+            await conn.setLocalDescription({ type: 'rollback' });
+          } catch (err) {
+            if (conn.signalingState !== 'stable') {
+              if (peer._awaitingAnswer && activeOfferId && conn.signalingState !== 'closed') {
+                this._scheduleOfferAnswerTimeout(from.id, conn, activeOfferId);
+              }
+              throw err;
+            }
+          }
+        }
+        this._clearOfferAnswerTimer(peer);
         peer._makingOffer = false;
         peer._awaitingAnswer = false;
-        // Handle renegotiation glare: if we have a pending local offer,
-        // roll it back first so we can accept the incoming one.
-        if (conn.signalingState !== 'stable') {
-          await conn.setLocalDescription({ type: 'rollback' });
+        peer._activeOfferId = null;
+        peer._offerIsIceRestart = false;
+        peer._offerChannelCode = null;
+        // Anything we were trying to publish (added screen tracks, an ICE
+        // restart) was just discarded with the rollback. Queue it so the drain
+        // after this answer re-offers it, rather than silently losing it.
+        if (hadPendingLocalChanges) {
+          peer._renegotiateQueued = true;
+          // (#5444, opt-in Debug toggle) When the offer we just rolled back was
+          // an ICE restart, the drain used to re-issue it as a *plain*
+          // renegotiation because the restart intent wasn't carried across the
+          // rollback. On a reconnect where both peers ICE-restart at once (the
+          // #5427 heal), that left the media path un-restarted and crossed the
+          // two sides' ICE credentials — producing "answer indicates ICE
+          // restart but offer did not request ICE restart" plus a flood of
+          // "Unknown ufrag" candidate errors, and audio stayed dead until a
+          // manual rejoin. Re-queuing the restart makes the follow-up offer
+          // actually restart ICE. Gated behind a toggle while it's unverified
+          // in the field (Settings -> Debug).
+          if (rolledBackIceRestart && this._glareIceRestartFixEnabled()) {
+            peer._queuedIceRestart = true;
+          }
         }
         await conn.setRemoteDescription(new RTCSessionDescription(offer));
+        if (typeof data.offerId === 'string') peer._supportsOfferIds = true;
         const answer = await conn.createAnswer();
         await conn.setLocalDescription(answer);
 
         this.socket.emit('voice-answer', {
           code: this.currentChannel,
           targetUserId: from.id,
-          answer: answer
+          answer: answer,
+          offerId: typeof data.offerId === 'string' ? data.offerId : undefined
         });
 
         // Flush any ICE candidates that arrived before the remote
@@ -364,6 +878,9 @@ class VoiceManager {
         console.error('Error handling voice offer:', err);
       } finally {
         const latestPeer = this.peers.get(from.id);
+        if (latestPeer && latestPeer.connection === peer?.connection) {
+          latestPeer._handlingRemoteOffer = false;
+        }
         if (latestPeer && latestPeer.connection === peer?.connection && latestPeer.connection.signalingState === 'stable') {
           latestPeer._awaitingAnswer = false;
           this._drainQueuedRenegotiation(from.id);
@@ -375,12 +892,29 @@ class VoiceManager {
     this.socket.on('voice-answer', async (data) => {
       const peer = this.peers.get(data.from.id);
       if (peer) {
+        const answerOfferId = typeof data.offerId === 'string' ? data.offerId : null;
+        if (answerOfferId) peer._supportsOfferIds = true;
+        const staleCorrelatedAnswer = peer._activeOfferId && answerOfferId &&
+          answerOfferId !== peer._activeOfferId;
+        const unsafeLegacyAnswer = peer._activeOfferId && !answerOfferId &&
+          (peer._supportsOfferIds || (peer._offerTimeoutCount || 0) > 0);
+        if (staleCorrelatedAnswer || unsafeLegacyAnswer) {
+          console.warn('[Voice] Ignoring stale answer for peer', data.from.id,
+            `(expected ${peer._activeOfferId}, received ${answerOfferId || 'no offer id'})`);
+          return;
+        }
         try {
           // Only accept answer if we're actually waiting for one
           // (we may have rolled back our offer due to glare)
           if (peer.connection.signalingState === 'have-local-offer') {
             await peer.connection.setRemoteDescription(new RTCSessionDescription(data.answer));
+            this._clearOfferAnswerTimer(peer);
             peer._awaitingAnswer = false;
+            peer._activeOfferId = null;
+            peer._offerTimeoutCount = 0;
+            peer._offerRecoveryExhausted = false;
+            peer._offerIsIceRestart = false;
+            peer._offerChannelCode = null;
             // Flush buffered ICE candidates that arrived before the answer
             if (peer._pendingCandidates && peer._pendingCandidates.length) {
               for (const c of peer._pendingCandidates) {
@@ -390,12 +924,16 @@ class VoiceManager {
             }
           } else if (peer._awaitingAnswer && peer.connection.signalingState === 'stable') {
             // Stale answer for a local offer we already rolled back after glare.
+            this._clearOfferAnswerTimer(peer);
             peer._awaitingAnswer = false;
+            peer._activeOfferId = null;
           }
         } catch (err) {
           console.error('Error handling voice answer:', err);
           if (peer._awaitingAnswer && peer.connection.signalingState === 'stable') {
+            this._clearOfferAnswerTimer(peer);
             peer._awaitingAnswer = false;
+            peer._activeOfferId = null;
           }
         } finally {
           if (peer.connection.signalingState === 'stable') {
@@ -457,7 +995,20 @@ class VoiceManager {
       }
       this._stopAnalyser(data.user.id);
       this._removePeer(data.user.id);
+      this._closeNativeScreenPeer(data.user.id);
+      this._nativeScreenAnnouncements.delete(data.user.id);
+      this._nativeScreenPeerCapabilities.delete(data.user.id);
+      if (this._nativeScreenSharing) {
+        for (const key of this._nativeScreenSenderStates.keys()) {
+          if (key.startsWith(`${data.user.id}:`)) this._nativeScreenSenderStates.delete(key);
+        }
+        window.havenDesktop?.nativeScreen?.removePeer?.({
+          peerId: data.user.id,
+          sessionId: this._nativeScreenSessionId,
+        }).catch(() => {});
+      }
       // If they were screen sharing, clean up
+      this._screenDelivered.delete(data.user.id);
       if (this.screenSharers.has(data.user.id)) {
         this.screenSharers.delete(data.user.id);
         if (this.onScreenStream) this.onScreenStream(data.user.id, null);
@@ -500,7 +1051,21 @@ class VoiceManager {
 
     // Someone started screen sharing
     this.socket.on('screen-share-started', (data) => {
+      if (!data || data.channelCode !== this.currentChannel) return;
       this.screenSharers.add(data.userId);
+      this._cancelScreenWatchdog(data.userId);
+      this._closeNativeScreenPeer(data.userId);
+      if (data.transport === 'native' && data.sessionId) {
+        this._nativeScreenAnnouncements.set(data.userId, data.sessionId);
+      } else {
+        this._nativeScreenAnnouncements.delete(data.userId);
+      }
+      // New share — the previous one's delivery says nothing about this one.
+      this._screenDelivered.delete(data.userId);
+      // A deliberate new share deserves a clean renegotiation budget; the
+      // cap exists to stop a loop on one stuck share, not to punish someone
+      // who stopped and started again. (#5426)
+      if (this.onScreenShareRestart) this.onScreenShareRestart(data.userId);
       // Play stream start notification sound
       if (this.onScreenShareStarted) {
         this.onScreenShareStarted(data.userId, data.username);
@@ -515,37 +1080,52 @@ class VoiceManager {
       // refreshed the list (e.g. start sharing themselves).
       if (this.onWebcamStatusChange) this.onWebcamStatusChange();
 
-      // Safety net: if screen-share-started fires but the renegotiation
-      // offer carrying the video track never reaches us (dropped event,
-      // sharer's _renegotiate failed silently because of a non-stable
-      // signaling state, etc.), the receiver gets no tile at all. Check
-      // ~3s later whether the peer connection has any video receiver from
-      // the sharer; if not, ask the server to forward a renegotiate-screen
-      // back to the sharer. This is the silent-failure recovery path for
-      // the long-standing \"sharer goes live but nothing appears on my
-      // end\" bug. (#5347 v3.15.5)
-      setTimeout(() => {
-        if (!this.screenSharers.has(data.userId)) return;
-        const peer = this.peers.get(data.userId);
-        if (!peer) return;
-        const hasVideoReceiver = peer.connection.getReceivers().some(r =>
-          r.track && r.track.kind === 'video' && r.track.readyState === 'live'
-        );
-        if (!hasVideoReceiver && this.inVoice && this.currentChannel) {
-          console.warn('[Voice] No video track from screen sharer', data.userId, 'after 3s, requesting renegotiate');
-          this.socket.emit('request-screen-renegotiate', {
-            code: this.currentChannel,
-            sharerId: data.userId
-          });
-        }
-      }, 3000);
+      // Safety net: if screen-share-started fires but the video never reaches
+      // our UI — the renegotiation offer was dropped, the sharer's
+      // _renegotiate bailed on a non-stable signaling state, or the reshare
+      // coalesced so no track event fired — recover instead of leaving the
+      // viewer with a LIVE badge and an empty grid. (#5347 v3.15.5)
+      this._watchForScreenStream(data.userId);
     });
 
     // Someone stopped screen sharing
     this.socket.on('screen-share-stopped', (data) => {
+      if (!data || data.channelCode !== this.currentChannel) return;
       this.screenSharers.delete(data.userId);
+      this._cancelScreenWatchdog(data.userId);
+      this._screenDelivered.delete(data.userId);
+      this._closeNativeScreenPeer(data.userId);
+      this._nativeScreenAnnouncements.delete(data.userId);
       if (this.onScreenStream) this.onScreenStream(data.userId, null);
       if (this.onWebcamStatusChange) this.onWebcamStatusChange();
+    });
+
+    this.socket.on('native-screen-incompatible-peer', data => {
+      if (!this._nativeScreenSharing || data?.channelCode !== this.currentChannel ||
+          data.sessionId !== this._nativeScreenSessionId) return;
+      console.warn('[NativeScreen] Stopping because a viewer does not support native screen transport');
+      if (this.onScreenShareWarning) this.onScreenShareWarning();
+      this.stopScreenShare().catch(err => {
+        console.warn('[NativeScreen] Failed to stop incompatible native share:', err);
+      });
+    });
+
+    this.socket.on('native-screen-offer', data => {
+      this._handleNativeScreenOffer(data).catch(err => {
+        console.error('[NativeScreen] Failed to accept offer:', err);
+      });
+    });
+
+    this.socket.on('native-screen-answer', data => {
+      this._handleNativeScreenAnswer(data).catch(err => {
+        console.warn('[NativeScreen] Failed to apply answer:', err);
+      });
+    });
+
+    this.socket.on('native-screen-ice-candidate', data => {
+      this._handleNativeScreenIceCandidate(data).catch(err => {
+        console.warn('[NativeScreen] Failed to apply ICE candidate:', err);
+      });
     });
 
     // Someone started their webcam
@@ -563,15 +1143,49 @@ class VoiceManager {
 
     // Late joiner: server tells us about active screen sharers
     this.socket.on('active-screen-sharers', (data) => {
-      if (data && data.sharers) {
+      if (data?.channelCode === this.currentChannel && data.sharers) {
+        const active = new Map(data.sharers.map(sharer => [sharer.id, sharer]));
+        for (const sharerId of Array.from(this.screenSharers)) {
+          if (active.has(sharerId)) continue;
+          if (sharerId === this.localUserId && this.isScreenSharing) continue;
+          this.screenSharers.delete(sharerId);
+          this._cancelScreenWatchdog(sharerId);
+          this._screenDelivered.delete(sharerId);
+          this._closeNativeScreenPeer(sharerId);
+          this._nativeScreenAnnouncements.delete(sharerId);
+          if (this.onScreenStream) this.onScreenStream(sharerId, null);
+        }
         data.sharers.forEach(s => {
+          if (s.id === this.localUserId && !this.isScreenSharing) return;
           this.screenSharers.add(s.id);
+          if (s.hasAudio === false && this.onScreenNoAudio) {
+            this.onScreenNoAudio(s.id);
+          }
+          if (s.transport === 'native' && s.sessionId) {
+            const previousSession = this._nativeScreenAnnouncements.get(s.id);
+            if (previousSession && previousSession !== s.sessionId) {
+              this._closeNativeScreenPeer(s.id);
+              this._screenDelivered.delete(s.id);
+              if (this.onScreenStream) this.onScreenStream(s.id, null);
+            }
+            this._nativeScreenAnnouncements.set(s.id, s.sessionId);
+          } else {
+            if (this._nativeScreenAnnouncements.has(s.id)) {
+              this._closeNativeScreenPeer(s.id);
+              this._screenDelivered.delete(s.id);
+              if (this.onScreenStream) this.onScreenStream(s.id, null);
+            }
+            this._nativeScreenAnnouncements.delete(s.id);
+          }
           // Late joiners never receive 'screen-share-started', so they never
           // armed the silent-failure recovery watchdog. Arm it here so a
           // dropped or late late-join renegotiation self-heals instead of
           // stranding the viewer with a LIVE badge and no video.
-          this._watchForScreenStream(s.id);
+          if (s.id !== this.localUserId) this._watchForScreenStream(s.id);
         });
+        if (this.isScreenSharing && this.localUserId != null) {
+          this.screenSharers.add(this.localUserId);
+        }
         if (this.onWebcamStatusChange) this.onWebcamStatusChange();
       }
     });
@@ -586,30 +1200,61 @@ class VoiceManager {
 
     // Server asks us to renegotiate our screen share with a late joiner
     this.socket.on('renegotiate-screen', async (data) => {
-      if (!this.screenStream || !this.isScreenSharing) return;
-      const peer = this.peers.get(data.targetUserId);
-      if (!peer) return;
-      const conn = peer.connection;
+      if (!this.isScreenSharing || data?.channelCode !== this.currentChannel) return;
+      const targetUserId = data && data.targetUserId;
+      if (targetUserId == null) return;
 
-      // Add screen share tracks if they aren't already on this peer.
-      // Match by track identity — the previous "any video sender" check
-      // wrongly considered a webcam sender as proof that the screen tracks
-      // were already attached, leaving late joiners with audio but no
-      // screen video when the sharer also had their webcam on.
-      // (#5347 v3.15.5)
-      const senders = conn.getSenders();
-      const screenTracks = this.screenStream.getTracks().filter(t => t.readyState === 'live');
-      const missing = screenTracks.filter(track => !senders.some(s => s.track === track));
-      if (missing.length) {
-        missing.forEach(track => conn.addTrack(track, this.screenStream));
-        const res = this.screenResolution;
-        const maxBitrate = this._screenBitrates[res] || this._screenBitrates[0];
-        this._applyScreenBitrate(conn, maxBitrate);
+      if (this._nativeScreenSharing) {
+        this._replaceNativeScreenPeer(targetUserId).catch(err => {
+          console.warn('[NativeScreen] Failed to renegotiate native peer:', err);
+        });
+        return;
       }
+      if (!this.screenStream) return;
 
-      // Renegotiate to include the video tracks (or refresh an existing
-      // screen-share m-section that the receiver lost frames on)
-      await this._renegotiate(data.targetUserId, conn);
+      // Peer may not exist yet (joiner's offer still in flight). Retry a
+      // few times instead of silently dropping the request — that silent
+      // drop is a common "stream visible at join, then gone forever"
+      // path: server fires renegotiate-screen at T+2s, joiner's peer
+      // isn't registered yet, and nothing ever re-asks.
+      const tryRenegotiate = async (attemptsLeft) => {
+        if (!this.screenStream || !this.isScreenSharing) return;
+        const peer = this.peers.get(targetUserId);
+        if (!peer) {
+          if (attemptsLeft > 0) {
+            setTimeout(() => { tryRenegotiate(attemptsLeft - 1); }, 750);
+          } else {
+            console.warn('[Voice] renegotiate-screen: no peer for', targetUserId, 'after retries');
+          }
+          return;
+        }
+        const conn = peer.connection;
+        if (!conn || conn.connectionState === 'closed') {
+          if (attemptsLeft > 0) setTimeout(() => { tryRenegotiate(attemptsLeft - 1); }, 750);
+          return;
+        }
+
+        // Add screen share tracks if they aren't already on this peer.
+        // Match by track identity — the previous "any video sender" check
+        // wrongly considered a webcam sender as proof that the screen tracks
+        // were already attached, leaving late joiners with audio but no
+        // screen video when the sharer also had their webcam on.
+        // (#5347 v3.15.5)
+        const senders = conn.getSenders();
+        const screenTracks = this.screenStream.getTracks().filter(t => t.readyState === 'live');
+        const missing = screenTracks.filter(track => !senders.some(s => s.track === track));
+        if (missing.length) {
+          missing.forEach(track => conn.addTrack(track, this.screenStream));
+          const res = this.screenResolution;
+          const maxBitrate = this._screenBitrates[res] || this._screenBitrates[0];
+          this._applyScreenBitrate(conn, maxBitrate, targetUserId);
+        }
+
+        // Renegotiate to include the video tracks (or refresh an existing
+        // screen-share m-section that the receiver lost frames on)
+        await this._renegotiate(targetUserId, conn);
+      };
+      tryRenegotiate(6);
     });
 
     // Server asks us to renegotiate our webcam with a late joiner
@@ -631,6 +1276,536 @@ class VoiceManager {
     });
   }
 
+  _setupNativeScreenBridge() {
+    const api = window.havenDesktop?.nativeScreen;
+    if (!api?.onSignal) return;
+    api.onSignal(signal => {
+      if (!this._nativeScreenSharing || !signal || signal.sessionId !== this._nativeScreenSessionId) return;
+      if (signal.type === 'error') {
+        console.error('[NativeScreen]', signal.message || 'Native media process failed');
+        if (signal.fatal) this._handleNativeScreenFailure(signal.message);
+        return;
+      }
+      const common = {
+        code: this.currentChannel,
+        targetUserId: signal.peerId,
+        sessionId: signal.sessionId,
+        negotiationId: signal.negotiationId,
+      };
+      if (!common.code || common.targetUserId == null || !common.negotiationId) return;
+      if (signal.type === 'offer' && signal.description) {
+        for (const key of this._nativeScreenSenderStates.keys()) {
+          if (key.startsWith(`${signal.peerId}:`)) this._nativeScreenSenderStates.delete(key);
+        }
+        this._nativeScreenSenderStates.set(
+          `${signal.peerId}:${signal.sessionId}:${signal.negotiationId}`,
+          {
+          ready: false,
+          applying: null,
+          candidates: [],
+          }
+        );
+        this.socket.emit('native-screen-offer', { ...common, offer: signal.description });
+      } else if (signal.type === 'ice-candidate') {
+        this.socket.emit('native-screen-ice-candidate', {
+          ...common,
+          candidate: signal.candidate || null,
+        });
+      }
+    });
+  }
+
+  async _handleNativeScreenOffer(data) {
+    const sharerId = data?.from?.id;
+    if (sharerId == null || data.channelCode !== this.currentChannel) return;
+    if (!this.screenSharers.has(sharerId) || !data.offer || !data.sessionId || !data.negotiationId) return;
+    if (this._nativeScreenAnnouncements.get(sharerId) !== data.sessionId) return;
+
+    const pendingKey = `${sharerId}:${data.sessionId}:${data.negotiationId}`;
+    this._closeNativeScreenPeer(sharerId, data.sessionId, data.negotiationId);
+    const connection = new RTCPeerConnection(this.rtcConfig);
+    const entry = {
+      connection,
+      stream: new MediaStream(),
+      sessionId: data.sessionId,
+      negotiationId: data.negotiationId,
+      disconnectTimer: null,
+    };
+    this._nativeScreenPeers.set(sharerId, entry);
+
+    connection.onicecandidate = event => {
+      if (this._nativeScreenPeers.get(sharerId) !== entry) return;
+      this.socket.emit('native-screen-ice-candidate', {
+        code: this.currentChannel,
+        targetUserId: sharerId,
+        sessionId: entry.sessionId,
+        negotiationId: entry.negotiationId,
+        candidate: event.candidate?.toJSON?.() || event.candidate || null,
+      });
+    };
+    connection.ontrack = event => {
+      if (this._nativeScreenPeers.get(sharerId) !== entry) return;
+      const alreadyAdded = entry.stream.getTracks?.().some(track => track === event.track);
+      if (!alreadyAdded && typeof entry.stream.addTrack === 'function') {
+        entry.stream.addTrack(event.track);
+      } else if (!alreadyAdded && event.streams?.[0]) {
+        entry.stream = event.streams[0];
+      }
+      if (event.track.kind === 'audio') {
+        this._playScreenAudio(sharerId, entry.stream);
+        return;
+      }
+      if (event.track.kind !== 'video') return;
+      this._screenDelivered.add(sharerId);
+      if (this.onScreenStream) this.onScreenStream(sharerId, entry.stream);
+      event.track.onended = () => {
+        if (this._nativeScreenPeers.get(sharerId) !== entry) return;
+        this._recoverNativeScreenPeer(sharerId);
+      };
+    };
+    connection.onconnectionstatechange = () => {
+      if (this._nativeScreenPeers.get(sharerId) !== entry) return;
+      if (connection.connectionState === 'connected' && entry.disconnectTimer) {
+        clearTimeout(entry.disconnectTimer);
+        entry.disconnectTimer = null;
+      }
+      if (connection.connectionState === 'failed') {
+        this._recoverNativeScreenPeer(sharerId);
+      } else if (connection.connectionState === 'disconnected' && !entry.disconnectTimer) {
+        entry.disconnectTimer = setTimeout(() => {
+          if (this._nativeScreenPeers.get(sharerId) !== entry ||
+              connection.connectionState !== 'disconnected') return;
+          this._recoverNativeScreenPeer(sharerId);
+        }, 5000);
+      }
+    };
+
+    await connection.setRemoteDescription(data.offer);
+    if (this._nativeScreenPeers.get(sharerId) !== entry) return;
+    const pending = this._pendingNativeScreenCandidates.get(pendingKey) || [];
+    this._pendingNativeScreenCandidates.delete(pendingKey);
+    const answer = await connection.createAnswer();
+    await connection.setLocalDescription(answer);
+    if (this._nativeScreenPeers.get(sharerId) !== entry) return;
+    this.socket.emit('native-screen-answer', {
+      code: this.currentChannel,
+      targetUserId: sharerId,
+      sessionId: entry.sessionId,
+      negotiationId: entry.negotiationId,
+      answer: { type: answer.type, sdp: answer.sdp },
+    });
+
+    for (const candidate of pending) {
+      if (candidate) await connection.addIceCandidate(candidate).catch(() => {});
+    }
+  }
+
+  async _handleNativeScreenIceCandidate(data) {
+    const remoteId = data?.from?.id;
+    if (remoteId == null || data.channelCode !== this.currentChannel ||
+        !data.sessionId || !data.negotiationId) return;
+
+    if (this._nativeScreenSharing && data.sessionId === this._nativeScreenSessionId) {
+      const key = `${remoteId}:${data.sessionId}:${data.negotiationId}`;
+      const state = this._nativeScreenSenderStates.get(key);
+      if (!state) return;
+      if (!state.ready) {
+        state.candidates.push(data.candidate || null);
+        state.candidates = state.candidates.slice(-64);
+        return;
+      }
+      const pending = window.havenDesktop?.nativeScreen?.addIceCandidate?.({
+        peerId: remoteId,
+        sessionId: data.sessionId,
+        negotiationId: data.negotiationId,
+        candidate: data.candidate || null,
+      });
+      await this._withNativeScreenTimeout(pending, 'add ICE candidate');
+      return;
+    }
+
+    if (this._nativeScreenAnnouncements.get(remoteId) !== data.sessionId) return;
+
+    const entry = this._nativeScreenPeers.get(remoteId);
+    if (!entry || entry.sessionId !== data.sessionId ||
+        entry.negotiationId !== data.negotiationId || !entry.connection.remoteDescription) {
+      const key = `${remoteId}:${data.sessionId}:${data.negotiationId}`;
+      const pending = this._pendingNativeScreenCandidates.get(key) || [];
+      if (!this._pendingNativeScreenCandidates.has(key)) {
+        const prefix = `${remoteId}:${data.sessionId}:`;
+        const matching = Array.from(this._pendingNativeScreenCandidates.keys())
+          .filter(candidateKey => candidateKey.startsWith(prefix));
+        while (matching.length >= 4) {
+          this._pendingNativeScreenCandidates.delete(matching.shift());
+        }
+      }
+      pending.push(data.candidate || null);
+      this._pendingNativeScreenCandidates.set(key, pending.slice(-64));
+      return;
+    }
+    if (data.candidate) await entry.connection.addIceCandidate(data.candidate);
+  }
+
+  async _handleNativeScreenAnswer(data) {
+    const peerId = data?.from?.id;
+    if (!this._nativeScreenSharing || peerId == null ||
+        data?.channelCode !== this.currentChannel ||
+        data.sessionId !== this._nativeScreenSessionId || !data.negotiationId) return;
+    const api = window.havenDesktop?.nativeScreen;
+    if (!api?.setRemoteDescription) return;
+    const key = `${peerId}:${data.sessionId}:${data.negotiationId}`;
+    const state = this._nativeScreenSenderStates.get(key);
+    if (!state) return;
+    if (state.ready) return;
+    if (state.applying) return state.applying;
+
+    state.applying = (async () => {
+      try {
+        await this._withNativeScreenTimeout(api.setRemoteDescription({
+          peerId,
+          sessionId: data.sessionId,
+          negotiationId: data.negotiationId,
+          description: data.answer,
+        }), 'set remote description');
+        while (state.candidates.length) {
+          const candidates = state.candidates.splice(0);
+          for (const candidate of candidates) {
+            await this._withNativeScreenTimeout(api.addIceCandidate({
+              peerId,
+              sessionId: data.sessionId,
+              negotiationId: data.negotiationId,
+              candidate,
+            }), 'add ICE candidate');
+          }
+        }
+        state.ready = true;
+      } catch (err) {
+        if (this._nativeScreenSenderStates.get(key) === state) {
+          this._nativeScreenSenderStates.delete(key);
+          await this._withNativeScreenTimeout(
+            api.removePeer?.({ peerId, sessionId: data.sessionId }),
+            'remove peer'
+          ).catch(() => {});
+        }
+        throw err;
+      } finally {
+        if (this._nativeScreenSenderStates.get(key) === state) state.applying = null;
+      }
+    })();
+    return state.applying;
+  }
+
+  async _replaceNativeScreenPeer(peerId, expectedSessionId = this._nativeScreenSessionId) {
+    if (!this._nativeScreenSharing || peerId == null ||
+        this._nativeScreenSessionId !== expectedSessionId) return;
+    const api = window.havenDesktop?.nativeScreen;
+    const sessionId = expectedSessionId;
+    for (const key of this._nativeScreenSenderStates.keys()) {
+      if (key.startsWith(`${peerId}:`)) this._nativeScreenSenderStates.delete(key);
+    }
+    await this._withNativeScreenTimeout(
+      api?.removePeer?.({ peerId, sessionId }),
+      'remove peer'
+    ).catch(() => {});
+    if (!this._nativeScreenSharing || this._nativeScreenSessionId !== sessionId) return;
+    await this._withNativeScreenTimeout(api?.addPeer?.({ peerId, sessionId }), 'add peer');
+  }
+
+  async _reannounceScreenShare(users, context = {}) {
+    const channelCode = context.channelCode || this.currentChannel;
+    const voiceGeneration = context.voiceGeneration ?? (this._voiceSessionGeneration || 0);
+    const nativeSessionId = this._nativeScreenSessionId;
+    const screenStream = this.screenStream;
+    const isCurrent = () => this.isScreenSharing && this.currentChannel === channelCode &&
+      (this._voiceSessionGeneration || 0) === voiceGeneration;
+    if (!channelCode || !isCurrent()) return;
+    if (this._nativeScreenSharing && nativeSessionId) {
+      const response = await this._emitScreenStart({
+        code: channelCode,
+        hasAudio: !!this.screenHasAudio,
+        transport: 'native',
+        sessionId: nativeSessionId,
+        codec: this._nativeScreenCodec || 'H264',
+      });
+      if (!response.ok || !isCurrent()) {
+        await this.stopScreenShare();
+        return false;
+      }
+      const peerIds = Array.isArray(response.viewerIds) ? response.viewerIds : [];
+      await Promise.allSettled(peerIds.map(peerId =>
+        this._replaceNativeScreenPeer(peerId, nativeSessionId)
+      ));
+      return true;
+    }
+    if (!screenStream || this._nativeScreenSharing) return;
+    const response = await this._emitScreenStart({
+      code: channelCode,
+      hasAudio: screenStream.getAudioTracks().length > 0,
+      transport: 'browser',
+    });
+    if (!response.ok || !isCurrent()) {
+      await this.stopScreenShare();
+      return false;
+    }
+    return true;
+  }
+
+  _closeNativeScreenPeer(userId, preserveSessionId = null, preserveNegotiationId = null) {
+    const entry = this._nativeScreenPeers.get(userId);
+    if (entry) {
+      this._nativeScreenPeers.delete(userId);
+      if (entry.disconnectTimer) clearTimeout(entry.disconnectTimer);
+      try { entry.connection.close(); } catch {}
+    }
+    for (const key of this._pendingNativeScreenCandidates.keys()) {
+      if (key.startsWith(`${userId}:`) &&
+          key !== `${userId}:${preserveSessionId}:${preserveNegotiationId}`) {
+        this._pendingNativeScreenCandidates.delete(key);
+      }
+    }
+  }
+
+  _recoverNativeScreenPeer(userId) {
+    this._screenDelivered.delete(userId);
+    if (this.onScreenStream) this.onScreenStream(userId, null);
+    this._closeNativeScreenPeer(userId);
+    if (!this.screenSharers.has(userId)) return;
+    this.requestScreenStream(userId);
+    this._cancelScreenWatchdog(userId);
+    this._watchForScreenStream(userId);
+  }
+
+  _closeAllNativeScreenPeers() {
+    for (const userId of Array.from(this._nativeScreenPeers.keys())) {
+      this._closeNativeScreenPeer(userId);
+    }
+    this._pendingNativeScreenCandidates.clear();
+    this._nativeScreenAnnouncements.clear();
+    for (const sharerId of this._screenWatchdogTimers.keys()) {
+      this._cancelScreenWatchdog(sharerId);
+    }
+  }
+
+  _handleNativeScreenFailure(message) {
+    if (!this._nativeScreenSharing) return;
+    console.error('[NativeScreen] Stopping failed native share:', message || 'unknown error');
+    this.stopScreenShare().catch(err => {
+      console.warn('[NativeScreen] Failed to clean up native share:', err);
+    });
+  }
+
+  _withNativeScreenTimeout(promise, operation) {
+    const timeoutMs = this._nativeScreenOperationTimeoutMs || 10000;
+    let timer = null;
+    return Promise.race([
+      Promise.resolve(promise),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Native screen ${operation} timed out`)), timeoutMs);
+      }),
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  }
+
+  _screenSignalCode(originalCode, voiceGeneration) {
+    if (this.inVoice && this.currentChannel &&
+        (this._voiceSessionGeneration || 0) === voiceGeneration) {
+      return this.currentChannel;
+    }
+    return originalCode;
+  }
+
+  _emitScreenStart(payload) {
+    return new Promise(resolve => {
+      if (!this.socket || this.socket.connected === false) {
+        resolve({ ok: false, error: 'disconnected' });
+        return;
+      }
+      let settled = false;
+      const finish = response => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(response && typeof response === 'object'
+          ? response
+          : { ok: false, error: 'invalid_ack' });
+      };
+      const timer = setTimeout(() => finish({ ok: false, error: 'timeout' }), 3000);
+      this.socket.emit('screen-share-started', payload, finish);
+    });
+  }
+
+  _emitOrQueueScreenStop(code, sessionId = null) {
+    this._pendingScreenStop = { code, sessionId };
+    return this._sendPendingScreenStop();
+  }
+
+  _sendPendingScreenStop() {
+    const pending = this._pendingScreenStop;
+    if (!pending?.code || this.socket?.connected === false) return false;
+    const payload = { code: pending.code };
+    if (pending.sessionId) payload.sessionId = pending.sessionId;
+    this.socket.emit('screen-share-stopped', payload, response => {
+      if (response?.ok && this._pendingScreenStop === pending) {
+        this._pendingScreenStop = null;
+      }
+    });
+    return true;
+  }
+
+  _flushPendingScreenStop(channelCode = this.currentChannel) {
+    if (!this._pendingScreenStop || !channelCode || this.socket?.connected === false) return false;
+    this._pendingScreenStop.code = channelCode;
+    return this._sendPendingScreenStop();
+  }
+
+  _isScreenStartValid(operation, channelCode, voiceGeneration) {
+    return operation === this._screenStartOperation && this.inVoice &&
+      this.currentChannel === channelCode &&
+      this.socket?.connected !== false &&
+      (this._voiceSessionGeneration || 0) === voiceGeneration;
+  }
+
+  async _tryStartNativeScreenShare(
+    operation = this._screenStartOperation,
+    channelCode = this.currentChannel,
+    voiceGeneration = this._voiceSessionGeneration || 0
+  ) {
+    const api = window.havenDesktop?.nativeScreen;
+    const requiredMethods = [
+      'getCapabilities', 'start', 'stop', 'addPeer', 'removePeer',
+      'setRemoteDescription', 'addIceCandidate', 'onSignal',
+    ];
+    if (!api || requiredMethods.some(method => typeof api[method] !== 'function')) return null;
+    const compatibleCodecs = this._nativeScreenCodecIntersection();
+    if (!compatibleCodecs.includes('H264')) return null;
+
+    const capabilities = await this._withNativeScreenTimeout(
+      api.getCapabilities(),
+      'capability check'
+    ).catch(() => null);
+    if (!this._isScreenStartValid(operation, channelCode, voiceGeneration)) return false;
+    if (!capabilities?.supported) return null;
+
+    const res = this.screenResolution;
+    let announced = false;
+    let startedSessionId = null;
+    try {
+      const result = await api.start({
+        resolution: res,
+        frameRate: this.screenFrameRate,
+        bitrate: this._screenBitrateFor(res),
+        codecs: compatibleCodecs,
+        iceServers: this.rtcConfig.iceServers || [],
+        iceTransportPolicy: this.rtcConfig.iceTransportPolicy || 'all',
+      });
+      if (!this._isScreenStartValid(operation, channelCode, voiceGeneration)) {
+        if (result?.started) {
+          await this._withNativeScreenTimeout(
+            api.stop({ sessionId: result.sessionId }),
+            'stop'
+          ).catch(() => {});
+        }
+        return false;
+      }
+      if (!result?.started || !/^[A-Za-z0-9_-]{8,64}$/.test(String(result.sessionId || '')) ||
+          !compatibleCodecs.includes(result.codec)) {
+        await this._withNativeScreenTimeout(api.stop(), 'stop').catch(() => {});
+        return result?.cancelled ? false : null;
+      }
+
+      startedSessionId = result.sessionId;
+      const startResponse = await this._emitScreenStart({
+        code: channelCode,
+        hasAudio: result.hasAudio === true,
+        transport: 'native',
+        sessionId: result.sessionId,
+        codec: compatibleCodecs.includes(result.codec) ? result.codec : 'H264',
+      });
+      const startStillValid = this._isScreenStartValid(operation, channelCode, voiceGeneration);
+      if (!startResponse.ok || !startStillValid) {
+        if (startResponse.ok || startResponse.error === 'timeout') {
+          this._emitOrQueueScreenStop(
+            this._screenSignalCode(channelCode, voiceGeneration),
+            result.sessionId
+          );
+        }
+        await this._withNativeScreenTimeout(
+          api.stop({ sessionId: result.sessionId }),
+          'stop'
+        ).catch(() => {});
+        return startResponse.error === 'incompatible_viewer' ? null : false;
+      }
+
+      this._nativeScreenSharing = true;
+      this._nativeScreenSessionId = result.sessionId;
+      this._nativeScreenCodec = compatibleCodecs.includes(result.codec) ? result.codec : 'H264';
+      this.isScreenSharing = true;
+      this.screenStream = null;
+      this.screenHasAudio = result.hasAudio === true;
+      announced = true;
+
+      const viewerIds = new Set(Array.isArray(startResponse.viewerIds) ? startResponse.viewerIds : []);
+      const peerResults = await Promise.allSettled(Array.from(this.peers.keys())
+        .filter(peerId => viewerIds.has(peerId))
+        .map(peerId =>
+        this._withNativeScreenTimeout(api.addPeer({
+          peerId,
+          sessionId: result.sessionId,
+        }), 'add peer')
+      ));
+      if (peerResults.some(result => result.status === 'rejected')) {
+        console.warn('[NativeScreen] One or more initial viewers could not be attached');
+      }
+      if (!this._isScreenStartValid(operation, channelCode, voiceGeneration)) {
+        const signalCode = this._screenSignalCode(channelCode, voiceGeneration);
+        this._emitOrQueueScreenStop(signalCode, result.sessionId);
+        await this._withNativeScreenTimeout(
+          api.stop({ sessionId: result.sessionId }),
+          'stop'
+        ).catch(() => {});
+        if (this._nativeScreenSessionId === result.sessionId) {
+          this._nativeScreenSharing = false;
+          this._nativeScreenSessionId = null;
+          this._nativeScreenCodec = null;
+          this._nativeScreenSenderStates.clear();
+          this.isScreenSharing = false;
+          this.screenHasAudio = false;
+        }
+        return false;
+      }
+      return true;
+    } catch (err) {
+      const operationIsCurrent = this._screenStartOperation === operation;
+      const ownsCurrentSession = !!startedSessionId &&
+        this._nativeScreenSessionId === startedSessionId;
+      if (startedSessionId) {
+        await this._withNativeScreenTimeout(
+          api.stop({ sessionId: startedSessionId }),
+          'stop'
+        ).catch(() => {});
+      } else if (operationIsCurrent && !this._nativeScreenSessionId) {
+        await this._withNativeScreenTimeout(api.stop(), 'stop').catch(() => {});
+      }
+      if (announced) {
+        const signalCode = this._screenSignalCode(channelCode, voiceGeneration);
+        this._emitOrQueueScreenStop(signalCode, startedSessionId);
+      }
+      if (operationIsCurrent || ownsCurrentSession) {
+        if (!startedSessionId || this._nativeScreenSessionId === startedSessionId) {
+          this._nativeScreenSharing = false;
+          this._nativeScreenSessionId = null;
+          this._nativeScreenCodec = null;
+          this.isScreenSharing = false;
+          this.screenStream = null;
+          this.screenHasAudio = false;
+        }
+      }
+      console.error('[NativeScreen] Native share initialization failed:', err);
+      return announced ? false : null;
+    }
+  }
+
   // ── Public API ──────────────────────────────────────────
 
   // Ask the server to forward a renegotiate-screen to `sharerId` so they
@@ -644,26 +1819,145 @@ class VoiceManager {
     });
   }
 
-  // Watchdog for the late-joiner path: if no live video track has arrived
-  // from `sharerId` after a short delay, ask for a renegotiation. Retries a
-  // few times because a late joiner's peer connection to the sharer may still
-  // be completing its offer/answer when the first check runs. (late-join heal)
-  _watchForScreenStream(sharerId, attemptsLeft = 3) {
-    setTimeout(() => {
+  // Hand the UI a screen stream built directly from this peer's video
+  // receivers, bypassing ontrack. Returns true if a stream was delivered.
+  //
+  // This exists because ontrack is not a reliable signal for a *re*share. The
+  // browser only fires a track event when a transceiver's direction changes
+  // into receiving. When a sharer stops and immediately restarts (stop a
+  // screen, start an application), addTrack reuses the transceiver the removed
+  // track left behind — and if the stop and start renegotiations coalesce into
+  // one SDP exchange, which they do whenever the first one is still waiting on
+  // an answer, the viewer's transceiver goes sendonly → sendonly. Only the msid
+  // changed, so no track event fires. Video packets arrive and decode into a
+  // receiver nobody is rendering: the sharer shows LIVE, the viewer gets
+  // nothing, and there is no error anywhere to notice.
+  _deliverScreenFromReceivers(sharerId) {
+    // Native screen media has its own peer connection. A video receiver on
+    // the voice connection is a webcam or a stale browser-share transceiver.
+    if (this._nativeScreenAnnouncements.has(sharerId)) return false;
+    const peer = this.peers.get(sharerId);
+    if (!peer || !this.screenSharers.has(sharerId)) return false;
+    // A peer can be sending webcam and screen at once. We can't tell the two
+    // apart from the receiver alone, so exclude whichever track ontrack
+    // previously classified as their webcam.
+    const camTrackId = peer._webcamTrackId || null;
+    const candidates = peer.connection.getReceivers()
+      .map(r => r.track)
+      .filter(t => t && t.kind === 'video' && t.readyState === 'live' &&
+                   !t.muted && t.id !== camTrackId);
+    if (!candidates.length) return false;
+    // Prefer the track we already believe is their screen; otherwise the most
+    // recently negotiated one.
+    const track = candidates.find(t => t.id === peer._screenTrackId) ||
+                  candidates[candidates.length - 1];
+    peer._screenTrackId = track.id;
+    this._screenDelivered.add(sharerId);
+    if (this.onScreenStream) this.onScreenStream(sharerId, new MediaStream([track]));
+    return true;
+  }
+
+  // Watchdog for both the late-joiner path and the reshare path: if this
+  // sharer's current share hasn't reached the UI after a short delay, recover.
+  // Retries a few times because a late joiner's peer connection to the sharer
+  // may still be completing its offer/answer when the first check runs.
+  //
+  // The check is deliberately "did we deliver a stream for *this* share",
+  // not "does a live video receiver exist". The old receiver-based check was
+  // the reason the reshare failure above went unrecovered for so long: a
+  // reused transceiver's receiver track stays readyState 'live' across the
+  // whole stop/start cycle (it only ends when the transceiver is stopped), so
+  // the watchdog saw a healthy live video track and concluded all was well
+  // while the viewer stared at an empty grid.
+  //
+  // Default attempts bumped (3 → 6) and interval shortened (3.5s → 2.5s):
+  // startup races where the sharer's renegotiate-screen offer collides with
+  // the joiner's voice offer used to exhaust the old budget before the peer
+  // was stable, leaving the stream permanently missing until a full restream.
+  _watchForScreenStream(sharerId, attemptsLeft = 6) {
+    if (this._screenWatchdogTimers.has(sharerId)) return;
+    const timer = setTimeout(() => {
+      if (this._screenWatchdogTimers.get(sharerId) !== timer) return;
+      this._screenWatchdogTimers.delete(sharerId);
       if (!this.screenSharers.has(sharerId)) return; // sharer stopped
       if (!this.inVoice || !this.currentChannel) return;
-      const peer = this.peers.get(sharerId);
-      const hasVideo = peer && peer.connection.getReceivers().some(r =>
-        r.track && r.track.kind === 'video' && r.track.readyState === 'live'
-      );
-      if (hasVideo) return; // already receiving — nothing to do
-      console.warn('[Voice] No video from screen sharer', sharerId, '— requesting renegotiate (late-join heal)');
+      if (this._screenDelivered.has(sharerId)) {
+        // Delivered flag can go stale if the track later ended/muted. Verify
+        // the UI still has a live track; if not, clear and keep recovering.
+        if (this._screenStillLive(sharerId)) return;
+        this._screenDelivered.delete(sharerId);
+      }
+      // Media may already be flowing into an unrendered receiver — adopt it
+      // rather than paying for a round of signalling we don't need.
+      if (this._deliverScreenFromReceivers(sharerId)) {
+        console.warn('[Voice] Adopted screen stream from existing receiver for', sharerId,
+          '— no track event fired for this share');
+        return;
+      }
+      console.warn('[Voice] No video from screen sharer', sharerId, '— requesting renegotiate',
+        `(attempts left after this: ${Math.max(0, attemptsLeft - 1)})`);
       this.requestScreenStream(sharerId);
       if (attemptsLeft > 1) this._watchForScreenStream(sharerId, attemptsLeft - 1);
-    }, 3500);
+    }, 2500);
+    this._screenWatchdogTimers.set(sharerId, timer);
+  }
+
+  _cancelScreenWatchdog(sharerId) {
+    const timer = this._screenWatchdogTimers.get(sharerId);
+    if (timer) clearTimeout(timer);
+    this._screenWatchdogTimers.delete(sharerId);
+  }
+
+  // True when we both marked the share delivered AND still have a live
+  // non-muted video receiver for it (or a live <video> tile).
+  _screenStillLive(sharerId) {
+    try {
+      const nativePeer = this._nativeScreenPeers.get(sharerId);
+      if (nativePeer?.connection?.getReceivers().some(receiver => {
+        const track = receiver.track;
+        return track?.kind === 'video' && track.readyState === 'live' && !track.muted;
+      })) return true;
+    } catch { /* ignore */ }
+    if (this._nativeScreenAnnouncements.has(sharerId)) return false;
+    try {
+      const peer = this.peers.get(sharerId);
+      if (peer && peer.connection) {
+        const camTrackId = peer._webcamTrackId || null;
+        const live = peer.connection.getReceivers().some(r => {
+          const t = r.track;
+          return t && t.kind === 'video' && t.readyState === 'live' &&
+            !t.muted && t.id !== camTrackId;
+        });
+        if (live) return true;
+      }
+    } catch { /* ignore */ }
+    try {
+      const tile = document.getElementById(`screen-tile-${sharerId}`);
+      const vid = tile && tile.querySelector('video');
+      const track = vid && vid.srcObject && vid.srcObject.getVideoTracks?.()[0];
+      if (track && track.readyState === 'live' && vid.videoWidth > 0) return true;
+    } catch { /* ignore */ }
+    return false;
+  }
+
+  // Re-arm recovery for every known sharer. Cheap, idempotent, and the
+  // right response after ICE heal / fast-path rejoin / UI desync restore.
+  _rearmScreenWatchdogs() {
+    if (!this.inVoice) return;
+    for (const sharerId of this.screenSharers) {
+      if (sharerId === this.localUserId) continue;
+      if (this._screenDelivered.has(sharerId) && this._screenStillLive(sharerId)) continue;
+      this._screenDelivered.delete(sharerId);
+      if (this._deliverScreenFromReceivers(sharerId)) continue;
+      this._watchForScreenStream(sharerId);
+    }
   }
 
   async join(channelCode) {
+    if (this._joinInFlight) return false;
+    this._joinInFlight = true;
+    this._joiningChannelCode = channelCode;
+    this._ensureStunProbed();
     try {
       const preservedMuteState = this.isMuted;
       const preservedDeafenState = this.isDeafened;
@@ -782,7 +2076,7 @@ class VoiceManager {
 
         // Initialize RNNoise and apply saved noise mode
         await this._initRNNoise();
-        if (this.noiseMode === 'suppress' && this._rnnoiseReady) {
+        if (this.noiseMode === 'suppress' && this._rnnoiseWasmBytes) {
           this.setNoiseSensitivity(0);
           this._enableRNNoise();
         } else if (this.noiseMode === 'off') {
@@ -793,8 +2087,31 @@ class VoiceManager {
         }
       }
 
+      // Do not let Socket.IO buffer a stale voice-join if the connection
+      // dropped while microphone and noise processing were being prepared.
+      if (this.socket && this.socket.connected === false) {
+        this._disableRNNoise();
+        this._stopNoiseGate();
+        this._stopLocalTalkDetection();
+        if (this.rawStream) {
+          this.rawStream.getTracks().forEach(track => track.stop());
+          this.rawStream = null;
+        }
+        if (this.localStream) {
+          this.localStream.getTracks().forEach(track => track.stop());
+          this.localStream = null;
+        }
+        if (this.audioCtx) {
+          this.audioCtx.close().catch(() => {});
+          this.audioCtx = null;
+        }
+        return false;
+      }
+
+      channelCode = this._joiningChannelCode || channelCode;
       this.currentChannel = channelCode;
       this.inVoice = true;
+      this._voiceSessionGeneration = (this._voiceSessionGeneration || 0) + 1;
       // Listener-only is always muted (no audio to send). mute-on-join also forces mute.
       this.isMuted = this.isListenerOnly || muteOnJoin || preservedMuteState;
       this.isDeafened = preservedDeafenState;
@@ -804,7 +2121,7 @@ class VoiceManager {
       // Persist voice channel for auto-rejoin after page refresh or server restart
       try { localStorage.setItem('haven_voice_channel', channelCode); } catch {}
 
-      this.socket.emit('voice-join', { code: channelCode });
+      this.socket.emit('voice-join', { code: channelCode, ...this.getNativeScreenClientInfo() });
       // Inform peers / UI about our mute state so they show the muted icon
       // immediately instead of waiting for someone to query.
       if (this.isMuted) {
@@ -819,20 +2136,44 @@ class VoiceManager {
     } catch (err) {
       console.error('Voice join failed:', err);
       return false;
+    } finally {
+      this._joinInFlight = false;
+      this._joiningChannelCode = null;
     }
   }
 
   leave() {
-    // Stop screen share first if active
-    if (this.isScreenSharing) {
-      this.stopScreenShare();
+    // Breadcrumb for the maximize/resize "fake disconnect" bug — if leave()
+    // runs when the user didn't click Disconnect, the stack tells us why.
+    try {
+      console.warn('[Voice] leave() invoked', {
+        channel: this.currentChannel,
+        inVoice: this.inVoice,
+        peers: this.peers.size,
+        stack: new Error().stack
+      });
+    } catch {}
+    const pendingScreenStart = this._screenStartInFlight;
+    this._screenStartOperation = (this._screenStartOperation || 0) + 1;
+    this._screenStartInFlight = false;
+    if (pendingScreenStart && !this.isScreenSharing) {
+      window.havenDesktop?.nativeScreen?.stop?.().catch(() => {});
     }
-    // Stop webcam if active
+    // Stop screen share and webcam first if active, in teardown mode: the
+    // peers are closed a few lines down, so there is nobody to renegotiate
+    // with. The normal path fired renegotiations at connections about to be
+    // closed and then finished up to 8 seconds later, nulling screenStream
+    // and flipping isScreenSharing even if the user had already rejoined and
+    // started a fresh share in the meantime. (#5426)
+    if (this.isScreenSharing) {
+      this.stopScreenShare({ teardown: true });
+    }
     if (this.isWebcamActive) {
-      this.stopWebcam();
+      this.stopWebcam({ teardown: true });
     }
 
     // Stop noise gate and talk detection
+    this.stopBotAudio();
     this._disableRNNoise();
     this._stopNoiseGate();
     this._stopLocalTalkDetection();
@@ -884,6 +2225,8 @@ class VoiceManager {
     this.isDeafened = false;
     this.audioBitrate = 0;
     this.screenSharers.clear();
+    this._screenDelivered.clear();
+    this._closeAllNativeScreenPeers();
     this.screenGainNodes.clear();
     this.webcamUsers.clear();
     this._vcDest = null;
@@ -916,11 +2259,30 @@ class VoiceManager {
    */
   _softLeave() {
     if (!this.inVoice) return;
+    this.stopBotAudio();
+
+    const pendingScreenStart = this._screenStartInFlight;
+    this._screenStartOperation = (this._screenStartOperation || 0) + 1;
+    this._screenStartInFlight = false;
+    if (pendingScreenStart && !this.isScreenSharing) {
+      window.havenDesktop?.nativeScreen?.stop?.().catch(() => {});
+    }
 
     // Stop screen share / webcam (local cleanup only)
     if (this.isScreenSharing && this.screenStream) {
+      this._pendingScreenStop = { sessionId: null };
       this.screenStream.getTracks().forEach(t => t.stop());
       this.screenStream = null;
+      this.isScreenSharing = false;
+    }
+    if (this._nativeScreenSharing) {
+      this._pendingScreenStop = { sessionId: this._nativeScreenSessionId };
+      window.havenDesktop?.nativeScreen?.stop?.({
+        sessionId: this._nativeScreenSessionId,
+      }).catch(() => {});
+      this._nativeScreenSharing = false;
+      this._nativeScreenSessionId = null;
+      this._nativeScreenSenderStates.clear();
       this.isScreenSharing = false;
     }
     if (this.isWebcamActive && this.webcamStream) {
@@ -960,6 +2322,8 @@ class VoiceManager {
     this.isMuted = false;
     this.isDeafened = false;
     this.screenSharers.clear();
+    this._screenDelivered.clear();
+    this._closeAllNativeScreenPeers();
     this.screenGainNodes.clear();
     this.webcamUsers.clear();
     this._vcDest = null;
@@ -1003,6 +2367,68 @@ class VoiceManager {
     return true;
   }
 
+  playBotAudio(data) {
+    if (!data || !data.playbackId || !data.audioUrl) return false;
+    if (!this.inVoice || this.currentChannel !== data.channelCode) return false;
+    this.stopBotAudio();
+
+    const now = () => typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const receivedAt = now();
+    const reportedOffsetMs = Math.max(0, Number(data.offsetMs) || 0);
+    const durationMs = Number(data.durationMs);
+    if (Number.isFinite(durationMs) && reportedOffsetMs >= durationMs) return false;
+
+    const audio = new Audio(data.audioUrl);
+    const playback = { id: data.playbackId, channelCode: data.channelCode, audio, timer: null };
+    this._botAudio = playback;
+    audio.preload = 'auto';
+    audio.volume = this.isDeafened ? 0 : 1;
+    const savedOutput = localStorage.getItem('haven_output_device');
+    const sinkReady = savedOutput && typeof audio.setSinkId === 'function'
+      ? audio.setSinkId(savedOutput).catch(() => {})
+      : Promise.resolve();
+    audio.addEventListener('ended', () => {
+      if (this._botAudio === playback) this.stopBotAudio(playback.id);
+    }, { once: true });
+    audio.addEventListener('error', () => {
+      if (this._botAudio === playback) this.stopBotAudio(playback.id);
+    }, { once: true });
+
+    if (Number.isFinite(durationMs)) {
+      playback.timer = setTimeout(
+        () => this.stopBotAudio(playback.id),
+        Math.max(1, durationMs - reportedOffsetMs)
+      );
+      playback.timer.unref?.();
+    }
+
+    const start = async () => {
+      await sinkReady;
+      if (this._botAudio !== playback) return;
+      const offsetSeconds = (reportedOffsetMs + Math.max(0, now() - receivedAt)) / 1000;
+      if (offsetSeconds > 0 && Number.isFinite(audio.duration)) {
+        audio.currentTime = Math.min(offsetSeconds, Math.max(0, audio.duration - 0.05));
+      }
+      audio.play().catch(() => {
+        if (this._botAudio === playback) this.stopBotAudio(playback.id);
+      });
+    };
+    if (audio.readyState >= 1) start();
+    else audio.addEventListener('loadedmetadata', start, { once: true });
+    return true;
+  }
+
+  stopBotAudio(playbackId = null) {
+    if (!this._botAudio || (playbackId && this._botAudio.id !== playbackId)) return false;
+    const { audio, timer } = this._botAudio;
+    this._botAudio = null;
+    if (timer) clearTimeout(timer);
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
+    return true;
+  }
+
   toggleMute() {
     // #5380 — listener-only mode has no mic; force-stay muted.
     if (this.isListenerOnly) { this.isMuted = true; return true; }
@@ -1043,6 +2469,7 @@ class VoiceManager {
         el.volume = parseFloat(el.dataset.prevVolume || 1);
       }
     });
+    if (this._botAudio) this._botAudio.audio.volume = this.isDeafened ? 0 : 1;
     return this.isDeafened;
   }
 
@@ -1053,8 +2480,23 @@ class VoiceManager {
   // ── Screen Sharing ──────────────────────────────────────
 
   async shareScreen() {
-    if (!this.inVoice || this.isScreenSharing) return false;
+    if (!this.inVoice || this.socket?.connected === false || this.isScreenSharing ||
+        this._screenStartInFlight || this._pendingScreenStop) return false;
+    const operation = (this._screenStartOperation || 0) + 1;
+    const channelCode = this.currentChannel;
+    const voiceGeneration = this._voiceSessionGeneration || 0;
+    this._screenStartOperation = operation;
+    this._screenStartInFlight = true;
+    let capturedStream = null;
     try {
+      if (this._nativeScreenEnabled()) {
+        const nativeResult = await this._tryStartNativeScreenShare(
+          operation, channelCode, voiceGeneration
+        );
+        if (nativeResult !== null) return nativeResult;
+      }
+      if (!this._isScreenStartValid(operation, channelCode, voiceGeneration)) return false;
+
       // Build video constraints from quality settings
       const videoConstraints = { cursor: 'always' };
       const res = this.screenResolution;   // 720 | 1080 | 1440 | 0 (source)
@@ -1103,7 +2545,13 @@ class VoiceManager {
         }
       }
 
-      this.screenStream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
+      capturedStream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
+
+      if (!this._isScreenStartValid(operation, channelCode, voiceGeneration)) {
+        capturedStream.getTracks().forEach(track => track.stop());
+        return false;
+      }
+      this.screenStream = capturedStream;
 
       this.isScreenSharing = true;
 
@@ -1135,33 +2583,109 @@ class VoiceManager {
       // the same user (image: tile shown, audio works, video black).
       const hasAudio = this.screenStream.getAudioTracks().length > 0;
       this.screenHasAudio = hasAudio;
-      this.socket.emit('screen-share-started', { code: this.currentChannel, hasAudio });
+      const startResponse = await this._emitScreenStart({ code: channelCode, hasAudio });
+      if (!startResponse.ok || !this._isScreenStartValid(operation, channelCode, voiceGeneration)) {
+        if (startResponse.ok || startResponse.error === 'timeout') {
+          this._emitOrQueueScreenStop(this._screenSignalCode(channelCode, voiceGeneration));
+        }
+        capturedStream.getTracks().forEach(track => track.stop());
+        if (this.screenStream === capturedStream) this.screenStream = null;
+        this.isScreenSharing = false;
+        this.screenHasAudio = false;
+        this._captureController = null;
+        return false;
+      }
 
       // Add screen tracks to all existing peer connections and cap bitrate
       const maxBitrate = this._screenBitrates[res] || this._screenBitrates[0];
+      // Renegotiate with every peer at once. Each peer is its own
+      // RTCPeerConnection, so there is nothing to serialise, and awaiting
+      // them one at a time meant the last viewer in a bigger call waited for
+      // every earlier negotiation to settle before their tile started. (#5426)
+      const renegotiations = [];
       for (const [userId, peer] of this.peers) {
         this.screenStream.getTracks().forEach(track => {
           peer.connection.addTrack(track, this.screenStream);
         });
         // Cap the video bitrate so WebRTC doesn't starve framerate
-        this._applyScreenBitrate(peer.connection, maxBitrate);
-        // Renegotiate with each peer
-        await this._renegotiate(userId, peer.connection);
+        this._applyScreenBitrate(peer.connection, maxBitrate, userId);
+        renegotiations.push(this._renegotiate(userId, peer.connection));
       }
+      await Promise.all(renegotiations);
 
+      if (!this._isScreenStartValid(operation, channelCode, voiceGeneration)) {
+        await this.stopScreenShare();
+        return false;
+      }
       return true;
     } catch (err) {
       console.error('Screen share failed:', err);
-      this.isScreenSharing = false;
-      this.screenStream = null;
+      if (capturedStream && this.screenStream === capturedStream && this.isScreenSharing) {
+        await this.stopScreenShare().catch(() => {});
+      } else if (capturedStream) {
+        capturedStream.getTracks().forEach(track => track.stop());
+      }
+      if (this._screenStartOperation === operation) {
+        this.isScreenSharing = false;
+        if (this.screenStream === capturedStream) this.screenStream = null;
+      }
       return false;
+    } finally {
+      if (this._screenStartOperation === operation) this._screenStartInFlight = false;
     }
   }
 
-  async stopScreenShare() {
-    if (!this.isScreenSharing || !this.screenStream) return;
+  async stopScreenShare({ teardown = false } = {}) {
+    if (!this.isScreenSharing) return;
+    this._screenStartOperation = (this._screenStartOperation || 0) + 1;
+    this._screenStartInFlight = false;
+
+    if (this._nativeScreenSharing) {
+      const channelCode = this.currentChannel;
+      const voiceGeneration = this._voiceSessionGeneration || 0;
+      const sessionId = this._nativeScreenSessionId;
+      this._nativeScreenSharing = false;
+      this._nativeScreenSessionId = null;
+      this._nativeScreenCodec = null;
+      this._nativeScreenSenderStates.clear();
+      this.isScreenSharing = false;
+      this.screenStream = null;
+      this.screenHasAudio = false;
+      this.screenSharers.delete(this.localUserId);
+      this._nativeScreenAnnouncements.delete(this.localUserId);
+      this._emitOrQueueScreenStop(
+        this._screenSignalCode(channelCode, voiceGeneration),
+        sessionId
+      );
+      if (this.onScreenStream) this.onScreenStream(this.localUserId, null);
+      await this._withNativeScreenTimeout(
+        window.havenDesktop?.nativeScreen?.stop?.({ sessionId }),
+        'stop'
+      ).catch(err => {
+        console.warn('[NativeScreen] Failed to stop native pipeline:', err);
+      });
+      return;
+    }
+    if (!this.screenStream) return;
 
     const tracks = this.screenStream.getTracks();
+
+    if (teardown) {
+      // Leaving voice: every peer is about to be closed, so skip the
+      // renegotiation round and release the capture right away. Nothing is
+      // awaited before this point, so leave() sees the state cleared
+      // synchronously. (#5426)
+      tracks.forEach(t => t.stop());
+      this.screenStream = null;
+      this.isScreenSharing = false;
+      this.screenHasAudio = false;
+      this._captureController = null;
+      this.screenSharers.delete(this.localUserId);
+      this._nativeScreenAnnouncements.delete(this.localUserId);
+      this._emitOrQueueScreenStop(this.currentChannel);
+      if (this.onScreenStream) this.onScreenStream(this.localUserId, null);
+      return;
+    }
 
     // Remove screen tracks from all peer connections FIRST, then stop them.
     // Stopping tracks before all peers have removed them causes renegotiation
@@ -1202,8 +2726,10 @@ class VoiceManager {
     this.screenStream = null;
     this.isScreenSharing = false;
     this._captureController = null;
+    this.screenSharers.delete(this.localUserId);
+    this._nativeScreenAnnouncements.delete(this.localUserId);
 
-    this.socket.emit('screen-share-stopped', { code: this.currentChannel });
+    this._emitOrQueueScreenStop(this.currentChannel);
     // Notify local UI — pass localUserId so tile is found by its real ID
     if (this.onScreenStream) this.onScreenStream(this.localUserId, null);
   }
@@ -1235,10 +2761,12 @@ class VoiceManager {
 
       // Add webcam video track to all existing peer connections
       const camTrack = this.webcamStream.getVideoTracks()[0];
+      const renegotiations = [];
       for (const [userId, peer] of this.peers) {
         peer.connection.addTrack(camTrack, this.webcamStream);
-        await this._renegotiate(userId, peer.connection);
+        renegotiations.push(this._renegotiate(userId, peer.connection));
       }
+      await Promise.all(renegotiations);
 
       // Tell the server
       this.socket.emit('webcam-started', { code: this.currentChannel });
@@ -1251,10 +2779,20 @@ class VoiceManager {
     }
   }
 
-  async stopWebcam() {
+  async stopWebcam({ teardown = false } = {}) {
     if (!this.isWebcamActive || !this.webcamStream) return;
 
     const tracks = this.webcamStream.getTracks();
+
+    if (teardown) {
+      // Leaving voice: see stopScreenShare. (#5426)
+      tracks.forEach(t => t.stop());
+      this.webcamStream = null;
+      this.isWebcamActive = false;
+      this.socket.emit('webcam-stopped', { code: this.currentChannel });
+      if (this.onWebcamStream) this.onWebcamStream(this.localUserId, null);
+      return;
+    }
 
     // Remove webcam track from all peer connections
     const renegotiations = [];
@@ -1304,17 +2842,21 @@ class VoiceManager {
 
     const newTrack = newStream.getVideoTracks()[0];
 
-    // Replace track on all peers
+    // Replace the track on all peers concurrently. replaceTrack needs no
+    // renegotiation and each peer is independent, so waiting on them in turn
+    // only delayed the last peer. (#5426)
+    const swaps = [];
     for (const [, peer] of this.peers) {
       const senders = peer.connection.getSenders();
       const camSender = senders.find(s => s.track && s.track.kind === 'video' &&
         this.webcamStream && this.webcamStream.getVideoTracks().includes(s.track));
       if (camSender) {
-        await camSender.replaceTrack(newTrack).catch(e =>
+        swaps.push(camSender.replaceTrack(newTrack).catch(e =>
           console.warn('[Voice] replaceTrack (cam) failed:', e)
-        );
+        ));
       }
     }
+    await Promise.all(swaps);
 
     // Stop old tracks and update stream reference
     this.webcamStream.getTracks().forEach(t => t.stop());
@@ -1370,8 +2912,8 @@ class VoiceManager {
 
     // Update bitrate cap on all peer senders
     const maxBitrate = this._screenBitrates[res] || this._screenBitrates[0];
-    for (const [, peer] of this.peers) {
-      this._applyScreenBitrate(peer.connection, maxBitrate);
+    for (const [userId, peer] of this.peers) {
+      this._applyScreenBitrate(peer.connection, maxBitrate, userId);
     }
   }
 
@@ -1384,8 +2926,100 @@ class VoiceManager {
    * tight. Default browser behaviour is `balanced`, which on screen share
    * tends to chop framerate first (bad for motion content like games/video).
    */
-  _applyScreenBitrate(connection, maxBitrate) {
+  // Opt-in relay profile for screen share (#5426). Read live so flipping the
+  // toggle mid-share takes effect on the next apply.
+  //
+  // 3.18.1 (#5379) did three things together: raised the ceilings 2-3x, pinned
+  // maxFramerate, and set degradationPreference to 'maintain-framerate'. On a
+  // direct connection that is what makes 1080p30 actually deliver 1080p30. Over
+  // a TURN relay that has fallen back to TCP it is the opposite of what you
+  // want: TCP hides packet loss, so the encoder never gets the signal to back
+  // off, and pinning the framerate removes the one lever it had left. The queue
+  // grows instead, which is the "fine for a minute, then stutter every few
+  // seconds, getting worse" shape reported in #5426.
+  //
+  // This profile restores the pre-3.18.1 ceilings and hands the encoder back
+  // both levers. Nobody gets it unless they turn it on.
+  _screenRelayProfileEnabled() {
+    try { return localStorage.getItem('haven_screen_relay_profile') === '1'; } catch { return false; }
+  }
+
+  // Automatic version of the toggle above (#5426). Two setups confirmed the
+  // gentler profile is what a relayed share needs, and nobody should have to
+  // know what a TURN server is to get it. Once a peer connection settles, its
+  // selected candidate pair says whether the path runs through a relay; those
+  // peers get the gentler profile on their sender only, so a viewer on a direct
+  // route in the same call keeps the full-quality share. On by default, with a
+  // Debug switch for anyone who wants the toggle above to be the only decider.
+  _screenRelayAutoEnabled() {
+    try { return localStorage.getItem('haven_screen_relay_auto') !== '0'; } catch { return true; }
+  }
+
+  _screenRelayProfileFor(userId) {
+    if (this._screenRelayProfileEnabled()) return true;
+    return this._screenRelayAutoEnabled() && userId != null && !!this._relayPeers && this._relayPeers.has(userId);
+  }
+
+  _peerIdForConnection(connection) {
+    for (const [id, peer] of this.peers) if (peer.connection === connection) return id;
+    return null;
+  }
+
+  // Ask the connection's stats which candidate pair it settled on and note
+  // whether either end is a relay candidate. Runs on every (re)connect, since
+  // an ICE restart can move a call on or off the relay.
+  async _detectRelayPath(userId, connection) {
+    if (!connection || typeof connection.getStats !== 'function') return;
+    if (!this._relayPeers) this._relayPeers = new Set();
+    let relayed = false;
     try {
+      const stats = await connection.getStats();
+      const byId = new Map();
+      stats.forEach((r) => byId.set(r.id, r));
+      let pair = null;
+      stats.forEach((r) => {
+        if (!pair && r.type === 'transport' && r.selectedCandidatePairId) pair = byId.get(r.selectedCandidatePairId) || null;
+      });
+      if (!pair) {
+        stats.forEach((r) => {
+          if (!pair && r.type === 'candidate-pair' && r.state === 'succeeded' && (r.nominated || r.selected)) pair = r;
+        });
+      }
+      if (!pair) return;
+      const local = byId.get(pair.localCandidateId);
+      const remote = byId.get(pair.remoteCandidateId);
+      relayed = !!((local && local.candidateType === 'relay') || (remote && remote.candidateType === 'relay'));
+    } catch { return; }
+    if (this.peers.get(userId)?.connection !== connection) return;   // torn down while we waited
+    const was = this._relayPeers.has(userId);
+    if (relayed) this._relayPeers.add(userId); else this._relayPeers.delete(userId);
+    if (was === relayed) return;
+    if (relayed) console.log('[Voice] Peer', userId, 'is reached through a relay; the gentler screen share profile applies to that viewer');
+    if (this.isScreenSharing) {
+      this._applyScreenBitrate(connection, this._screenBitrates[this.screenResolution] || this._screenBitrates[0], userId);
+    }
+  }
+
+  _screenBitrateFor(res, relayProfile = this._screenRelayProfileEnabled()) {
+    const table = relayProfile
+      ? { 0: 3_000_000, 720: 1_500_000, 1080: 3_000_000, 1440: 5_000_000 }
+      : this._screenBitrates;
+    return table[res] || table[0];
+  }
+
+  // Re-apply the current cap to every peer, for when the toggle changes while
+  // a share is already running.
+  reapplyScreenBitrate() {
+    if (!this.isScreenSharing) return;
+    const maxBitrate = this._screenBitrateFor(this.screenResolution);
+    for (const [userId, peer] of this.peers) {
+      this._applyScreenBitrate(peer.connection, maxBitrate, userId);
+    }
+  }
+
+  _applyScreenBitrate(connection, maxBitrate, userId = this._peerIdForConnection(connection)) {
+    try {
+      const relayProfile = this._screenRelayProfileFor(userId);
       const senders = connection.getSenders();
       for (const sender of senders) {
         if (sender.track && sender.track.kind === 'video' &&
@@ -1394,17 +3028,51 @@ class VoiceManager {
           if (!params.encodings || params.encodings.length === 0) {
             params.encodings = [{}];
           }
-          params.encodings[0].maxBitrate = maxBitrate;
+          params.encodings[0].maxBitrate = relayProfile
+            ? this._screenBitrateFor(this.screenResolution, true)
+            : maxBitrate;
           // Per-encoding cap is the primary control; framerate hint also helps
-          // browsers that respect it (Chromium-based ones do).
-          if (this.screenFrameRate) {
+          // browsers that respect it (Chromium-based ones do). Under the relay
+          // profile the framerate stays unpinned on purpose, so the encoder can
+          // shed frames instead of filling a queue it cannot drain.
+          if (relayProfile) {
+            delete params.encodings[0].maxFramerate;
+          } else if (this.screenFrameRate) {
             params.encodings[0].maxFramerate = this.screenFrameRate;
           }
-          params.degradationPreference = 'maintain-framerate';
+          params.degradationPreference = relayProfile ? 'balanced' : 'maintain-framerate';
           sender.setParameters(params).catch(() => {});
         }
       }
+      // Protect audio from the video ramp-up. (#5426)
+      this._prioritiseAudioSenders(connection);
     } catch (e) { /* setParameters not supported — adaptive bitrate remains */ }
+  }
+
+  // Mark every audio sender on this connection as high network priority.
+  //
+  // When a screen share negotiates up to 1080p the encoder ramps hard, and on
+  // a constrained uplink that burst takes the whole pipe for a moment. Audio
+  // packets queue behind it, arrive late, and NetEq fills the gap with
+  // concealment — which is the robotic warble people describe. @RCCore caught
+  // this in a WebRTC-internals dump: packetsLost jumping 4 -> 249 and
+  // concealedSamples going from 0 to over 100k as the share started.
+  //
+  // Audio is a few tens of kbps against several thousand for video, so giving
+  // it priority costs the video almost nothing and keeps speech intelligible
+  // through the ramp. Both the DSCP marking and the send-queue ordering follow
+  // from networkPriority.
+  _prioritiseAudioSenders(connection) {
+    try {
+      for (const sender of connection.getSenders()) {
+        if (!sender.track || sender.track.kind !== 'audio') continue;
+        const params = sender.getParameters();
+        if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+        params.encodings[0].networkPriority = 'high';
+        params.encodings[0].priority = 'high';   // older Chromium spelling
+        sender.setParameters(params).catch(() => {});
+      }
+    } catch { /* unsupported — audio still flows, just without the hint */ }
   }
 
   /**
@@ -1452,6 +3120,70 @@ class VoiceManager {
     });
   }
 
+  _clearOfferAnswerTimer(peer) {
+    if (!peer || !peer._offerAnswerTimer) return;
+    clearTimeout(peer._offerAnswerTimer);
+    peer._offerAnswerTimer = null;
+  }
+
+  _scheduleOfferAnswerTimeout(userId, connection, offerId) {
+    const peer = this.peers.get(userId);
+    if (!peer || peer.connection !== connection) return;
+    this._clearOfferAnswerTimer(peer);
+    const timeoutCount = peer._offerTimeoutCount || 0;
+    const timeoutMs = Math.min(8000 + (timeoutCount * 4000), 20000);
+    peer._offerAnswerTimer = setTimeout(() => {
+      this._recoverTimedOutOffer(userId, connection, offerId).catch(err => {
+        console.warn('[Voice] Failed to recover unanswered offer for peer', userId, err);
+      });
+    }, timeoutMs);
+  }
+
+  async _recoverTimedOutOffer(userId, connection, offerId) {
+    const peer = this.peers.get(userId);
+    if (!peer || peer.connection !== connection ||
+        !peer._awaitingAnswer || peer._activeOfferId !== offerId) return false;
+
+    this._clearOfferAnswerTimer(peer);
+    const alreadyQueued = !!peer._renegotiateQueued;
+    peer._offerTimeoutCount = (peer._offerTimeoutCount || 0) + 1;
+    peer._renegotiateQueued = alreadyQueued || peer._offerTimeoutCount <= 3;
+    peer._recoveringTimedOutOffer = true;
+
+    console.warn('[Voice] Offer answer timed out for peer', userId,
+      '— rolling back and retrying negotiation');
+    if (connection.signalingState === 'have-local-offer') {
+      try {
+        await connection.setLocalDescription({ type: 'rollback' });
+      } catch (err) {
+        if (connection.signalingState !== 'stable') {
+          peer._recoveringTimedOutOffer = false;
+          console.warn('[Voice] Could not roll back timed-out offer for peer', userId, err);
+          if (connection.signalingState !== 'closed') {
+            this._scheduleOfferAnswerTimeout(userId, connection, offerId);
+          }
+          return false;
+        }
+      }
+    }
+    peer._recoveringTimedOutOffer = false;
+    peer._awaitingAnswer = false;
+    peer._activeOfferId = null;
+    peer._offerIsIceRestart = false;
+    peer._offerChannelCode = null;
+    if (connection.signalingState === 'stable') {
+      if (peer._renegotiateQueued) {
+        this._drainQueuedRenegotiation(userId);
+      } else {
+        peer._offerRecoveryExhausted = true;
+        console.warn('[Voice] Automatic offer recovery exhausted for peer', userId,
+          '— waiting for a new media or connection event');
+      }
+      return true;
+    }
+    return false;
+  }
+
   _drainQueuedRenegotiation(userId) {
     const peer = this.peers.get(userId);
     if (!peer || peer._makingOffer || peer._awaitingAnswer || !peer._renegotiateQueued) return;
@@ -1468,6 +3200,10 @@ class VoiceManager {
       peer._renegotiateQueued = true;
       peer._queuedIceRestart = peer._queuedIceRestart || iceRestart;
       return false;
+    }
+    if (peer._offerRecoveryExhausted) {
+      peer._offerRecoveryExhausted = false;
+      peer._offerTimeoutCount = 0;
     }
     // Wait for the signaling state to be stable before issuing a fresh
     // offer. RTCPeerConnection.createOffer() throws if called while a
@@ -1496,11 +3232,21 @@ class VoiceManager {
         return false;
       }
       await connection.setLocalDescription(offer);
+      this._offerSequence = (this._offerSequence || 0) + 1;
+      const offerId = `${this.localUserId ?? 'unknown'}-${Date.now().toString(36)}-${this._offerSequence.toString(36)}`;
       peer._awaitingAnswer = true;
+      peer._activeOfferId = offerId;
+      peer._offerChannelCode = this.currentChannel;
+      // Remember whether the offer now in flight is an ICE restart, so that if
+      // it later yields to glare the restart intent can be re-queued rather
+      // than silently downgraded to a plain renegotiation (#5444).
+      peer._offerIsIceRestart = iceRestart;
+      this._scheduleOfferAnswerTimeout(userId, connection, offerId);
       this.socket.emit('voice-offer', {
-        code: this.currentChannel,
+        code: peer._offerChannelCode,
         targetUserId: userId,
-        offer: offer
+        offer: offer,
+        offerId
       });
       return true;
     } catch (err) {
@@ -1547,7 +3293,7 @@ class VoiceManager {
       // Cap bitrate for this new peer
       const res = this.screenResolution;
       const maxBitrate = this._screenBitrates[res] || this._screenBitrates[0];
-      this._applyScreenBitrate(connection, maxBitrate);
+      this._applyScreenBitrate(connection, maxBitrate, userId);
     }
 
     // If our webcam is active, add the webcam video track
@@ -1572,11 +3318,18 @@ class VoiceManager {
         // - displaySurface is only set on getDisplayMedia tracks
         // - also check our signaling state (webcamUsers vs screenSharers)
         const settings = track.getSettings ? track.getSettings() : {};
-        const isScreenTrack = !!settings.displaySurface || this.screenSharers.has(userId);
-        const isWebcamTrack = !settings.displaySurface && this.webcamUsers.has(userId);
+        const hasNativeScreen = this._nativeScreenAnnouncements.has(userId);
+        const isScreenTrack = !hasNativeScreen &&
+          (!!settings.displaySurface || this.screenSharers.has(userId));
+        const isWebcamTrack = !settings.displaySurface &&
+          (hasNativeScreen || this.webcamUsers.has(userId));
 
         if (isWebcamTrack && !isScreenTrack) {
-          // Route to webcam callback
+          // Route to webcam callback. Remember the track id so
+          // _deliverScreenFromReceivers can exclude it when this peer is
+          // sending webcam and screen at the same time.
+          const p = this.peers.get(userId);
+          if (p) p._webcamTrackId = track.id;
           const camStream = sourceStream || new MediaStream([track]);
           if (this.onWebcamStream) this.onWebcamStream(userId, camStream);
           track.onunmute = () => {
@@ -1588,19 +3341,25 @@ class VoiceManager {
           track.onended = () => {
             if (this.onWebcamStream) this.onWebcamStream(userId, null);
           };
-        } else {
+        } else if (isScreenTrack) {
           // Screen share video
           if (sourceStream) knownScreenStreamIds.add(sourceStream.id);
+          const p = this.peers.get(userId);
+          if (p) p._screenTrackId = track.id;
           const videoStream = sourceStream || new MediaStream([track]);
+          this._screenDelivered.add(userId);
           if (this.onScreenStream) this.onScreenStream(userId, videoStream);
           track.onunmute = () => {
             setTimeout(() => {
+              if (this._nativeScreenAnnouncements.has(userId)) return;
               const freshStream = new MediaStream([track]);
+              this._screenDelivered.add(userId);
               if (this.onScreenStream) this.onScreenStream(userId, freshStream);
             }, 150);
           };
           track.onmute = () => {};
           track.onended = () => {
+            if (this._nativeScreenAnnouncements.has(userId)) return;
             // Don't tear down the tile if the sharer is in the middle of a
             // stop+restart cycle. Their old track ends naturally as part of
             // stopScreenShare, but the screenSharers set (driven by the
@@ -1611,6 +3370,10 @@ class VoiceManager {
             // is fine in theory but masked the stuck-transceiver bug for
             // months by making it look like "the new share never arrived".
             // Only clear when the server has actually told us they stopped.
+            // Either way this track is no longer showing them anything, so
+            // drop the delivered flag and let the watchdog re-adopt whatever
+            // the next share negotiates.
+            this._screenDelivered.delete(userId);
             if (!this.screenSharers.has(userId)) {
               if (this.onScreenStream) this.onScreenStream(userId, null);
             }
@@ -1640,10 +3403,34 @@ class VoiceManager {
         // peer is actively sharing are treated as screen audio; all other
         // audio is voice (and updates voiceStreamId so subsequent renegs
         // don't get re-misclassified either).
-        const peerIsSharing = this.screenSharers.has(userId);
+        const peerHasNativeScreen = this._nativeScreenAnnouncements.has(userId);
+        const peerIsSharing = this.screenSharers.has(userId) && !peerHasNativeScreen;
         const streamHasVideo = sourceStream && sourceStream.getVideoTracks().length > 0;
         const knownAsScreen = sourceStream && knownScreenStreamIds.has(sourceStream.id);
-        const isScreenAudio = knownAsScreen || (peerIsSharing && streamHasVideo);
+        const isScreenAudio = !peerHasNativeScreen &&
+          (knownAsScreen || (peerIsSharing && streamHasVideo));
+
+        // Track order across an m-section is not guaranteed: the audio of a
+        // screen share can arrive before its video, in which case none of the
+        // signals above have fired yet and this would be filed as voice
+        // permanently. deferredAudio existed for exactly this and was drained
+        // in the video branch, but nothing ever pushed into it, so the case
+        // was unreachable. Park it briefly instead, and fall back to voice if
+        // no video shows up — never silently drop someone's speech. (#5426)
+        const mayBeScreenAudio = !isScreenAudio && peerIsSharing && !streamHasVideo &&
+                                 sourceStream && sourceStream.id !== voiceStreamId;
+        if (mayBeScreenAudio) {
+          deferredAudio.push({ track, sourceStream });
+          setTimeout(() => {
+            const idx = deferredAudio.findIndex(d => d.track === track);
+            if (idx === -1) return;              // the video branch claimed it
+            deferredAudio.splice(idx, 1);
+            if (track.readyState !== 'live') return;
+            remoteAudioStream.addTrack(track);
+            this._playAudio(userId, remoteAudioStream);
+          }, 1500);
+          return;
+        }
 
         if (isScreenAudio) {
           this._playScreenAudio(userId, sourceStream);
@@ -1672,10 +3459,17 @@ class VoiceManager {
       const latestPeer = this.peers.get(userId);
       if (!latestPeer || latestPeer.connection !== connection) return;
       if (connection.signalingState === 'stable') {
-        if (latestPeer._awaitingAnswer) {
+        if (latestPeer._awaitingAnswer && !latestPeer._recoveringTimedOutOffer) {
+          this._clearOfferAnswerTimer(latestPeer);
           latestPeer._awaitingAnswer = false;
+          latestPeer._activeOfferId = null;
+          latestPeer._offerTimeoutCount = 0;
+          latestPeer._offerRecoveryExhausted = false;
         }
-        this._drainQueuedRenegotiation(userId);
+        latestPeer._offerChannelCode = null;
+        if (!latestPeer._recoveringTimedOutOffer && !latestPeer._handlingRemoteOffer) {
+          this._drainQueuedRenegotiation(userId);
+        }
       }
     });
 
@@ -1703,6 +3497,19 @@ class VoiceManager {
           clearTimeout(this._disconnectTimers[userId]);
           delete this._disconnectTimers[userId];
         }
+        // Relay or direct? Decides which screen share profile this viewer gets. (#5426)
+        this._detectRelayPath(userId, connection);
+        // ICE/DTLS just came (back) up. If this peer is screen-sharing,
+        // the video m-line may need a fresh delivery into the UI — ontrack
+        // does not always re-fire after an ICE restart, so the tile that
+        // was live before the blip can stay black/missing until we adopt
+        // the receiver track ourselves.
+        if (this.screenSharers.has(userId)) {
+          if (!this._deliverScreenFromReceivers(userId)) {
+            this._screenDelivered.delete(userId);
+            this._watchForScreenStream(userId);
+          }
+        }
       }
     };
 
@@ -1712,8 +3519,17 @@ class VoiceManager {
       username,
       _makingOffer: false,
       _awaitingAnswer: false,
+      _activeOfferId: null,
+      _offerAnswerTimer: null,
+      _offerTimeoutCount: 0,
+      _offerRecoveryExhausted: false,
+      _recoveringTimedOutOffer: false,
+      _handlingRemoteOffer: false,
+      _supportsOfferIds: false,
       _renegotiateQueued: false,
       _queuedIceRestart: false,
+      _offerIsIceRestart: false,
+      _offerChannelCode: null,
     });
 
     // If we're the initiator, create and send an offer
@@ -1723,15 +3539,26 @@ class VoiceManager {
   }
 
   _removePeer(userId) {
+    // Cancel any pending ICE-restart-recovery check so a departed peer can't
+    // be re-restarted after removal (voice-user-left, leave, stale-peer
+    // teardown all route through here). (#5444)
+    if (this._iceHealTimers && this._iceHealTimers[userId]) {
+      clearTimeout(this._iceHealTimers[userId]);
+      delete this._iceHealTimers[userId];
+    }
     const peer = this.peers.get(userId);
     if (peer) {
+      this._clearOfferAnswerTimer(peer);
       peer.connection.close();
       const audioEl = document.getElementById(`voice-audio-${userId}`);
       if (audioEl) audioEl.remove();
       const screenAudioEl = document.getElementById(`voice-audio-screen-${userId}`);
       if (screenAudioEl) screenAudioEl.remove();
       this.screenGainNodes.delete(userId);
+      this._pendingScreenAudio?.delete(userId);
       this.gainNodes.delete(userId);
+      this._screenDelivered.delete(userId);
+      this._relayPeers?.delete(userId);
       this.peers.delete(userId);
       // Always stop the analyser here too, not just in voice-user-left.
       // _restartIce failure calls _removePeer directly (without _stopAnalyser),
@@ -1743,13 +3570,44 @@ class VoiceManager {
     }
   }
 
-  async _restartIce(userId, connection) {
-    try {
-      await this._renegotiate(userId, connection, { iceRestart: true });
-    } catch (err) {
-      console.error('ICE restart failed for', userId, '— removing peer:', err);
-      this._removePeer(userId);
-    }
+  async _restartIce(userId, connection, attempt = 0) {
+    // _renegotiate swallows its own errors and returns false instead of
+    // throwing, so the try/catch that used to wrap this call was dead code:
+    // a stuck or un-issuable ICE restart silently left the peer with a dead
+    // media path and no retry. That is the "rejoined voice but still can't
+    // hear one person until I leave and rejoin" report (#5444). Verify the
+    // connection actually recovers, and if it's still broken a few seconds
+    // later, re-attempt the ICE restart a bounded number of times. An ICE
+    // restart continues the SAME RTCPeerConnection and is applied bilaterally
+    // by the remote via 'voice-offer', so re-issuing it is safe and
+    // near-seamless on a healthy pair — unlike tearing the peer down, which
+    // would need both sides to rebuild in lock-step.
+    await this._renegotiate(userId, connection, { iceRestart: true });
+
+    if (!this._iceHealTimers) this._iceHealTimers = {};
+    if (this._iceHealTimers[userId]) clearTimeout(this._iceHealTimers[userId]);
+    this._iceHealTimers[userId] = setTimeout(() => {
+      delete this._iceHealTimers[userId];
+      const peer = this.peers.get(userId);
+      // Peer was replaced, removed, or we left voice — nothing to do.
+      if (!this.inVoice || !peer || peer.connection !== connection) return;
+      const cs = connection.connectionState;
+      const ics = connection.iceConnectionState;
+      // Only intervene when the path is definitively broken. 'connecting' /
+      // 'checking' / 'new' mean the restart is still negotiating (slow TURN
+      // relay), so leave those to finish instead of restarting underneath.
+      const broken = cs === 'failed' || cs === 'disconnected' ||
+                     ics === 'failed' || ics === 'disconnected';
+      if (!broken) return;
+      if (attempt >= 2) {
+        console.warn('[Voice] ICE restart exhausted for', userId,
+          `(conn=${cs}, ice=${ics}) — leaving peer for the next reconnect/heal sweep`);
+        return;
+      }
+      console.warn('[Voice] ICE restart did not recover peer', userId,
+        `(conn=${cs}, ice=${ics}) — re-attempting (retry ${attempt + 1})`);
+      this._restartIce(userId, connection, attempt + 1);
+    }, 5000);
   }
 
   // (#5427) Proactive recovery sweep, called after a socket reconnect while
@@ -1778,6 +3636,10 @@ class VoiceManager {
   // don't fire a burst of simultaneous offers through signaling.
   _healPeerConnections() {
     if (!this.inVoice) return;
+    // After the ICE sweep, re-check every active screen share. A heal that
+    // restores voice audio often leaves screen video undelivered because
+    // ontrack doesn't re-fire for an already-negotiated transceiver.
+    setTimeout(() => { try { this._rearmScreenWatchdogs(); } catch {} }, 2500);
     let i = 0;
     for (const [userId, peer] of this.peers) {
       const conn = peer && peer.connection;
@@ -1793,6 +3655,37 @@ class VoiceManager {
         this._restartIce(userId, conn);
       }, delay);
     }
+  }
+
+  async _healPeerConnectionsAfterChannelRotation(oldCode) {
+    const rollbacks = [];
+    for (const [, peer] of this.peers) {
+      const connection = peer?.connection;
+      if (!connection || peer._offerChannelCode !== oldCode) continue;
+      peer._makingOffer = false;
+      this._clearOfferAnswerTimer(peer);
+      peer._awaitingAnswer = false;
+      peer._activeOfferId = null;
+      peer._offerTimeoutCount = 0;
+      peer._offerRecoveryExhausted = false;
+      peer._recoveringTimedOutOffer = false;
+      peer._offerIsIceRestart = false;
+      peer._offerChannelCode = null;
+      if (connection.signalingState === 'have-local-offer') {
+        rollbacks.push(connection.setLocalDescription({ type: 'rollback' }).catch(() => {}));
+      }
+    }
+    if (rollbacks.length) await Promise.all(rollbacks);
+    this._flushPendingScreenStop(this.currentChannel);
+    if (this.isScreenSharing && this.currentChannel) {
+      this._reannounceScreenShare([], {
+        channelCode: this.currentChannel,
+        voiceGeneration: this._voiceSessionGeneration || 0,
+      }).catch(err => {
+        console.warn('[Voice] Failed to restore screen share after channel rotation:', err);
+      });
+    }
+    this._healPeerConnections();
   }
 
   // ── Volume Control ──────────────────────────────────────
@@ -1932,8 +3825,9 @@ class VoiceManager {
     this._startNoiseGate();
     this._startLocalTalkDetection();
 
-    // Re-enable RNNoise if it was active
-    if (this.noiseMode === 'suppress' && this._rnnoiseReady) {
+    // Re-enable RNNoise if it was active (bytes loaded is enough to re-arm;
+    // _rnnoiseReady flips true asynchronously when the worklet confirms).
+    if (this.noiseMode === 'suppress' && this._rnnoiseWasmBytes) {
       this.setNoiseSensitivity(0);
       this._enableRNNoise();
     } else if (this.noiseMode === 'gate') {
@@ -1943,18 +3837,21 @@ class VoiceManager {
       this.setNoiseSensitivity(0);
     }
 
-    // Replace the audio track on every peer connection
+    // Replace the audio track on every peer connection, concurrently (see
+    // switchCamera). (#5426)
     const newTrack = this.localStream.getAudioTracks()[0];
+    const swaps = [];
     for (const [, peer] of this.peers) {
       const senders = peer.connection.getSenders();
       const audioSender = senders.find(s => s.track && s.track.kind === 'audio' &&
         (!this.screenStream || !this.screenStream.getAudioTracks().includes(s.track)));
       if (audioSender) {
-        await audioSender.replaceTrack(newTrack).catch(e =>
+        swaps.push(audioSender.replaceTrack(newTrack).catch(e =>
           console.warn('[Voice] replaceTrack failed for peer:', e)
-        );
+        ));
       }
     }
+    await Promise.all(swaps);
 
     // Re-apply mute state
     if (this.isMuted) {
@@ -1992,7 +3889,8 @@ class VoiceManager {
     }
 
     // 2. Also switch any HTMLMediaElements (fallback audio, screen share, etc.)
-    const elements = document.querySelectorAll('audio, video');
+    const elements = Array.from(document.querySelectorAll('audio, video'));
+    if (this._botAudio && !elements.includes(this._botAudio.audio)) elements.push(this._botAudio.audio);
     for (const el of elements) {
       if (typeof el.setSinkId === 'function') {
         try { await el.setSinkId(deviceId || ''); } catch (e) {
@@ -2005,7 +3903,32 @@ class VoiceManager {
 
   // ── Screen Share Audio ────────────────────────────────
 
+  // With "auto-accept screen shares" off, the video side waits for the Join
+  // prompt in _handleScreenStream, but the audio track used to play the moment
+  // it arrived: a share you never accepted was audible with no tile and no
+  // volume control to silence it (#5636). Park the audio until the tile
+  // exists; _handleScreenStream flushes it once the viewer joins. With the
+  // setting on (the default) nothing changes.
+  _screenAudioDeferred(userId) {
+    let autoAccept = true;
+    try { autoAccept = localStorage.getItem('haven_auto_accept_streams') !== 'false'; } catch {}
+    if (autoAccept) return false;
+    return !document.getElementById(`screen-tile-${userId}`);
+  }
+
+  flushPendingScreenAudio(userId) {
+    const stream = this._pendingScreenAudio && this._pendingScreenAudio.get(userId);
+    if (!stream) return;
+    this._pendingScreenAudio.delete(userId);
+    this._playScreenAudio(userId, stream);
+  }
+
   _playScreenAudio(userId, stream) {
+    if (this._screenAudioDeferred(userId)) {
+      if (!this._pendingScreenAudio) this._pendingScreenAudio = new Map();
+      this._pendingScreenAudio.set(userId, stream);
+      return;
+    }
     const key = `screen-${userId}`;
     let audioEl = document.getElementById(`voice-audio-${key}`);
     if (!audioEl) {
@@ -2142,10 +4065,12 @@ class VoiceManager {
       if (this.noiseSensitivity !== 0) {
         this.setNoiseSensitivity(0);
       }
-      if (!this._rnnoiseReady) {
+      // _rnnoiseWasmBytes = bytes loaded on main thread.
+      // _rnnoiseReady = worklet confirmed init (set asynchronously in _enableRNNoise).
+      if (!this._rnnoiseWasmBytes) {
         this._initRNNoise().then(() => {
-          if (this._rnnoiseReady) this._enableRNNoise();
-          else console.warn('[Voice] AI suppression unavailable');
+          if (this._rnnoiseWasmBytes) this._enableRNNoise();
+          else console.warn('[Voice] AI suppression unavailable (WASM failed to load)');
         });
       } else {
         this._enableRNNoise();
@@ -2163,35 +4088,102 @@ class VoiceManager {
   }
 
   async _initRNNoise() {
-    if (this._rnnoiseReady || !this.audioCtx) return;
+    // Loads the worklet module + wasm bytes. Does NOT set _rnnoiseReady —
+    // that only flips true when the worklet posts {type:'ready'} (#5458).
+    if (!this.audioCtx) return;
+    // addModule() registers the processor on ONE AudioContext, but the wasm
+    // bytes are reusable across contexts. Guarding on the bytes alone meant
+    // that after leave() closed the context, a rejoin built a fresh one, this
+    // returned early, addModule() never ran on it, and _enableRNNoise() threw
+    // "AudioWorklet does not have a valid AudioWorkletGlobalScope". Keying on
+    // the context itself survives any future teardown path that forgets to
+    // clear state, which clearing the bytes field would not. (#5458)
+    if (this._rnnoiseModuleCtx === this.audioCtx && this._rnnoiseWasmBytes) return;
+    // Capture the context: awaits below can straddle a leave/rejoin.
+    const ctx = this.audioCtx;
     try {
-      await this.audioCtx.audioWorklet.addModule('/js/rnnoise-processor.js');
-      const wasmResponse = await fetch('/js/rnnoise.wasm');
-      const wasmBytes = await wasmResponse.arrayBuffer();
-      const wasmModule = await WebAssembly.compile(wasmBytes);
-      this._rnnoiseWasmModule = wasmModule;
-      this._rnnoiseReady = true;
+      await ctx.audioWorklet.addModule('/js/rnnoise-processor.js');
+      this._rnnoiseModuleCtx = ctx;
+      if (!this._rnnoiseWasmBytes) {
+        const wasmResponse = await fetch('/js/rnnoise.wasm');
+        if (!wasmResponse.ok) {
+          throw new Error(`rnnoise.wasm HTTP ${wasmResponse.status}`);
+        }
+        const wasmBytes = await wasmResponse.arrayBuffer();
+        if (!wasmBytes || wasmBytes.byteLength < 1000) {
+          throw new Error(`rnnoise.wasm too small (${wasmBytes ? wasmBytes.byteLength : 0} bytes)`);
+        }
+        // Early validity check on the main thread so a corrupt/HTML 404 body
+        // fails here with a clear log, not inside the worklet.
+        await WebAssembly.compile(wasmBytes.slice(0));
+        this._rnnoiseWasmBytes = wasmBytes;
+      }
+      this._rnnoiseReady = false;
     } catch (err) {
       console.warn('[Voice] RNNoise init failed:', err);
+      this._rnnoiseModuleCtx = null;
+      this._rnnoiseWasmBytes = null;
       this._rnnoiseReady = false;
     }
   }
 
   _enableRNNoise() {
-    if (!this._rnnoiseReady || !this._rnnoiseSource || this._rnnoiseNode) return;
+    if (!this._rnnoiseWasmBytes || !this._rnnoiseSource || this._rnnoiseNode) return;
     try {
+      // RNNoise is locked to 48 kHz frames. Warn (don't hard-fail) if the
+      // AudioContext landed on a different rate — suppression still runs
+      // but frequency mapping is wrong and quality drops (#5458).
+      if (this.audioCtx && this.audioCtx.sampleRate !== 48000) {
+        console.warn(
+          `[Voice] RNNoise expects 48 kHz but AudioContext is ${this.audioCtx.sampleRate} Hz — ` +
+          'suppression quality will be reduced. Prefer an output device at 48 kHz.'
+        );
+      }
+
       const node = new AudioWorkletNode(this.audioCtx, 'rnnoise-processor', {
         numberOfInputs: 1, numberOfOutputs: 1,
         outputChannelCount: [1], channelCount: 1
       });
-      node.port.postMessage({ type: 'wasm-module', module: this._rnnoiseWasmModule });
-      // Re-wire: source → rnnoise → gateGain (gate is open since sensitivity=0)
+
+      // Listen for worklet ready/error. Previously these messages were
+      // discarded, so a silent init failure looked "healthy" (#5458).
+      node.port.onmessage = (e) => {
+        const data = e && e.data;
+        if (!data || !data.type) return;
+        if (data.type === 'ready') {
+          this._rnnoiseReady = true;
+          console.log('[Voice] RNNoise worklet ready', data.sampleRate ? `(sr=${data.sampleRate})` : '');
+        } else if (data.type === 'error') {
+          console.warn('[Voice] RNNoise worklet error:', data.message);
+          this._rnnoiseReady = false;
+          // Tear the dead node out so audio keeps flowing unprocessed
+          // rather than sitting on a forever-passthrough worklet that
+          // claims to be "AI suppression".
+          try { this._disableRNNoise(); } catch {}
+        }
+      };
+      node.port.onmessageerror = () => {
+        console.warn('[Voice] RNNoise port messageerror (WASM payload failed to clone)');
+        this._rnnoiseReady = false;
+        try { this._disableRNNoise(); } catch {}
+      };
+
+      // Post raw bytes (transfer a copy so our cached buffer stays usable
+      // for the next enable). WebAssembly.Module does NOT survive structured
+      // clone into AudioWorkletGlobalScope — that was the whole bug.
+      const bytesCopy = this._rnnoiseWasmBytes.slice(0);
+      node.port.postMessage({ type: 'wasm-bytes', bytes: bytesCopy }, [bytesCopy]);
+
+      // Re-wire: source → rnnoise → gateGain (gate is open since sensitivity=0).
+      // Audio passes through the worklet until {type:'ready'}; then processed.
       this._rnnoiseSource.disconnect(this._noiseGateGain);
       this._rnnoiseSource.connect(node);
       node.connect(this._noiseGateGain);
       this._rnnoiseNode = node;
+      this._rnnoiseReady = false; // stays false until worklet confirms
     } catch (err) {
       console.warn('[Voice] Failed to enable RNNoise:', err);
+      this._rnnoiseReady = false;
     }
   }
 
@@ -2201,6 +4193,7 @@ class VoiceManager {
       this._rnnoiseNode.port.postMessage({ type: 'destroy' });
       this._rnnoiseNode.disconnect();
       this._rnnoiseNode = null;
+      this._rnnoiseReady = false;
       // Re-wire: source → gateGain directly
       if (this._rnnoiseSource && this._noiseGateGain) {
         this._rnnoiseSource.connect(this._noiseGateGain);
@@ -2309,8 +4302,13 @@ class VoiceManager {
       // and switchOutputDevice() never fires until the user opens the
       // device picker, which is exactly the symptom in #184 (audio routes
       // to speakers when the user already chose their headset).
+      //
+      // sampleRate: 48000 — RNNoise is fixed at 48 kHz frames. Leaving the
+      // context free to follow a 96 kHz headset silently halves the model's
+      // frequency mapping and defeats AI suppression even when WASM loads
+      // correctly (#5458). Browsers resample to the device as needed.
       const savedOutput = localStorage.getItem('haven_output_device') || '';
-      const ctxOpts = {};
+      const ctxOpts = { sampleRate: 48000 };
       if (savedOutput && typeof AudioContext !== 'undefined' &&
           AudioContext.prototype && 'setSinkId' in AudioContext.prototype) {
         ctxOpts.sinkId = savedOutput;
@@ -2318,8 +4316,13 @@ class VoiceManager {
       try {
         this.audioCtx = new (window.AudioContext || window.webkitAudioContext)(ctxOpts);
       } catch {
-        // Older Chromium throws when sinkId is passed in options.
-        this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        // Older Chromium throws when sinkId is passed in options — retry
+        // with just sampleRate, then fully bare.
+        try {
+          this.audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+        } catch {
+          this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
       }
       // Best-effort: if sinkId-in-options wasn't honored but setSinkId() is
       // available on the instance, apply it now.
@@ -2553,3 +4556,5 @@ class VoiceManager {
     }
   }
 }
+
+if (typeof module !== 'undefined' && module.exports) module.exports = { VoiceManager };

@@ -1,6 +1,7 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 const { DB_PATH } = require('./paths');
+const { ensureSearchIndex } = require('./searchIndex');
 
 let db;
 
@@ -105,6 +106,19 @@ function initDatabase() {
       UNIQUE(user_id)
     );
 
+    -- Ban appeals (#5457). A banned user who authenticates with the correct
+    -- password can submit one appeal, which admins see next to the ban in the
+    -- Banned Users list. UNIQUE(user_id) keeps it to one active appeal per
+    -- user (re-submitting overwrites). Rows are removed when the user is
+    -- unbanned or the appeal is dismissed.
+    CREATE TABLE IF NOT EXISTS ban_appeals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      appeal TEXT NOT NULL DEFAULT '',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(user_id)
+    );
+
     CREATE TABLE IF NOT EXISTS mutes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -137,6 +151,37 @@ function initDatabase() {
       PRIMARY KEY (user_id, ip)
     );
     CREATE INDEX IF NOT EXISTS idx_user_ips_last_seen ON user_ips(user_id, last_seen);
+
+    -- ── Auto-moderation (v3.42.0) ──────────────────────────
+    -- Domain policy for posted links. mode is 'allow' or 'deny'; deny always
+    -- wins over allow so a single bad subdomain can be carved out of an
+    -- otherwise-trusted parent. Domains are stored normalized (lowercase, no
+    -- scheme, no leading "www.", no trailing dot) by src/automod.js so that
+    -- comparisons never have to guess at formatting.
+    CREATE TABLE IF NOT EXISTS automod_domains (
+      domain             TEXT PRIMARY KEY,
+      mode               TEXT NOT NULL DEFAULT 'allow',
+      include_subdomains INTEGER NOT NULL DEFAULT 1,
+      note               TEXT DEFAULT '',
+      added_by           INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at         DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- One row per blocked action. Drives warn -> mute -> ban escalation via a
+    -- rolling time window, and doubles as the admin-facing "what has automod
+    -- been doing" feed. Kept separate from audit_log because it is written on
+    -- a hot path and pruned on its own schedule.
+    CREATE TABLE IF NOT EXISTS automod_infractions (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id    INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      rule       TEXT NOT NULL,
+      channel_id INTEGER,
+      host       TEXT,
+      excerpt    TEXT DEFAULT '',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_automod_inf_user ON automod_infractions(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_automod_inf_created ON automod_infractions(created_at DESC);
 
     CREATE TABLE IF NOT EXISTS server_settings (
       key TEXT PRIMARY KEY,
@@ -183,6 +228,24 @@ function initDatabase() {
       used_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (invite_code_id, user_id)
     );
+
+    -- Who uploaded which file, recorded at the upload endpoint. Message content
+    -- is the only other record of an attachment, and in a DM that content is E2E
+    -- ciphertext (the file bytes are encrypted client-side too), so scanning
+    -- messages would silently miss every private upload, which is exactly the
+    -- storage nobody could account for before. The upload endpoint is the one
+    -- place the server still knows both the uploader and the file. Sizes are
+    -- re-read from disk when the member list is built, so a file that has been
+    -- deleted or purged stops counting without a bookkeeping hook here.
+    CREATE TABLE IF NOT EXISTS upload_ownership (
+      rel_path TEXT PRIMARY KEY,
+      user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      bytes INTEGER NOT NULL DEFAULT 0,
+      scope TEXT NOT NULL DEFAULT 'channel',   -- 'channel' | 'dm' | 'profile'
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_upload_ownership_user
+      ON upload_ownership(user_id);
 
     CREATE INDEX IF NOT EXISTS idx_messages_channel
       ON messages(channel_id, created_at);
@@ -317,6 +380,36 @@ function initDatabase() {
     db.exec("ALTER TABLE messages ADD COLUMN break_chain INTEGER DEFAULT 0");
   }
 
+  // ── Migration: type column on messages (persistent welcome messages) ──
+  // 'user' (default) = an ordinary user message. 'welcome' = a persisted
+  // welcome message posted when a new member first registers. It is stored
+  // like any message so it stays in history for everyone, replacing the old
+  // ephemeral (live-only) welcome that vanished on reload.
+  try {
+    db.prepare("SELECT type FROM messages LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE messages ADD COLUMN type TEXT DEFAULT 'user'");
+  }
+
+  // ── Migration: show_welcome flag on channels (persistent welcome messages) ──
+  // 1 = new-member welcome messages are posted to this channel. On existing
+  // servers the first/default channel is switched on so the feature works out
+  // of the box; admins toggle it per channel in Channel Functions. Fresh
+  // installs flag their first-ever channel at creation time instead.
+  try {
+    db.prepare("SELECT show_welcome FROM channels LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE channels ADD COLUMN show_welcome INTEGER DEFAULT 0");
+    try {
+      const firstChannel = db.prepare(
+        "SELECT id FROM channels WHERE is_dm = 0 ORDER BY position ASC, id ASC LIMIT 1"
+      ).get();
+      if (firstChannel) {
+        db.prepare("UPDATE channels SET show_welcome = 1 WHERE id = ?").run(firstChannel.id);
+      }
+    } catch { /* no channels yet — fresh install handles this at channel creation */ }
+  }
+
   // ── Migration: high_scores table ────────────────────────
   db.exec(`
     CREATE TABLE IF NOT EXISTS high_scores (
@@ -359,19 +452,33 @@ function initDatabase() {
   insertSetting.run('cleanup_max_age_days', '0');      // delete messages older than N days (0 = disabled)
   insertSetting.run('cleanup_max_size_mb', '0');       // delete oldest messages when DB exceeds N MB (0 = disabled)
   insertSetting.run('whitelist_enabled', 'false');     // whitelist toggle
-  insertSetting.run('server_name', 'HAVEN');           // displayed in sidebar header + server bar
+  // Empty on purpose. A stored value always beats SERVER_NAME, so seeding the
+  // literal 'HAVEN' here meant a server started with SERVER_NAME=Foo in its
+  // compose file was named HAVEN anyway and nothing in the panel explained
+  // why. Blank means "not set here", which lets SERVER_NAME through and falls
+  // back to Haven when that is unset too. (#5489)
+  insertSetting.run('server_name', '');                // displayed in sidebar header + server bar
   insertSetting.run('server_icon', '');                // path to uploaded server icon image
-  insertSetting.run('permission_thresholds', '{"create_channel":50}');    // JSON: { permission: minLevel } — auto-grant perms at level
+  insertSetting.run('permission_thresholds', '{"create_channel":50,"manage_channel_settings":50}');    // JSON: { permission: minLevel } — auto-grant perms at level
   insertSetting.run('server_code', '');                // server-wide invite code (joins all channels)
   insertSetting.run('default_join_channels', '');       // (#5345) JSON array of channel IDs that server-code/vanity-code joiners get added to (empty = all public)
   insertSetting.run('registration_token_enabled', 'false'); // (#5344) require a token on the registration form
+  insertSetting.run('invites_bypass_registration_token', 'false'); // Allow invite links to bypass token on the registration form
   insertSetting.run('registration_token', '');          // (#5344) the token value (admin-generated, rerollable)
+  insertSetting.run('registration_captcha_enabled', 'false'); // opt-in Cloudflare Turnstile CAPTCHA on registration
+  insertSetting.run('turnstile_site_key', '');          // Turnstile public site key (safe to expose to the page)
+  insertSetting.run('turnstile_secret_key', '');        // Turnstile secret key (server-side verification only, never sent to clients)
+  insertSetting.run('registration_rate_limit_enabled', 'false'); // opt-in global cap on new accounts per hour
+  insertSetting.run('registration_rate_limit_per_hour', '20');   // the cap value when enabled
+  insertSetting.run('max_invite_uses', '0');            // the maximum uses each non-admin/manage-server invite link can accept
   insertSetting.run('max_upload_mb', '25');             // max file upload size in MB
+  insertSetting.run('max_attachments', '10');           // files one message may queue, images and other files together (1-50) (#5561)
   insertSetting.run('max_poll_options', '10');            // max poll answer options (2–25)
   insertSetting.run('max_message_chars', '2000');         // max characters per message (200–100000)
   insertSetting.run('max_sound_kb', '1024');              // max soundboard file size in KB (256–10240)
   insertSetting.run('max_emoji_kb', '256');               // max emoji file size in KB (64–1024)
   insertSetting.run('max_sticker_kb', '1024');            // max sticker file size in KB (256–10240) — #5392
+  insertSetting.run('unicode_emoji_auto_update', 'false'); // monthly refresh of the built-in emoji set from unicode.org, opt-in, defaults off (UNICODE_EMOJI_AUTO_UPDATE env overrides)
   insertSetting.run('setup_wizard_complete', 'false');   // first-time admin setup wizard
   insertSetting.run('update_banner_admin_only', 'false'); // hide update banner from non-admins
   insertSetting.run('session_duration_days', '0');       // login token lifetime in days; 0 = never expire (default for new installs, #5391). Existing installs that were seeded with '7' keep that value until the admin changes it.
@@ -385,10 +492,112 @@ function initDatabase() {
   insertSetting.run('turn_url', '');                     // optional turn: URI for relaying through hard NAT
   insertSetting.run('turn_username', '');                // static TURN username (used when turn_url is set)
   insertSetting.run('turn_password', '');                // static TURN credential
+  // (v3.42.0) Force every voice peer connection through the TURN relay.
+  // Haven voice is a peer-to-peer WebRTC mesh, so by default anyone who joins
+  // a voice channel with you learns your public IP from the ICE candidate
+  // exchange, with no click and no consent prompt. Relay-only hides it behind
+  // the TURN server. Requires turn_url to be configured; the settings handler
+  // refuses to enable it otherwise, because without TURN this breaks voice.
+  insertSetting.run('voice_force_relay', 'false');
+
+  // ── Auto-moderation (v3.42.0) ─────────────────────────
+  // Every value here is deliberately inert on upgrade: an existing server
+  // gets the tables and the settings rows but no behaviour change until an
+  // admin turns automod on.
+  // (v3.43.0) On by default. The protections that cannot break a server are
+  // enabled out of the box, because "secure only if the admin finds the
+  // setting" is how the incident these were written for happened in the first
+  // place. The two that CAN break things stay off: voice_force_relay (needs a
+  // TURN server) and automod_ban_ip (shared/CGNAT addresses catch bystanders).
+  insertSetting.run('automod_enabled', 'true');
+  insertSetting.run('automod_link_mode', 'allowlist');        // 'off' | 'allowlist' | 'blocklist'
+  insertSetting.run('automod_link_exempt_level', '50');       // effective level that bypasses link filtering
+  insertSetting.run('automod_link_min_account_hours', '24');  // accounts younger than this post no links at all
+  insertSetting.run('automod_scan_edits', 'true');            // otherwise: post clean, edit in the payload
+  insertSetting.run('automod_scan_profile', 'true');          // display name / status text / bio
+  insertSetting.run('automod_scan_dms', 'true');              // mass-DM spam is worse than a channel post
+  insertSetting.run('automod_block_ip_urls', 'true');
+  insertSetting.run('automod_block_punycode', 'true');        // homoglyph lookalike domains
+  insertSetting.run('automod_block_obfuscated', 'true');      // hxxp:// and evil[.]com defanging
+  insertSetting.run('automod_preview_allowlist_only', 'true'); // closes the passive IP leak via og:image
+  insertSetting.run('automod_escalation', '{"windowHours":24,"warnAt":1,"muteAt":3,"muteMinutes":60,"banAt":5}');
+  insertSetting.run('automod_ban_ip', 'false');               // escalated bans also ban recent IPs
+  insertSetting.run('automod_log_channel', '');               // channel code to mirror automod actions into
+  insertSetting.run('automod_seeded', 'false');               // starter allowlist planted once, see below
+
+  // (v3.43.0) Server-side media proxy. Remote images are fetched by the server
+  // and cached on disk so clients never contact a third-party host. On by
+  // default: it costs bandwidth but nothing breaks without it, and leaving it
+  // off means every embedded image leaks the viewer's IP to whoever posted it.
+  insertSetting.run('media_proxy_enabled', 'true');
+
+  // Google FCM mobile push. On by default so existing Android users keep getting
+  // notifications on upgrade; admins who prefer a Google-free path (UnifiedPush /
+  // ntfy) can turn it off under Settings → Security → FCM Privacy. Off skips FCM
+  // sends only, so web-push to browsers is unaffected.
+  insertSetting.run('fcm_enabled', 'true');
 
   // Unique server fingerprint — used by the multi-server sidebar to detect "self"
   const crypto = require('crypto');
   insertSetting.run('server_fingerprint', crypto.randomUUID());
+
+  // ── Migration: starter link allowlist (v3.42.0) ───────
+  // Planted exactly once, guarded by automod_seeded, so an admin who prunes
+  // this list does not find it silently regrown on the next restart. These
+  // are the domains a general-purpose community server actually needs before
+  // allowlist mode becomes usable; anything else is the admin's call.
+  try {
+    const seeded = db.prepare("SELECT value FROM server_settings WHERE key = 'automod_seeded'").get();
+    if (!seeded || seeded.value !== 'true') {
+      const addDomain = db.prepare(
+        "INSERT OR IGNORE INTO automod_domains (domain, mode, include_subdomains, note) VALUES (?, 'allow', 1, 'Seeded default')"
+      );
+      const starter = [
+        'youtube.com', 'youtu.be', 'twitch.tv', 'x.com', 'twitter.com', 'bsky.app',
+        'reddit.com', 'github.com', 'gitlab.com', 'stackoverflow.com', 'wikipedia.org',
+        'imgur.com', 'giphy.com', 'tenor.com', 'spotify.com', 'soundcloud.com',
+        'steamcommunity.com', 'steampowered.com', 'last.fm', 'archive.org'
+      ];
+      const seedAll = db.transaction((list) => { for (const d of list) addDomain.run(d); });
+      seedAll(starter);
+      db.prepare("INSERT OR REPLACE INTO server_settings (key, value) VALUES ('automod_seeded', 'true')").run();
+    }
+  } catch (err) {
+    console.error('automod starter allowlist seed failed:', err.message);
+  }
+
+  // ── Migration: turn the safe protections on, once (v3.43.0) ──
+  // The seeds above are INSERT OR IGNORE, so they only reach brand-new
+  // installs. A server that already ran 3.42.0 (where everything defaulted
+  // off) keeps its inert rows without this. Guarded by its own flag so an
+  // admin who later decides to switch automod off does not find it turned
+  // back on at the next restart.
+  try {
+    const done = db.prepare("SELECT value FROM server_settings WHERE key = 'automod_defaults_v343'").get();
+    if (!done || done.value !== 'true') {
+      const put = db.prepare('INSERT OR REPLACE INTO server_settings (key, value) VALUES (?, ?)');
+      const flip = db.transaction(() => {
+        put.run('automod_enabled', 'true');
+        put.run('automod_link_mode', 'allowlist');
+        put.run('automod_preview_allowlist_only', 'true');
+        put.run('automod_scan_edits', 'true');
+        put.run('automod_scan_dms', 'true');
+        put.run('automod_scan_profile', 'true');
+        put.run('automod_block_ip_urls', 'true');
+        put.run('automod_block_punycode', 'true');
+        put.run('automod_block_obfuscated', 'true');
+        put.run('media_proxy_enabled', 'true');
+        // Only set the new-account hold if the admin has not chosen a value.
+        const cur = db.prepare("SELECT value FROM server_settings WHERE key = 'automod_link_min_account_hours'").get();
+        if (!cur || cur.value === '0') put.run('automod_link_min_account_hours', '24');
+        put.run('automod_defaults_v343', 'true');
+      });
+      flip();
+      console.log('🛡️  Auto-mod protections enabled (v3.43.0 defaults). Settings → Auto-Mod to adjust.');
+    }
+  } catch (err) {
+    console.error('automod default migration failed:', err.message);
+  }
 
   // ── Migration: pinned_messages table ──────────────────
   db.exec(`
@@ -422,6 +631,16 @@ function initDatabase() {
     db.exec("ALTER TABLE users ADD COLUMN display_name TEXT DEFAULT NULL");
   }
 
+  // ── Migration: display_name_locked (#5482) ────────────────
+  // Set when a moderator sets someone's display name, cleared when it is
+  // reset back to their username. Without it the moderated user just renames
+  // themselves again a minute later and the moderation action means nothing.
+  try {
+    db.prepare("SELECT display_name_locked FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN display_name_locked INTEGER DEFAULT 0");
+  }
+
   // ── Migration: avatar column ──────────────────────────────
   try {
     db.prepare("SELECT avatar FROM users LIMIT 0").get();
@@ -434,6 +653,27 @@ function initDatabase() {
     db.prepare("SELECT avatar_shape FROM users LIMIT 0").get();
   } catch {
     db.exec("ALTER TABLE users ADD COLUMN avatar_shape TEXT DEFAULT 'circle'");
+  }
+
+  // ── Migration: animate_profile column (pfp animation policy) ──
+  try {
+    db.prepare("SELECT animate_profile FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN animate_profile TEXT DEFAULT 'trigger'");
+  }
+
+  // ── Migration: border column (pfp overlay, mirrors avatar) ──
+  try {
+    db.prepare("SELECT border FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN border TEXT DEFAULT NULL");
+  }
+
+  // ── Migration: border_transform column (pfp-overlay fit, JSON op log) ──
+  try {
+    db.prepare("SELECT border_transform FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN border_transform TEXT DEFAULT NULL");
   }
 
   // ── Migration: bio column ─────────────────────────────────
@@ -530,6 +770,20 @@ function initDatabase() {
     );
   `);
 
+  // ── Migration: per-thread read positions (#5641) ─────────
+  // Which reply a person last saw in a thread, keyed by the parent message.
+  // Forum topic cards use it for their unread dot, and because it lives on
+  // the account it follows you between devices. A row with 0 means the
+  // thread was opened but had no replies yet.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS thread_reads (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      thread_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      last_read_reply_id INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (user_id, thread_id)
+    );
+  `);
+
   // ── Migration: original_name on messages for file uploads ──
   try {
     db.prepare("SELECT original_name FROM messages LIMIT 0").get();
@@ -623,6 +877,11 @@ function initDatabase() {
   const personaMsgCols = [
     { name: 'persona_id',       sql: "ALTER TABLE messages ADD COLUMN persona_id INTEGER DEFAULT NULL REFERENCES user_personas(id) ON DELETE SET NULL" },
     { name: 'persona_username', sql: "ALTER TABLE messages ADD COLUMN persona_username TEXT DEFAULT NULL" },
+    // Ferry: which Discord destination this message was addressed to, as a
+    // display label ("MyServer#general") or the literal 'dm'. Null for the vast
+    // majority of messages. Stored so channel history can show where a message
+    // went instead of leaving the routing prefix in the body.
+    { name: 'ferry_target', sql: "ALTER TABLE messages ADD COLUMN ferry_target TEXT DEFAULT NULL" },
     { name: 'persona_avatar',   sql: "ALTER TABLE messages ADD COLUMN persona_avatar TEXT DEFAULT NULL" },
   ];
   for (const col of personaMsgCols) {
@@ -674,6 +933,7 @@ function initDatabase() {
       'kick_user', 'mute_user', 'delete_message', 'pin_message',
       'set_channel_topic', 'manage_sub_channels', 'rename_channel',
       'rename_sub_channel', 'delete_lower_messages', 'manage_webhooks',
+      'use_ferry',
       'upload_files', 'use_voice', 'view_history', 'view_all_members',
       'manage_music_queue',
       'delete_own_messages', 'edit_own_messages'
@@ -796,10 +1056,47 @@ function initDatabase() {
     // 3.18.0 — opt-in moderation actions (kick/ban/mute) for bot webhooks.
     // Defaults to 0 so existing bots cannot suddenly moderate. Per #5397.
     { name: 'can_moderate',         sql: "ALTER TABLE webhooks ADD COLUMN can_moderate INTEGER DEFAULT 0" },
+    // Voice gateway access is also opt-in and can only be granted by admins.
+    { name: 'can_use_voice',        sql: "ALTER TABLE webhooks ADD COLUMN can_use_voice INTEGER DEFAULT 0" },
   ];
   for (const col of webhookCallbackCols) {
     try { db.prepare(`SELECT ${col.name} FROM webhooks LIMIT 0`).get(); } catch { db.exec(col.sql); }
   }
+
+  // ── Migration: Ferry (Haven <-> Discord bridge) pairings ──
+  // One row per Haven channel paired with one Discord channel. A Haven channel
+  // may appear more than once (fan out to several Discord servers) and so may a
+  // Discord channel, so the uniqueness is on the pair.
+  //
+  //   direction  'both' | 'to_discord' | 'to_haven'  — admin-selectable per pair
+  //   out_mode   'all'     mirrors every message in the Haven channel
+  //              'command' only relays messages the author explicitly addressed
+  //
+  // webhook_id/webhook_token are the Discord channel webhook Ferry sends
+  // through. They are filled in lazily on first send, because creating one
+  // needs the bot to already be in that Discord server with Manage Webhooks.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ferry_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      guild_id TEXT NOT NULL,
+      guild_name TEXT,
+      discord_channel_id TEXT NOT NULL,
+      discord_channel_name TEXT,
+      direction TEXT NOT NULL DEFAULT 'both',
+      out_mode TEXT NOT NULL DEFAULT 'command',
+      webhook_id TEXT DEFAULT NULL,
+      webhook_token TEXT DEFAULT NULL,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      last_activity_at DATETIME DEFAULT NULL,
+      last_error TEXT DEFAULT NULL,
+      created_by INTEGER REFERENCES users(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(channel_id, discord_channel_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ferry_links_channel ON ferry_links(channel_id);
+    CREATE INDEX IF NOT EXISTS idx_ferry_links_discord ON ferry_links(discord_channel_id);
+  `);
 
   // ── Migration: mobile FCM push tokens ───────────────────
   db.exec(`
@@ -812,6 +1109,27 @@ function initDatabase() {
     );
     CREATE INDEX IF NOT EXISTS idx_fcm_tokens_user ON fcm_tokens(user_id);
   `);
+
+  // ── Migration: one device belongs to one account ────────
+  // Both tables are UNIQUE(user_id, endpoint/token), so signing a device in
+  // as a second account used to leave the first account's row behind pointing
+  // at that same device. Push fan-out only skips rows whose user_id is the
+  // sender, so the leftover row delivered the sender their own messages to
+  // their own phone. Registration now claims the device, but installs that
+  // already collected duplicates need them cleared once: keep only the newest
+  // row per endpoint/token, which is the account that most recently signed in.
+  // A stale web-push endpoint eventually 410s and gets pruned; a stale FCM
+  // token stays valid forever, so it would never have cleaned itself up.
+  try {
+    db.exec(`
+      DELETE FROM push_subscriptions WHERE id NOT IN (
+        SELECT MAX(id) FROM push_subscriptions GROUP BY endpoint
+      );
+      DELETE FROM fcm_tokens WHERE id NOT IN (
+        SELECT MAX(id) FROM fcm_tokens GROUP BY token
+      );
+    `);
+  } catch { /* tables may not exist yet on a fresh schema race */ }
 
   // ── Migration: per-user channel notification prefs ──────
   // Before 3.20.2 these lived only in localStorage, which meant the server
@@ -829,6 +1147,7 @@ function initDatabase() {
       PRIMARY KEY (user_id, channel_code)
     );
     CREATE INDEX IF NOT EXISTS idx_user_channel_prefs_user ON user_channel_prefs(user_id);
+    CREATE INDEX IF NOT EXISTS idx_user_channel_prefs_channel ON user_channel_prefs(channel_code);
   `);
 
   // ── Migration: channel feature toggles & QoL ────────────
@@ -846,6 +1165,13 @@ function initDatabase() {
     { name: 'voice_enabled',     sql: "ALTER TABLE channels ADD COLUMN voice_enabled INTEGER DEFAULT 1" },
     { name: 'text_enabled',      sql: "ALTER TABLE channels ADD COLUMN text_enabled INTEGER DEFAULT 1" },
     { name: 'soundboard_enabled', sql: "ALTER TABLE channels ADD COLUMN soundboard_enabled INTEGER DEFAULT 1" },
+    // Forum mode (#144): each top-level message is a topic, and the channel
+    // lists topics by their latest thread activity instead of creation time.
+    { name: 'is_forum',          sql: "ALTER TABLE channels ADD COLUMN is_forum INTEGER DEFAULT 0" },
+    // Forum parity: a per-channel tag list (JSON array of {name, emoji}) that
+    // topics pick from, and an NSFW flag users can hide behind a preference.
+    { name: 'forum_tags',        sql: "ALTER TABLE channels ADD COLUMN forum_tags TEXT DEFAULT NULL" },
+    { name: 'is_nsfw',           sql: "ALTER TABLE channels ADD COLUMN is_nsfw INTEGER DEFAULT 0" },
     // #5390 — extend the self-destruct timer with a "clear messages only"
     // mode. `auto_delete_mode` is 'delete' (existing behaviour: drop the
     // whole channel) or 'clear' (wipe messages but keep channel, perms,
@@ -854,6 +1180,13 @@ function initDatabase() {
     // (recurring sweep) instead of being a one-shot.
     { name: 'auto_delete_mode',           sql: "ALTER TABLE channels ADD COLUMN auto_delete_mode TEXT DEFAULT 'delete'" },
     { name: 'auto_delete_interval_hours', sql: "ALTER TABLE channels ADD COLUMN auto_delete_interval_hours INTEGER DEFAULT NULL" },
+    // Role gate: JSON {"mode":"any"|"all","roles":[id,...]}. Membership still
+    // decides who is IN the channel; the gate decides who may open it, on top
+    // of that, so a channel can ask for one of several roles or all of them.
+    { name: 'role_gate',                  sql: "ALTER TABLE channels ADD COLUMN role_gate TEXT DEFAULT NULL" },
+    // Forum layout an admin set for everyone: JSON {"view","tile","at"}.
+    // A reader's own pick, made after "at", still wins on their browser (#5656).
+    { name: 'forum_layout',               sql: "ALTER TABLE channels ADD COLUMN forum_layout TEXT DEFAULT NULL" },
   ];
   for (const col of channelQolCols) {
     try { db.prepare(`SELECT ${col.name} FROM channels LIMIT 0`).get(); } catch { db.exec(col.sql); }
@@ -880,6 +1213,53 @@ function initDatabase() {
     db.exec("ALTER TABLE users ADD COLUMN public_key TEXT DEFAULT NULL");
   }
 
+  // ── Migration: E2E signing key (ECDSA P-256) ────────────
+  // Separate from public_key because P-256 cannot both agree and sign. This is
+  // what gives messages a sender the recipient can verify, rather than one the
+  // server asserts. See docs/group-dm-e2e-plan.md.
+  try {
+    db.prepare("SELECT signing_key FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN signing_key TEXT DEFAULT NULL");
+  }
+
+  // ── Migration: group DM epoch keys ──────────────────────
+  try {
+    db.prepare("SELECT key_epoch FROM channels LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE channels ADD COLUMN key_epoch INTEGER DEFAULT 0");
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS dm_group_keys (
+      channel_id   INTEGER NOT NULL,
+      epoch        INTEGER NOT NULL,
+      recipient_id INTEGER NOT NULL,
+      wrapped_key  TEXT    NOT NULL,
+      wrapped_by   INTEGER NOT NULL,
+      created_at   TEXT DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (channel_id, epoch, recipient_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_dm_group_keys_lookup
+      ON dm_group_keys (channel_id, recipient_id, epoch);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS dm_group_invites (
+      channel_id INTEGER NOT NULL,
+      user_id    INTEGER NOT NULL,
+      invited_by INTEGER NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (channel_id, user_id)
+    );
+    CREATE TABLE IF NOT EXISTS dm_group_rewrap_requests (
+      channel_id    INTEGER NOT NULL,
+      epoch         INTEGER NOT NULL,
+      requester_id  INTEGER NOT NULL,
+      created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (channel_id, epoch, requester_id)
+    );
+  `);
+
   // ── Migration: E2E encrypted private key (per-account sync) ──
   try {
     db.prepare("SELECT encrypted_private_key FROM users LIMIT 0").get();
@@ -899,6 +1279,25 @@ function initDatabase() {
     db.exec("ALTER TABLE users ADD COLUMN e2e_secret TEXT DEFAULT NULL");
   }
 
+  // ── Migration: OIDC / SSO federated identity (#12) ──
+  // A federated account is identified by the pair (issuer, subject), never by
+  // email — an email can be reassigned inside a directory, `sub` cannot.
+  // password_hash stays NULL for these accounts so the local login form can
+  // never authenticate one.
+  try {
+    db.prepare("SELECT oidc_subject FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN oidc_subject TEXT DEFAULT NULL");
+  }
+  try {
+    db.prepare("SELECT oidc_issuer FROM users LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE users ADD COLUMN oidc_issuer TEXT DEFAULT NULL");
+  }
+  try {
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_oidc ON users(oidc_issuer, oidc_subject) WHERE oidc_subject IS NOT NULL");
+  } catch { /* older SQLite without partial indexes — lookup still works */ }
+
   // ── Migration: ensure create_channel default threshold ──
   try {
     const row = db.prepare("SELECT value FROM server_settings WHERE key = 'permission_thresholds'").get();
@@ -916,6 +1315,18 @@ function initDatabase() {
     db.prepare("SELECT imported_from FROM messages LIMIT 0").get();
   } catch {
     db.exec("ALTER TABLE messages ADD COLUMN imported_from TEXT DEFAULT NULL");
+  }
+
+  // ── Migration: invite_codes.spent (#5562) ──
+  // Redemptions used to be counted from invite_code_uses, whose rows go with
+  // the user (ON DELETE CASCADE), so deleting an account handed its use back
+  // to a single-use link. `spent` only ever goes up. Seeded from the rows
+  // that still exist, which is the best the old data can offer.
+  try {
+    db.prepare("SELECT spent FROM invite_codes LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE invite_codes ADD COLUMN spent INTEGER DEFAULT 0");
+    db.exec("UPDATE invite_codes SET spent = (SELECT COUNT(*) FROM invite_code_uses u WHERE u.invite_code_id = invite_codes.id)");
   }
 
   // ── Migration: webhook_avatar column on messages (Discord import avatars) ──
@@ -966,6 +1377,18 @@ function initDatabase() {
     db.prepare("SELECT password_version FROM users LIMIT 0").get();
   } catch {
     db.exec("ALTER TABLE users ADD COLUMN password_version INTEGER DEFAULT 1");
+  }
+
+  // ── Migration: mark auto-joins made by view_all_channels ─
+  // The permission inserts a real channel_members row per channel, which is
+  // what makes losing it dangerous: without knowing which rows it created,
+  // revoking cannot take them back and a demoted mod keeps every private
+  // channel. Rows it adds carry this flag; everything else stays 0 and is
+  // never touched by the cleanup. (#5512)
+  try {
+    db.prepare("SELECT auto_all_channels FROM channel_members LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE channel_members ADD COLUMN auto_all_channels INTEGER NOT NULL DEFAULT 0");
   }
 
   // ── Migration: role-based channel access ────────────────
@@ -1041,6 +1464,73 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_poll_votes_msg ON poll_votes(message_id);
   `);
 
+  // ── Required roles are membership (#5649) ──
+  // A membership row the gate created is marked, so it can be taken back
+  // when the person stops passing the gate; rows added by hand are not.
+  try {
+    db.prepare("SELECT via_role_gate FROM channel_members LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE channel_members ADD COLUMN via_role_gate INTEGER NOT NULL DEFAULT 0");
+  }
+  // One-time: the role-side "grant these channels" lists become Required
+  // roles on those channels (any of the roles that granted it), and the
+  // role-side switch is turned off. Same intent, one place to see it.
+  try {
+    const done = db.prepare("SELECT value FROM server_settings WHERE key = 'role_links_migrated'").get();
+    if (!done) {
+      const rows = db.prepare(`
+        SELECT rca.channel_id, rca.role_id FROM role_channel_access rca
+        JOIN roles r ON r.id = rca.role_id
+        WHERE r.link_channel_access = 1 AND rca.grant_on_promote = 1
+      `).all();
+      const byChannel = new Map();
+      for (const r of rows) {
+        if (!byChannel.has(r.channel_id)) byChannel.set(r.channel_id, new Set());
+        byChannel.get(r.channel_id).add(r.role_id);
+      }
+      let converted = 0;
+      for (const [chId, roleIds] of byChannel) {
+        const ch = db.prepare('SELECT id, role_gate FROM channels WHERE id = ? AND is_dm = 0').get(chId);
+        if (!ch) continue;
+        let gate = null;
+        try { gate = JSON.parse(ch.role_gate || 'null'); } catch { gate = null; }
+        const roles = new Set(Array.isArray(gate && gate.roles) ? gate.roles.map(Number) : []);
+        roleIds.forEach(id => roles.add(id));
+        db.prepare('UPDATE channels SET role_gate = ? WHERE id = ?')
+          .run(JSON.stringify({ mode: gate && gate.mode === 'all' ? 'all' : 'any', roles: [...roles] }), chId);
+        converted++;
+      }
+      db.prepare('UPDATE roles SET link_channel_access = 0').run();
+      db.prepare("INSERT OR REPLACE INTO server_settings (key, value) VALUES ('role_links_migrated', '1')").run();
+      // An existing server gets a one-time notice for admins about the change
+      // in how channel access works. Nothing to explain on a fresh install.
+      // TEMPORARY: remove this flag and the notice modal after the 4.8.x cycle.
+      const existing = db.prepare('SELECT COUNT(*) AS c FROM channels WHERE is_dm = 0').get().c;
+      if (existing) db.prepare("INSERT OR REPLACE INTO server_settings (key, value) VALUES ('role_gate_notice', '1')").run();
+      if (converted) console.log(`[migration] Role channel access lists became Required roles on ${converted} channel(s) (#5649)`);
+    }
+  } catch (err) {
+    console.error('[migration] role channel access → required roles failed:', err.message);
+  }
+
+  // ── Scheduled messages (#5638): held on the server until send_at ──
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS scheduled_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+      content TEXT NOT NULL,
+      send_at TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_scheduled_send_at ON scheduled_messages(send_at);
+  `);
+
+  // ── Migration: weighted automod strikes (#5614) ──
+  // A word group can be worth more than one strike; link infractions stay at 1.
+  try { db.prepare('SELECT weight FROM automod_infractions LIMIT 0').get(); }
+  catch { db.exec('ALTER TABLE automod_infractions ADD COLUMN weight INTEGER NOT NULL DEFAULT 1'); }
+
   // ── Migration: deleted_users log (audit trail for admin deletions) ──
   db.exec(`
     CREATE TABLE IF NOT EXISTS deleted_users (
@@ -1077,6 +1567,13 @@ function initDatabase() {
     db.prepare("SELECT read_only FROM channels LIMIT 0").get();
   } catch {
     db.exec("ALTER TABLE channels ADD COLUMN read_only INTEGER DEFAULT 0");
+  }
+
+  // ── Migration: former channel names, so a #old-name link keeps resolving (#5602) ──
+  try {
+    db.prepare("SELECT former_names FROM channels LIMIT 0").get();
+  } catch {
+    db.exec("ALTER TABLE channels ADD COLUMN former_names TEXT DEFAULT NULL");
   }
 
   // ── Migration: encrypted server list for cross-device sync ──────────
@@ -1123,6 +1620,115 @@ function initDatabase() {
     db.exec('ALTER TABLE bot_commands ADD COLUMN subcommands_json TEXT DEFAULT NULL');
   }
 
+  // ── Migration: per-role upload cap ──────────────────────
+  // NULL means the role says nothing and the server-wide max_upload_mb applies.
+  // A user's cap is the highest one among the roles they hold.
+  try {
+    db.prepare('SELECT max_upload_mb FROM roles LIMIT 0').get();
+  } catch {
+    db.exec('ALTER TABLE roles ADD COLUMN max_upload_mb INTEGER DEFAULT NULL');
+  }
+
+  // ── Role menus: a message people react to, or click, to give themselves a role ──
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS role_menus (
+      message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+      channel_id INTEGER NOT NULL,
+      created_by INTEGER,
+      title TEXT DEFAULT '',
+      data TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  // ── Migration: split manage_channel_settings out of create_channel (#5467) ──
+  // Editing an existing channel's settings used to ride on create_channel, so
+  // anyone who could make a channel could also reconfigure every other channel
+  // on the server. The two are now separate permissions. This backfill copies
+  // create_channel to manage_channel_settings everywhere it is currently
+  // granted, so no existing server loses a delegation on upgrade — admins who
+  // want the narrower behaviour untick the new permission afterward.
+  //
+  // Guarded by a marker key: without it, every restart would re-grant the
+  // permission an admin had deliberately removed.
+  try {
+    const marker = db.prepare(
+      "SELECT value FROM server_settings WHERE key = 'perm_split_manage_channel_settings'"
+    ).get();
+    if (!marker) {
+      const backfill = db.transaction(() => {
+        db.prepare(`
+          INSERT OR IGNORE INTO role_permissions (role_id, permission, allowed)
+          SELECT role_id, 'manage_channel_settings', 1 FROM role_permissions
+          WHERE permission = 'create_channel' AND allowed = 1
+        `).run();
+
+        // Per-user overrides carry their own scope (role_id / channel_id), and
+        // explicit denies matter as much as grants — copy both verbatim.
+        db.prepare(`
+          INSERT INTO user_role_perms (user_id, role_id, channel_id, permission, allowed)
+          SELECT user_id, role_id, channel_id, 'manage_channel_settings', allowed
+          FROM user_role_perms urp
+          WHERE urp.permission = 'create_channel'
+            AND NOT EXISTS (
+              SELECT 1 FROM user_role_perms x
+              WHERE x.user_id = urp.user_id
+                AND x.permission = 'manage_channel_settings'
+                AND COALESCE(x.channel_id, -1) = COALESCE(urp.channel_id, -1)
+            )
+        `).run();
+
+        // Level thresholds auto-grant permissions above a given role level.
+        // Haven ships create_channel at 50, which is what the default
+        // "Server Mod" role sits at — mirror it so those mods keep working.
+        const row = db.prepare(
+          "SELECT value FROM server_settings WHERE key = 'permission_thresholds'"
+        ).get();
+        if (row) {
+          const thresholds = JSON.parse(row.value);
+          if (thresholds.create_channel && !thresholds.manage_channel_settings) {
+            thresholds.manage_channel_settings = thresholds.create_channel;
+            db.prepare("UPDATE server_settings SET value = ? WHERE key = 'permission_thresholds'")
+              .run(JSON.stringify(thresholds));
+          }
+        }
+
+        db.prepare(
+          "INSERT OR IGNORE INTO server_settings (key, value) VALUES ('perm_split_manage_channel_settings', '1')"
+        ).run();
+      });
+      backfill();
+    }
+  } catch (e) {
+    console.warn('manage_channel_settings backfill failed:', e.message);
+  }
+
+  // ── Migration: let SERVER_NAME through on existing installs (#5489) ──
+  // Every install created before this seeded the literal 'HAVEN' into
+  // server_name, and a stored name beats the environment, so SERVER_NAME has
+  // never actually applied to them. A stored 'HAVEN' is indistinguishable
+  // from "never named it", and setting SERVER_NAME is a clear statement of
+  // intent, so hand it back. Only touches installs where both are true, and
+  // the marker key means an admin who later types HAVEN on purpose keeps it.
+  try {
+    const marker = db.prepare(
+      "SELECT value FROM server_settings WHERE key = 'server_name_env_reclaim'"
+    ).get();
+    if (!marker) {
+      const envName = (process.env.SERVER_NAME || '').trim();
+      const stored = db.prepare("SELECT value FROM server_settings WHERE key = 'server_name'").get();
+      if (envName && stored && stored.value === 'HAVEN') {
+        db.prepare("UPDATE server_settings SET value = '' WHERE key = 'server_name'").run();
+        console.log(`Server name now comes from SERVER_NAME ("${envName}") — set a name in Settings to override it.`);
+      }
+      db.prepare(
+        "INSERT OR IGNORE INTO server_settings (key, value) VALUES ('server_name_env_reclaim', '1')"
+      ).run();
+    }
+  } catch (e) {
+    console.warn('server_name env reclaim failed:', e.message);
+  }
+
   // ── Migration: chat threads (thread_id on messages) ─────
   try {
     db.prepare("SELECT thread_id FROM messages LIMIT 0").get();
@@ -1130,6 +1736,19 @@ function initDatabase() {
     db.exec("ALTER TABLE messages ADD COLUMN thread_id INTEGER DEFAULT NULL REFERENCES messages(id) ON DELETE CASCADE");
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id) WHERE thread_id IS NOT NULL");
+  // ── Migration: forum topics carry a title and tags ──────
+  for (const col of [
+    { name: 'title', sql: "ALTER TABLE messages ADD COLUMN title TEXT DEFAULT NULL" },
+    { name: 'tags',  sql: "ALTER TABLE messages ADD COLUMN tags TEXT DEFAULT NULL" },
+    // Closed topics grey out and sit below the open ones (#5624).
+    { name: 'closed', sql: "ALTER TABLE messages ADD COLUMN closed INTEGER DEFAULT 0" },
+    // NSFW topics blur their picture and preview until clicked, and stay out
+    // of the list for anyone who hides NSFW channels (#5633).
+    { name: 'nsfw', sql: "ALTER TABLE messages ADD COLUMN nsfw INTEGER DEFAULT 0" },
+  ]) {
+    try { db.prepare(`SELECT ${col.name} FROM messages LIMIT 0`).get(); } catch { db.exec(col.sql); }
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages(reply_to) WHERE reply_to IS NOT NULL");
 
   // ── Audit log ───────────────────────────────────────────
   // Tracks admin/moderator actions: channel CRUD, role changes,
@@ -1150,6 +1769,64 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor_id);
     CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action);
   `);
+
+  // ── Rich presence: linked external accounts ─────────────
+  // One row per (user, provider). access_token / refresh_token are stored
+  // AES-256-GCM encrypted (see src/activity.js) — never in plaintext, because
+  // a Spotify refresh token is a long-lived credential to someone's account
+  // and the SQLite file travels with backups.
+  //
+  // Activity itself is deliberately NOT stored here. It's ephemeral,
+  // high-churn, and lives in memory only (activity.js), so a restart forgets
+  // what everyone was doing rather than persisting a play history nobody
+  // asked for.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_connections (
+      user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      provider      TEXT    NOT NULL,
+      external_id   TEXT,
+      display_name  TEXT,
+      access_token  TEXT,
+      refresh_token TEXT,
+      expires_at    INTEGER DEFAULT 0,
+      created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, provider)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_connections_provider ON user_connections(provider);
+  `);
+
+  // ── Listening presence webhook tokens ───────────────────
+  // Per-user bearer secret for the reserved /api/webhooks/listening/:token
+  // path that any music player's plugin or script posts to. Stored (not
+  // derived) so a leaked URL can be revoked: regenerating replaces the row and
+  // the old token stops resolving on the next request. One row per user; the
+  // token is removed when the user turns the feature off, and cascades away
+  // with the account.
+  //
+  // The table used to be named navidrome_tokens, back when this was tied to a
+  // single source. Rename it in place so an existing install keeps its tokens.
+  if (
+    db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='navidrome_tokens'`).get() &&
+    !db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='listening_tokens'`).get()
+  ) {
+    db.exec(`ALTER TABLE navidrome_tokens RENAME TO listening_tokens`);
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS listening_tokens (
+      user_id    INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      token      TEXT UNIQUE NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_listening_tokens_token ON listening_tokens(token);
+  `);
+
+  // Full-text search index (messages_fts) — created/reconciled here so it runs
+  // synchronously before the server listens. (search-overhaul phase 2)
+  try {
+    ensureSearchIndex(db);
+  } catch (e) {
+    console.warn('[search] Index setup failed:', e.message);
+  }
 
   return db;
 }

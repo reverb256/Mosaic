@@ -28,6 +28,7 @@ class ModMode {
     this.panelHandles = new Map();
     this.snapZones = [];
     this.draggingPanelKey = null;
+    this.editingLayoutOwner = null;
 
     this._boundDragStart  = this._onDragStart.bind(this);
     this._boundDragOver   = this._onDragOver.bind(this);
@@ -75,7 +76,37 @@ class ModMode {
 
   // ── Enable / Disable ──
 
+  _beginLayoutEditing() {
+    if (document.documentElement.hasAttribute('data-haven-layout-editing')) return false;
+    const layout = window.HavenApi?.Layout;
+    this.editingLayoutOwner = layout?.owner || null;
+    layout?._reserve?.(this.editingLayoutOwner);
+    document.documentElement.setAttribute('data-haven-layout-editing', '1');
+    document.dispatchEvent(new CustomEvent('haven:layout-editing', {
+      detail: { active: true, owner: this.editingLayoutOwner }
+    }));
+    return true;
+  }
+
+  _endLayoutEditing() {
+    const preferredOwner = this.editingLayoutOwner;
+    const layout = window.HavenApi?.Layout;
+    this.editingLayoutOwner = null;
+    document.documentElement.removeAttribute('data-haven-layout-editing');
+    try {
+      document.dispatchEvent(new CustomEvent('haven:layout-editing', {
+        detail: { active: false, owner: preferredOwner }
+      }));
+    } finally {
+      layout?._clearReservation?.(preferredOwner);
+    }
+    if (!layout?.owner) {
+      document.dispatchEvent(new CustomEvent('haven:layout-owner-change', { detail: { owner: null } }));
+    }
+  }
+
   _enable() {
+    this._beginLayoutEditing();
     this.container.classList.add('mod-mode-active');
     document.body.classList.add('mod-mode-on');
     this._cacheSections();
@@ -90,7 +121,7 @@ class ModMode {
       s.addEventListener('dragend',   this._boundDragEnd);
     });
     this._enablePanelMode();
-    this._showToast('Mod Mode ON \u2014 drag sections or panel handles to rearrange');
+    this._showToast(t('modmode.enabled'));
   }
 
   _disable() {
@@ -107,9 +138,13 @@ class ModMode {
       s.removeEventListener('dragend',   this._boundDragEnd);
     });
     this._disablePanelMode();
-    this._saveLayout();
-    this._savePanelLayout();
-    this._showToast('Mod Mode OFF \u2014 layout saved');
+    try {
+      this._saveLayout();
+      this._savePanelLayout();
+    } finally {
+      this._endLayoutEditing();
+    }
+    this._showToast(t('modmode.disabled'));
   }
 
   // ── Section drag events ──
@@ -173,7 +208,7 @@ class ModMode {
         handle.type = 'button';
         handle.className = 'mod-panel-handle';
         handle.textContent = '\u2725';
-        handle.title = `Drag to reposition ${key.replace(/-/g, ' ')}`;
+        handle.title = t('modmode.drag_to_reposition', { panel: key.replace(/-/g, ' ') });
         panel.appendChild(handle);
       }
       handle.setAttribute('draggable', 'true');
@@ -217,9 +252,9 @@ class ModMode {
     this._clearSnapZones();
     const positions = this.panelDefs[key]?.positions || [];
     const labels = {
-      left: '\u2190 Left', right: 'Right \u2192', top: '\u2191 Top',
-      bottom: '\u2193 Bottom', center: '\u2b24 Float',
-      'right-sidebar': 'In right panel', 'left-sidebar': 'In left panel'
+      left: `\u2190 ${t('modmode.positions.left')}`, right: `${t('modmode.positions.right')} \u2192`, top: `\u2191 ${t('modmode.positions.top')}`,
+      bottom: `\u2193 ${t('modmode.positions.bottom')}`, center: `\u2b24 ${t('modmode.positions.float')}`,
+      'right-sidebar': t('modmode.positions.right_panel'), 'left-sidebar': t('modmode.positions.left_panel')
     };
     positions.forEach(pos => {
       const zone = document.createElement('div');
@@ -250,7 +285,7 @@ class ModMode {
     this.applyPanelLayout();
     this._savePanelLayout();
     const label = pos.replace(/-/g, ' ');
-    this._showToast(`Moved ${key.replace(/-/g, ' ')} \u2192 ${label}`);
+    this._showToast(t('modmode.moved', { panel: key.replace(/-/g, ' '), position: label }));
   }
 
   // ── Persistence ──
@@ -329,32 +364,37 @@ class ModMode {
   }
 
   resetLayout() {
-    localStorage.removeItem('haven-layout');
-    localStorage.removeItem('haven-panel-layout');
-    this.savedLayout = null;
-    this.panelLayout = {
-      'server-bar': 'left', 'sidebar': 'left', 'right-sidebar': 'right',
-      'status-bar': 'bottom', 'voice-panel': 'right-sidebar'
-    };
-    const defaultOrder = ['join', 'create', 'channels'];
-    const existing = new Map();
-    this.sections.forEach(s => existing.set(s.dataset.modId, s));
-    defaultOrder.forEach(id => {
-      const el = existing.get(id);
-      if (el) this.container.appendChild(el);
-    });
-    this._cacheSections();
+    const ownsEditingState = this._beginLayoutEditing();
+    try {
+      localStorage.removeItem('haven-layout');
+      localStorage.removeItem('haven-panel-layout');
+      this.savedLayout = null;
+      this.panelLayout = {
+        'server-bar': 'left', 'sidebar': 'left', 'right-sidebar': 'right',
+        'status-bar': 'bottom', 'voice-panel': 'right-sidebar'
+      };
+      const defaultOrder = ['join', 'create', 'channels'];
+      const existing = new Map();
+      this.sections.forEach(s => existing.set(s.dataset.modId, s));
+      defaultOrder.forEach(id => {
+        const el = existing.get(id);
+        if (el) this.container.appendChild(el);
+      });
+      this._cacheSections();
 
-    // Move voice panel back to right sidebar
-    const voicePanel = document.getElementById('voice-panel');
-    const rightSidebar = document.querySelector('.right-sidebar');
-    if (voicePanel && rightSidebar) {
-      rightSidebar.appendChild(voicePanel);
-      voicePanel.classList.remove('mod-float', 'mod-voice-bottom', 'mod-voice-left');
+      // Move voice panel back to right sidebar
+      const voicePanel = document.getElementById('voice-panel');
+      const rightSidebar = document.querySelector('.right-sidebar');
+      if (voicePanel && rightSidebar) {
+        rightSidebar.appendChild(voicePanel);
+        voicePanel.classList.remove('mod-float', 'mod-voice-bottom', 'mod-voice-left');
+      }
+
+      this.applyPanelLayout();
+    } finally {
+      if (ownsEditingState) this._endLayoutEditing();
     }
-
-    this.applyPanelLayout();
-    this._showToast('Layout reset to default');
+    this._showToast(t('modmode.reset'));
   }
 
   _showToast(msg) {
@@ -366,3 +406,5 @@ class ModMode {
     setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 2200);
   }
 }
+
+if (typeof module !== 'undefined') module.exports = ModMode;

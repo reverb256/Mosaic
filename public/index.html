@@ -1,19 +1,20 @@
 ﻿<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-haven-theme-api="1">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="manifest" href="/manifest.webmanifest">
-  <title>Haven — Login</title>
+  <title data-i18n="auth.page_title">Haven — Login</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48cG9seWdvbiBwb2ludHM9IjUwLDMgOTMsMjggOTMsNzIgNTAsOTcgNyw3MiA3LDI4IiBmaWxsPSJub25lIiBzdHJva2U9IiM2YjRmZGIiIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjx0ZXh0IHg9IjUwIiB5PSI2MyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9IkFyaWFsLEhlbHZldGljYSxzYW5zLXNlcmlmIiBmb250LXdlaWdodD0iYm9sZCIgZm9udC1zaXplPSIzOCIgZmlsbD0iIzZiNGZkYiIgb3BhY2l0eT0iMC45NSI+SDwvdGV4dD48L3N2Zz4=">
   <link rel="stylesheet" href="/css/style.css">
+  <script src="/js/theme-compat.js"></script>
   <script src="/js/theme-init.js"></script>
 </head>
-<body class="auth-page">
+<body class="auth-page" data-haven-page="auth">
 
-  <div class="auth-container">
-    <div class="auth-card">
-      <div class="auth-header">
+  <div class="auth-container" data-haven-region="auth-shell">
+    <div class="auth-card" data-haven-region="auth-card">
+      <div class="auth-header" data-haven-region="auth-header">
         <div class="logo">⬡</div>
         <h1>HAVEN</h1>
         <p class="tagline" data-i18n="auth.tagline">Private chat, your rules</p>
@@ -36,6 +37,7 @@
           <input type="password" id="login-password" autocomplete="current-password" required>
         </div>
         <button type="submit" class="btn-primary" data-i18n="auth.login.submit">Login</button>
+        <p class="auth-consent-note" data-i18n-html="auth.login.consent_note" style="text-align:center;color:var(--text-muted);font-size:0.72rem;line-height:1.4;margin-top:10px">By clicking "Login", you formally consent to our <a href="#" id="login-tos-link">current ToS</a>, which may be different from the ToS that was effective when you first registered.</p>
         <div class="auth-recovery-links">
           <a href="#" id="forgot-password-show" data-i18n="auth.login.forgot_password">Forgot password?</a>
           <a href="#" id="admin-recover-show" data-i18n="auth.login.locked_out">Locked out? Admin recovery</a>
@@ -44,26 +46,57 @@
           <small style="color:var(--text-muted)" data-i18n="auth.login.admin_recover_hint">Enter your admin credentials above and click Recover</small><br>
           <button type="button" class="btn-primary" id="admin-recover-btn" data-i18n="auth.login.admin_recover_btn" style="margin-top:6px;font-size:0.85rem;padding:6px 16px">Recover Admin Access</button>
         </div>
+        <!-- (#12) SSO — only shown when the server has OIDC configured -->
+        <div id="oidc-login-section" style="display:none;text-align:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--border-color,#333)">
+          <button type="button" class="btn-secondary" id="oidc-login-btn" style="font-size:0.9rem;padding:8px 18px" data-i18n="auth.oidc.submit">Sign in with SSO</button>
+        </div>
         <!-- (#5381) Guest login — only shown when the server has guests enabled -->
         <div id="guest-login-section" style="display:none;text-align:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--border-color,#333)">
-          <small style="color:var(--text-muted);display:block;margin-bottom:6px">No account? Just want to look around?</small>
-          <button type="button" class="btn-secondary" id="guest-login-show-btn" style="font-size:0.9rem;padding:8px 18px">Join as Guest</button>
+          <small style="color:var(--text-muted);display:block;margin-bottom:6px" data-i18n="auth.guest.prompt">No account? Just want to look around?</small>
+          <button type="button" class="btn-secondary" id="guest-login-show-btn" style="font-size:0.9rem;padding:8px 18px" data-i18n="auth.guest.submit">Join as Guest</button>
         </div>
+      </form>
+
+      <!-- (#12) Encryption passphrase for SSO accounts.
+           Signing in through a provider means no password is ever typed into
+           Haven, and the private key that decrypts DMs is wrapped with a key
+           derived from exactly that. So SSO users pick a separate passphrase
+           here. It never leaves this page: it is stretched with PBKDF2 and only
+           the derived key is kept, for this session. -->
+      <form id="e2e-pass-form" class="auth-form" style="display:none">
+        <h3 id="e2e-pass-title" style="text-align:center;margin-bottom:6px;font-size:1.05rem" data-i18n="auth.e2e_pass.title">Set an encryption passphrase</h3>
+        <p id="e2e-pass-blurb" style="text-align:center;color:var(--text-muted);font-size:0.85rem;margin-bottom:14px" data-i18n="auth.e2e_pass.desc">
+          Your private messages are encrypted with a key only you hold. Signing in with SSO means Haven never sees a
+          password to protect it with, so pick a passphrase. You will need it again on any other device.
+        </p>
+        <div class="form-group">
+          <label for="e2e-pass-input" data-i18n="auth.e2e_pass.label">Passphrase</label>
+          <input type="password" id="e2e-pass-input" autocomplete="new-password" minlength="8" maxlength="128" required>
+          <small id="e2e-pass-hint" data-i18n="auth.e2e_pass.hint">At least 8 characters. Nobody can reset this for you, including the server admin.</small>
+        </div>
+        <div class="form-group" id="e2e-pass-confirm-group">
+          <label for="e2e-pass-confirm" data-i18n="auth.e2e_pass.confirm_label">Confirm passphrase</label>
+          <input type="password" id="e2e-pass-confirm" autocomplete="new-password" minlength="8" maxlength="128">
+        </div>
+        <button type="submit" class="btn-primary" id="e2e-pass-submit" data-i18n="auth.e2e_pass.continue">Continue</button>
+        <p style="text-align:center;margin-top:10px">
+          <a href="#" id="e2e-pass-skip" style="font-size:0.85rem;color:var(--text-muted)" data-i18n="auth.e2e_pass.skip">Skip for now</a>
+        </p>
       </form>
 
       <!-- (#5381) Guest username prompt — appears after clicking Join as Guest -->
       <form id="guest-form" class="auth-form" style="display:none">
-        <p style="text-align:center;color:var(--text-muted);font-size:0.9rem;margin-bottom:12px">
+        <p style="text-align:center;color:var(--text-muted);font-size:0.9rem;margin-bottom:12px" data-i18n="auth.guest.desc">
           Pick a temporary username. No password, no recovery. Your account is wiped when you disconnect.
         </p>
         <div class="form-group">
-          <label for="guest-username">Username</label>
+          <label for="guest-username" data-i18n="auth.guest.username_label">Username</label>
           <input type="text" id="guest-username" autocomplete="off" minlength="3" maxlength="20" pattern="[a-zA-Z0-9_]+" required>
-          <small>3-20 characters, letters/numbers/underscores</small>
+          <small data-i18n="auth.guest.username_hint">3-20 characters, letters/numbers/underscores</small>
         </div>
-        <button type="submit" class="btn-primary">Join as Guest</button>
+        <button type="submit" class="btn-primary" data-i18n="auth.guest.submit">Join as Guest</button>
         <p style="text-align:center;margin-top:8px">
-          <a href="#" id="guest-back-btn" style="color:var(--text-muted);font-size:0.8rem;text-decoration:none">← Back to login</a>
+          <a href="#" id="guest-back-btn" style="color:var(--text-muted);font-size:0.8rem;text-decoration:none" data-i18n="auth.guest.back">← Back to login</a>
         </p>
       </form>
 
@@ -86,10 +119,14 @@
         </div>
         <!-- (#5344) Registration token field — shown by auth.js only when the server requires it -->
         <div class="form-group" id="reg-token-group" style="display:none">
-          <label for="reg-token">Invite Token</label>
+          <label for="reg-token" data-i18n="auth.register.token_label">Invite Token</label>
           <input type="text" id="reg-token" autocomplete="off" maxlength="64"
-                 placeholder="Paste the token your admin shared">
-          <small>Required by this server — ask the admin if you don't have one.</small>
+                  placeholder="Paste the token your admin shared" data-i18n-placeholder="auth.register.token_placeholder">
+          <small data-i18n="auth.register.token_hint">Required by this server — ask the admin if you don't have one.</small>
+        </div>
+        <!-- Opt-in Cloudflare Turnstile CAPTCHA — shown by auth.js only when the server enables it -->
+        <div class="form-group" id="reg-captcha-group" style="display:none">
+          <div id="reg-captcha"></div>
         </div>
         <button type="submit" class="btn-primary" data-i18n="auth.register.submit">Create Account</button>
       </form>
@@ -126,6 +163,10 @@
           <div class="form-group">
             <label for="sso-confirm" data-i18n="auth.sso.confirm_label">Confirm Password</label>
             <input type="password" id="sso-confirm" autocomplete="new-password" required>
+          </div>
+          <!-- Opt-in Turnstile CAPTCHA — shown by auth.js only when the server enables it -->
+          <div class="form-group" id="sso-captcha-group" style="display:none">
+            <div id="sso-captcha"></div>
           </div>
           <button type="button" class="btn-primary" id="sso-register-btn" data-i18n="auth.sso.register">Create Account</button>
           <p style="text-align:center;margin-top:8px">
@@ -218,8 +259,29 @@
         </p>
       </form>
 
-      <!-- EULA acceptance (required before login/register) -->
-      <div class="eula-notice" id="eula-notice">
+      <!-- Ban appeal form (#5457), shown when a login is rejected with a ban -->
+      <form id="ban-appeal-form" class="auth-form" style="display:none">
+        <p style="text-align:center;color:var(--text-muted);font-size:0.9rem;margin-bottom:12px;">
+          <span data-i18n="auth.ban_appeal.instruction">🚫 Your account is banned from this server.</span>
+        </p>
+        <div id="ban-appeal-reason" style="background:rgba(231,76,60,0.12);border:1px solid rgba(231,76,60,0.4);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:0.85rem;color:var(--text-secondary)"></div>
+        <div class="form-group">
+          <label for="ban-appeal-text" data-i18n="auth.ban_appeal.text_label">Appeal to the admins</label>
+          <textarea id="ban-appeal-text" maxlength="2000" rows="5" required style="resize:vertical"
+                    data-i18n-placeholder="auth.ban_appeal.text_placeholder"
+                    placeholder="Explain why you think the ban should be lifted..."></textarea>
+          <small data-i18n="auth.ban_appeal.text_hint">The server admins will see this next to your ban. Max 2000 characters.</small>
+        </div>
+        <button type="submit" class="btn-primary" data-i18n="auth.ban_appeal.submit">Submit Appeal</button>
+        <p style="text-align:center;margin-top:8px">
+          <a href="#" id="ban-appeal-back-btn" data-i18n="auth.ban_appeal.back" style="color:var(--text-muted);font-size:0.8rem;text-decoration:none">← Back to login</a>
+        </p>
+      </form>
+
+      <!-- EULA acceptance. Shown on the account-creation views (register / SSO /
+           guest) only; hidden on the login tab, where consent is instead
+           re-affirmed by the note under the Login button. Toggled in auth.js. -->
+      <div class="eula-notice" id="eula-notice" style="display:none">
         <label class="eula-check-row">
           <input type="checkbox" id="age-checkbox">
           <span data-i18n-html="auth.eula.age_confirm">I confirm that I am <strong>18 years of age or older</strong> (or the age of legal majority in my jurisdiction)</span>
@@ -231,7 +293,7 @@
       </div>
 
       <!-- Theme selector on login page -->
-      <div class="auth-theme-bar" id="auth-theme-bar">
+      <div class="auth-theme-bar" id="auth-theme-bar" data-haven-region="theme-picker">
         <button class="theme-btn active" data-theme="haven" title="Haven"><span class="theme-icon">⬡</span></button>
         <button class="theme-btn" data-theme="discord" title="Discord"><span class="theme-icon">🎮</span></button>
         <button class="theme-btn" data-theme="matrix" title="Matrix"><span class="theme-icon">Ⅿ</span></button>
@@ -249,25 +311,29 @@
         <button class="theme-btn" data-theme="minecraft" title="Minecraft"><span class="theme-icon">⛏️</span></button>
         <button class="theme-btn" data-theme="ffx" title="Final Fantasy X"><span class="theme-icon">⚔️</span></button>
         <button class="theme-btn" data-theme="zelda" title="Zelda"><span class="theme-icon">🗡️</span></button>
-        <button class="theme-btn" data-theme="fallout" title="Fallout"><span class="theme-icon">☢️</span></button>
+        <button class="theme-btn" data-theme="fallout" title="Fallout (PIP Boy)"><span class="theme-icon">☢️</span></button>
         <button class="theme-btn" data-theme="scripture" title="Scripture"><span class="theme-icon">✝️</span></button>
         <button class="theme-btn" data-theme="chapel" title="Chapel"><span class="theme-icon">⛪</span></button>
         <button class="theme-btn" data-theme="gospel" title="Gospel"><span class="theme-icon">🕊️</span></button>
         <button class="theme-btn" data-theme="midnightpurple" title="Midnight Purple"><span class="theme-icon">🔮</span></button>
         <button class="theme-btn" data-theme="crt" title="CRT"><span class="theme-icon">📺</span></button>
         <button class="theme-btn" data-theme="win95" title="Windows 95"><span class="theme-icon">🪟</span></button>
-        <button class="theme-btn" data-theme="custom" title="Custom"><span class="theme-icon">🎨</span></button>
+        <button class="theme-btn" data-theme="custom" title="Custom"><span class="theme-icon" id="custom-theme-swatch">🎨</span></button>
         <button class="theme-btn" data-theme="rgb" title="RGB"><span class="theme-icon">🌈</span></button>
+        <button class="theme-btn" data-theme="daylight" title="Daylight (Light)"><span class="theme-icon">☀️</span></button>
+        <button class="theme-btn" data-theme="cloudy" title="Cloudy (Light)"><span class="theme-icon">☁️</span></button>
       </div>
       <div class="auth-lang-bar">
         <select id="auth-lang-select" class="settings-select">
-          <option value="en">🇬🇧 English</option>
-          <option value="fr">🇫🇷 Français</option>
-          <option value="de">🇩🇪 Deutsch</option>
-          <option value="es">🇪🇸 Español</option>
-          <option value="pl">🇵🇱 Polski</option>
-          <option value="ru">🇷🇺 Русский</option>
-          <option value="zh">🇨🇳 中文</option>
+          <option value="auto" data-i18n="settings.language_section.auto">Automatic</option>
+          <option value="en">English</option>
+          <option value="fr">Français</option>
+          <option value="de">Deutsch</option>
+          <option value="es">Español</option>
+          <option value="pl">Polski</option>
+          <option value="ru">Русский</option>
+          <option value="zh">中文</option>
+          <option value="pt">Português (Brasil)</option>
         </select>
       </div>
       <p class="auth-version" id="auth-version"></p>
@@ -277,10 +343,11 @@
   <!-- EULA Modal -->
   <div class="modal-overlay" id="eula-modal" style="display:none">
     <div class="modal eula-modal">
-      <h3>⚖️ Terms of Service &amp; Release of Liability Agreement</h3>      <div id="custom-tos-section" style="display:none">
+      <h3>⚖️ <span data-i18n="auth.eula.modal_title_plain">Terms of Service &amp; Release of Liability Agreement</span></h3>      <div id="custom-tos-section" style="display:none">
         <div class="eula-content" id="custom-tos-content" style="margin-bottom:0;border-bottom:1px solid var(--border,#444);padding-bottom:16px;"></div>
-        <p style="text-align:center;font-size:12px;color:var(--text-muted,#888);margin:12px 0;">── Default Haven Terms of Service ──</p>
-      </div>      <div class="eula-content">
+        <p style="text-align:center;font-size:12px;color:var(--text-muted,#888);margin:12px 0;" data-i18n="auth.eula.default_terms">── Default Haven Terms of Service ──</p>
+      </div>
+      <div class="eula-content" data-i18n-html="auth.eula.terms_body">
         <p><strong>HAVEN — TERMS OF SERVICE, END USER LICENSE AGREEMENT &amp; RELEASE OF LIABILITY</strong></p>
         <p><em>Effective Date: February 12, 2026 &nbsp;|&nbsp; Version 2.0</em></p>
 
@@ -384,7 +451,7 @@
         default.</p>
         <p>8.3. Haven does not transmit data to third-party analytics,
         advertising, or tracking services. API calls to third-party services
-        (e.g., GIPHY) are made only when explicitly triggered by user action.</p>
+        (e.g., Tenor or GIPHY) are made only when explicitly triggered by user action.</p>
         <p>8.4. You consent to the collection and storage of your IP address,
         username, and agreement acceptance records for the purposes of
         security, abuse prevention, and legal compliance.</p>

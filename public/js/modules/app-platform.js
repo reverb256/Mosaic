@@ -53,8 +53,16 @@ async _checkForUpdates() {
         title: t('header.update_title', { remote: remoteVersion, local: localVersion }),
         href: zipAsset ? zipAsset.browser_download_url : release.html_url
       };
-      this._applyUpdateBanner();
+    } else {
+      // Already current. This has to clear, because the check re-runs every 30
+      // minutes on a page that may have been open since before the update: the
+      // banner was only ever switched on, never off, so once it appeared it
+      // stayed until a full reload even after the server had been updated.
+      // Most visible on a machine that always runs the newest build, which
+      // would show "update available" for its own version. (#update-banner)
+      this._pendingUpdate = null;
     }
+    this._applyUpdateBanner();
   } catch (e) {
     // Silently fail — update check is non-critical
   }
@@ -70,7 +78,10 @@ async _checkForUpdates() {
 _applyUpdateBanner() {
   const banner = document.getElementById('update-banner');
   if (!banner) return;
-  if (!this._pendingUpdate) return; // no update detected yet
+  // No update pending: hide it. This used to return early and leave whatever
+  // was on screen, which is how a stale banner survived once the server had
+  // caught up.
+  if (!this._pendingUpdate) { banner.style.display = 'none'; return; }
 
   const adminOnly = this.serverSettings?.update_banner_admin_only === 'true';
   const canSee = !adminOnly || this.user?.isAdmin;
@@ -105,8 +116,25 @@ _isNewerVersion(remote, local) {
  *  itself is shown via the unified welcome-popup queue (see
  *  `_initWelcomePopups`) — this function only handles the persistent banner. */
 _initDesktopAppBanner() {
-  // Don't show if already in the desktop app
-  if (window.havenDesktop || navigator.userAgent.includes('Electron')) return;
+  // Don't advertise the desktop app to someone already running it. This checks
+  // every signal the rest of the client uses rather than just two: the preload
+  // exposes window.havenDesktop late in a long file, so anything that throws
+  // above it leaves that undefined, and the runtime does not always carry
+  // "Electron" in the user agent. data-desktop-app is set independently by the
+  // preload, so any one of them surviving is enough to recognise the app.
+  const inDesktopApp = !!(
+    window.havenDesktop?.isDesktopApp ||
+    window.havenDesktop ||
+    navigator.userAgent.includes('Electron') ||
+    document.documentElement.hasAttribute('data-desktop-app')
+  );
+  if (inDesktopApp) {
+    // Hide rather than just bail: the banner may already be on screen from a
+    // check that ran before the desktop signals landed.
+    const b = document.getElementById('desktop-app-banner');
+    if (b) b.style.display = 'none';
+    return;
+  }
 
   // Don't show on mobile / tablet — desktop app isn't relevant there
   if (/Android|iPhone|iPad|iPod|Mobile|Tablet/i.test(navigator.userAgent)) return;
@@ -139,10 +167,10 @@ _initDesktopAppBanner() {
   const meta = document.getElementById('desktop-promo-meta');
   if (meta) {
     const ua = navigator.userAgent.toLowerCase();
-    let platform = 'Desktop';
-    if (ua.includes('win')) platform = 'Windows Installer';
-    else if (ua.includes('linux')) platform = 'Linux Installer';
-    else if (ua.includes('mac')) platform = 'macOS Installer';
+    let platform = t('platform.desktop.desktop');
+    if (ua.includes('win')) platform = t('platform.desktop.windows_installer');
+    else if (ua.includes('linux')) platform = t('platform.desktop.linux_installer');
+    else if (ua.includes('mac')) platform = t('platform.desktop.macos_installer');
     meta.textContent = `${platform} \u2022 v1.0.0`;
   }
 
@@ -158,32 +186,33 @@ _initDesktopAppBanner() {
  *  is shown via the unified welcome-popup queue (see `_initWelcomePopups`). */
 _initAndroidBetaBanner() {
   // ── Top-bar banner ──
-  // Only permanently hidden if user checked "Don't show this again";
-  // the X button is session-only so it returns on next visit.
-  const permaDismissed = localStorage.getItem('haven_ab_banner_nodisplay');
-  const sessionDismissed = sessionStorage.getItem('haven_ab_banner_session');
-  if (!permaDismissed && !sessionDismissed) {
-    const banner = document.getElementById('android-beta-banner');
-    if (banner) {
-      banner.style.display = 'inline-flex';
-      banner.addEventListener('click', (e) => {
-        // Don't open modal if dismiss button was clicked
-        if (e.target.closest('.android-beta-dismiss')) return;
-        const modal = document.getElementById('android-beta-modal');
-        if (modal) modal.style.display = 'flex';
+  // Gone for good once the person closes it, or ticks "Don't show this
+  // again" on the promo. The record lives with the account like the promo's
+  // own, with a localStorage copy for the moment before preferences arrive.
+  // Nothing wrote the permanent flag before, so the banner came back on
+  // every reload whatever was clicked (#5594).
+  const banner = document.getElementById('android-beta-banner');
+  if (banner && !banner.dataset.wired) {
+    banner.dataset.wired = '1';
+    banner.addEventListener('click', (e) => {
+      // Don't open modal if dismiss button was clicked
+      if (e.target.closest('.android-beta-dismiss')) return;
+      const modal = document.getElementById('android-beta-modal');
+      if (modal) modal.style.display = 'flex';
+    });
+    const dismissBtn = document.getElementById('android-beta-dismiss');
+    if (dismissBtn) {
+      dismissBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        try { localStorage.setItem('haven_ab_banner_nodisplay', '1'); } catch { /* storage unavailable */ }
+        if (this._userPrefs) this._userPrefs.android_banner_seen = 'true';
+        this.socket?.emit('set-preference', { key: 'android_banner_seen', value: 'true' });
+        this._syncAndroidBanner();
       });
-      const dismissBtn = document.getElementById('android-beta-dismiss');
-      if (dismissBtn) {
-        dismissBtn.addEventListener('click', (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          banner.style.display = 'none';
-          // Session-only: banner comes back on next page load
-          sessionStorage.setItem('haven_ab_banner_session', '1');
-        });
-      }
     }
   }
+  this._syncAndroidBanner();
 
   // ── Wire the modal's own close buttons (Maybe Later, Submit, overlay
   // click) to just hide the modal. The welcome-popup queue takes care of
@@ -205,51 +234,87 @@ _initAndroidBetaBanner() {
   });
 },
 
+/** Show or hide the top-bar Android banner from what is known right now:
+ *  closed once (account record or its local copy), or the promo's "Don't
+ *  show this again" ticked. Runs at start-up, when preferences arrive, and
+ *  after either dismissal (#5594). Until the account's record is in, the
+ *  banner stays down rather than flashing at someone who already closed it. */
+_syncAndroidBanner() {
+  const banner = document.getElementById('android-beta-banner');
+  if (!banner) return;
+  let local = false;
+  try { local = !!localStorage.getItem('haven_ab_banner_nodisplay'); } catch { /* storage unavailable */ }
+  const prefs = this._userPrefs || {};
+  const gone = local || prefs.android_banner_seen === 'true' || prefs.promo_seen_android === 'true';
+  if (gone) { banner.style.display = 'none'; return; }
+  if (!this._userPrefs) return;
+  banner.style.display = 'inline-flex';
+},
+
 // ── Welcome Popup Queue (#5391 followup) ───────────────
 /** Unified first-time-visit popup sequencer. Replaces the previous
  *  uncoordinated `setTimeout`-soup where each promo modal raced the others.
  *  Behavior:
- *    1. Reads a per-popup "seen" map from localStorage. Any popup whose id
- *       is already in the map is skipped forever.
- *    2. Migrates legacy per-popup dismissal keys into the map so users who
- *       hit "Don't show again" in older versions don't see those same
- *       popups again after upgrading.
- *    3. Shows remaining popups one at a time, injecting a footer with
+ *    1. Dismissal state is per-account, stored server-side in user_preferences
+ *       (keys promo_seen_*) — never in localStorage. A popup whose pref is set
+ *       is skipped. State is fetched via get-preferences; the queue waits for
+ *       it before showing anything.
+ *    2. Shows remaining popups one at a time, injecting a footer with
  *       "Next" + "Skip all" so users can click through or bail in one go.
- *    4. Any close action (Next, Skip all, X, overlay click, Maybe Later,
- *       primary CTA) marks the current popup as seen. Skip all also marks
- *       every remaining popup as seen in one shot.
- *    5. NEW popups added in future versions are NOT auto-dismissed by a
- *       previous "Skip all" — only ids the user has actually been shown
- *       (or that pre-existed at migration time) get persisted as seen. */
+ *    3. Persistence is opt-in: a dismissal is written to the account ONLY when
+ *       the user ticks that modal's "Don't show again" box. Any plain close
+ *       (Next, Skip all, X, overlay click, Maybe Later, primary CTA) is
+ *       session-only — the popup returns on the next login. */
 _initWelcomePopups() {
-  // ── Load + migrate dismissal state ──
-  let seen = {};
-  try { seen = JSON.parse(localStorage.getItem('haven_welcome_seen_v1') || '{}') || {}; } catch { seen = {}; }
+  // Run the queue at most once per page load.
+  if (this._welcomePopupsStarted) return;
 
-  // Legacy key migration. Run once on first load after upgrade. Stays
-  // correct on subsequent loads because we only ever set, never clear.
-  if (localStorage.getItem('haven_desktop_promo_dismissed') && !seen.desktop_app_promo) {
-    seen.desktop_app_promo = 1;
+  // Dismissal state lives server-side in user_preferences (fetched via
+  // get-preferences). Wait for it to land before deciding what to show —
+  // otherwise a hardened browser (which wipes localStorage every session and
+  // so never had a client-side record anyway) would re-show a modal the user
+  // already told us to stop showing. No localStorage is read or written here.
+  if (!this._userPrefs) {
+    this.socket.once('preferences', () => this._initWelcomePopups());
+    return;
   }
-  if (localStorage.getItem('haven_ab_promo_nodisplay') && !seen.android_app_promo) {
-    seen.android_app_promo = 1;
-  }
-  if (localStorage.getItem('haven_multi_role_notice_v1')) {
-    // The multi-role popup was removed in 3.22.0; mark as seen defensively
-    // so the migration path is consistent even though the popup is gone.
-    seen.multi_role_notice_v1 = 1;
-  }
+  this._welcomePopupsStarted = true;
 
-  const persist = () => {
-    try { localStorage.setItem('haven_welcome_seen_v1', JSON.stringify(seen)); } catch {}
-  };
-  persist();
+  // One-time carry-over from the localStorage flags older builds used, so an
+  // account that already closed a promo or the recovery notice is not shown
+  // it again after upgrading. Runs once per browser; the account pref is the
+  // record from then on.
+  try {
+    if (!localStorage.getItem('haven_promo_prefs_migrated')) {
+      let seen = {};
+      try { seen = JSON.parse(localStorage.getItem('haven_welcome_seen_v1') || '{}') || {}; } catch { seen = {}; }
+      const legacy = {
+        promo_seen_desktop: seen.desktop_app_promo || localStorage.getItem('haven_desktop_promo_dismissed'),
+        promo_seen_android: seen.android_app_promo || localStorage.getItem('haven_ab_promo_nodisplay'),
+        recovery_notice_seen: localStorage.getItem('haven_recovery_notice_v1'),
+      };
+      for (const [prefKey, wasDismissed] of Object.entries(legacy)) {
+        if (!wasDismissed || this._userPrefs[prefKey] === 'true') continue;
+        this._userPrefs[prefKey] = 'true';
+        this.socket.emit('set-preference', { key: prefKey, value: 'true' });
+      }
+      // The server already answered get-recovery-notice-state for this
+      // connection before the pref landed, so cover this session by hand.
+      if (legacy.recovery_notice_seen) this._recoveryNoticeShown = true;
+      localStorage.setItem('haven_promo_prefs_migrated', '1');
+    }
+  } catch { /* storage unavailable: nothing to carry over */ }
 
+  this._runWelcomePromoQueue();
+},
+
+/** The app-promo sequencer. */
+_runWelcomePromoQueue() {
   // ── Build the queue ──
-  // Each entry: { id, modalId, shouldShow }. Anything in `seen` is filtered
-  // out. shouldShow() handles per-platform skips (e.g. desktop promo is
-  // useless inside the desktop app itself).
+  // Each entry: { id, modalId, prefKey, checkboxId, shouldShow }. A popup is
+  // filtered out only if its persisted "Don't show again" pref is set.
+  // shouldShow() handles per-platform skips (e.g. desktop promo is useless
+  // inside the desktop app itself).
   const isMobile = /Android|iPhone|iPad|iPod|Mobile|Tablet/i.test(navigator.userAgent);
   const isElectron = !!window.havenDesktop || navigator.userAgent.includes('Electron');
 
@@ -257,16 +322,20 @@ _initWelcomePopups() {
     {
       id: 'desktop_app_promo',
       modalId: 'desktop-promo-modal',
+      prefKey: 'promo_seen_desktop',
+      checkboxId: 'desktop-promo-dismiss-check',
       shouldShow: () => !isElectron && !isMobile,
     },
     {
       id: 'android_app_promo',
       modalId: 'android-beta-modal',
+      prefKey: 'promo_seen_android',
+      checkboxId: 'android-beta-dismiss-check',
       shouldShow: () => true,
     },
   ];
 
-  const queue = allEntries.filter(e => !seen[e.id] && e.shouldShow() && document.getElementById(e.modalId));
+  const queue = allEntries.filter(e => this._userPrefs[e.prefKey] !== 'true' && e.shouldShow() && document.getElementById(e.modalId));
   if (!queue.length) return;
 
   // ── Sequencer ──
@@ -288,13 +357,13 @@ _initWelcomePopups() {
     const remaining = queue.length - idx - 1;
     const footer = document.createElement('div');
     footer.className = 'haven-welcome-queue-footer';
-    footer.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border, rgba(255,255,255,0.08));font-size:12px;color:var(--text-muted, #888);';
+    footer.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border, rgba(255,255,255,0.08));font-size:0.75rem;color:var(--text-muted, #888);';
     const isLast = remaining === 0;
     footer.innerHTML = `
-      <span class="haven-welcome-queue-pos">${idx + 1} of ${queue.length}</span>
+      <span class="haven-welcome-queue-pos">${t('platform.welcome.position', { current: idx + 1, total: queue.length })}</span>
       <span style="display:flex;align-items:center;gap:8px;">
-        ${queue.length > 1 && !isLast ? `<button type="button" class="haven-welcome-queue-skip" style="background:none;border:none;color:var(--text-muted, #888);text-decoration:underline;cursor:pointer;font-size:12px;padding:4px 8px;">Skip all</button>` : ''}
-        <button type="button" class="haven-welcome-queue-next" style="background:var(--accent, #5865f2);color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px;font-weight:600;">${isLast ? 'Done' : 'Next'}</button>
+        ${queue.length > 1 && !isLast ? `<button type="button" class="haven-welcome-queue-skip" style="background:none;border:none;color:var(--text-muted, #888);text-decoration:underline;cursor:pointer;font-size:0.75rem;padding:4px 8px;">${t('platform.welcome.skip_all')}</button>` : ''}
+        <button type="button" class="haven-welcome-queue-next" style="background:var(--accent, #5865f2);color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:0.75rem;font-weight:600;">${t(isLast ? 'modals.common.done' : 'platform.welcome.next')}</button>
       </span>
     `;
     // Find the deepest single-child div to append into; falls back gracefully
@@ -310,9 +379,10 @@ _initWelcomePopups() {
     const skipBtn = footer.querySelector('.haven-welcome-queue-skip');
     if (skipBtn) {
       skipBtn.addEventListener('click', () => {
-        // Mark everything still in the queue as seen, then close.
-        for (let i = idx; i < queue.length; i++) seen[queue[i].id] = 1;
-        persist();
+        // Terminate the queue for this session. Nothing is persisted — only an
+        // explicit "Don't show again" tick (handled on close below) survives to
+        // the next login. The current modal's own checkbox is still honoured
+        // because hiding it fires the close handler.
         idx = queue.length; // force terminate
         modal.style.display = 'none';
       });
@@ -329,11 +399,17 @@ _initWelcomePopups() {
       if (d === 'none' || d === '') {
         try { activeObserver.disconnect(); } catch {}
         activeObserver = null;
-        // Always mark the current entry seen on close (the user has now
-        // been shown it; we don't want to nag them every reload). New ids
-        // added in future versions are not affected.
-        seen[entry.id] = 1;
-        persist();
+        // Persist a dismissal only when the user ticked this modal's "Don't
+        // show again" box. A plain close (Next / Done / Maybe Later / overlay)
+        // is session-only: the queue has already advanced past it here, but it
+        // returns on the next login. This is deliberate — see commit rationale.
+        const checkbox = document.getElementById(entry.checkboxId);
+        if (checkbox && checkbox.checked) {
+          this.socket.emit('set-preference', { key: entry.prefKey, value: 'true' });
+          if (this._userPrefs) this._userPrefs[entry.prefKey] = 'true';
+          // The Android promo's box retires the top-bar banner too (#5594).
+          if (entry.prefKey === 'promo_seen_android') this._syncAndroidBanner?.();
+        }
         idx++;
         // Tiny delay so the close animation / focus shift completes before
         // the next one opens — feels less jarring than back-to-back flashes.
@@ -347,6 +423,201 @@ _initWelcomePopups() {
   setTimeout(showCurrent, 1200);
 },
 
+// ── Persisted timezone / time-format ────────────────────────────────────
+// Storage (server-side user_preferences): `timezone` is an IANA zone id, so
+// Intl resolves DST per-instant rather than freezing an offset; `time_format`
+// is '12' or '24'. Nothing is asked at login: the modal opens from Settings,
+// Localization, Configure Time, and until someone saves a zone every time
+// follows the browser as before.
+
+/** Common IANA zones for the rare engine without Intl.supportedValuesOf. */
+_fallbackTimezones() {
+  return [
+    'UTC', 'America/Los_Angeles', 'America/Denver', 'America/Chicago',
+    'America/New_York', 'America/Sao_Paulo', 'Europe/London', 'Europe/Paris',
+    'Europe/Berlin', 'Europe/Moscow', 'Africa/Johannesburg', 'Asia/Dubai',
+    'Asia/Kolkata', 'Asia/Shanghai', 'Asia/Tokyo', 'Australia/Sydney',
+    'Pacific/Auckland',
+  ];
+},
+
+/** Fill the timezone dropdown once from the full IANA list (or the fallback),
+ *  always including the device's own zone and UTC. */
+_buildTimezoneSelect() {
+  const sel = document.getElementById('timezone-select');
+  if (!sel || sel.dataset.built === '1') return;
+  let zones = [];
+  try { zones = (typeof Intl.supportedValuesOf === 'function') ? Intl.supportedValuesOf('timeZone') : []; } catch { zones = []; }
+  if (!zones.length) zones = this._fallbackTimezones();
+  let browserTz = 'UTC';
+  try { browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { /* keep UTC */ }
+  if (browserTz && !zones.includes(browserTz)) zones = [browserTz, ...zones];
+  if (!zones.includes('UTC')) zones = ['UTC', ...zones];
+  const frag = document.createDocumentFragment();
+  for (const z of zones) {
+    const o = document.createElement('option');
+    o.value = z;
+    o.textContent = z.replace(/_/g, ' ');
+    frag.appendChild(o);
+  }
+  sel.innerHTML = '';
+  sel.appendChild(frag);
+  sel.dataset.built = '1';
+},
+
+/** Open the modal. `firstRun` is informational; the buttons behave the same
+ *  whether it was opened automatically or from settings. `onClose` runs after
+ *  Skip / Remind later (Confirm reloads instead). */
+_openTimezoneModal({ firstRun = false, onClose = null } = {}) {
+  const modal = document.getElementById('timezone-modal');
+  if (!modal) { if (onClose) onClose(); return; }
+  this._buildTimezoneSelect();
+  const tzSel = document.getElementById('timezone-select');
+  const fmtSel = document.getElementById('timeformat-select');
+
+  // Seed from the saved prefs, else the browser's current zone / clock.
+  let browserTz = 'UTC';
+  try { browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { /* keep UTC */ }
+  const wantTz = (this._userPrefs && this._userPrefs.timezone) || browserTz;
+  if (tzSel) {
+    tzSel.value = wantTz;
+    if (tzSel.value !== wantTz) { // zone not in the list: add and select it
+      const o = document.createElement('option');
+      o.value = wantTz; o.textContent = wantTz.replace(/_/g, ' ');
+      tzSel.appendChild(o); tzSel.value = wantTz;
+    }
+  }
+  const wantFmt = (this._userPrefs && this._userPrefs.time_format) || (this._tsm24hDefault?.() ? '24' : '12');
+  if (fmtSel) fmtSel.value = wantFmt;
+
+  this._tzModalOnClose = typeof onClose === 'function' ? onClose : null;
+
+  // Erase only shows once a zone is saved; it clears the saved zone and
+  // returns the account to the browser default.
+  const hasTz = !!(this._userPrefs && this._userPrefs.timezone);
+  const eraseBtn = document.getElementById('timezone-erase-btn');
+  if (eraseBtn) eraseBtn.style.display = hasTz ? '' : 'none';
+
+  if (!this._tzModalWired) {
+    this._tzModalWired = true;
+    const live = () => this._updateTimezonePreview();
+    tzSel?.addEventListener('change', live);
+    fmtSel?.addEventListener('change', live);
+    document.getElementById('timezone-erase-btn')?.addEventListener('click', () => this._resolveTimezoneModal('erase'));
+    document.getElementById('timezone-cancel-btn')?.addEventListener('click', () => this._resolveTimezoneModal('cancel'));
+    document.getElementById('timezone-confirm-btn')?.addEventListener('click', () => this._resolveTimezoneModal('confirm'));
+    // A click on the backdrop closes without saving, like Cancel.
+    modal.addEventListener('click', (e) => { if (e.target === modal) this._resolveTimezoneModal('cancel'); });
+  }
+
+  this._updateTimezonePreview();
+  // When opened from the settings panel, close it first so this modal is not
+  // stacked behind it (both share the same modal-overlay z-index). Harmless on
+  // the first-run path, where settings is already closed.
+  const settings = document.getElementById('settings-modal');
+  if (settings) settings.style.display = 'none';
+  modal.style.display = 'flex';
+},
+
+/** Live sample of the chosen zone + format, refreshed on every change. */
+_updateTimezonePreview() {
+  const el = document.getElementById('timezone-preview');
+  if (!el) return;
+  const tz = document.getElementById('timezone-select')?.value;
+  const fmt = document.getElementById('timeformat-select')?.value;
+  const opts = { dateStyle: 'full', timeStyle: 'medium' };
+  if (tz) opts.timeZone = tz;
+  if (fmt === '12') opts.hour12 = true;
+  else if (fmt === '24') opts.hour12 = false;
+  try { el.textContent = new Date().toLocaleString(this._timeLocale?.(), opts); }
+  catch { el.textContent = new Date().toLocaleString(); }
+},
+
+/** Handle one of the three buttons. */
+_resolveTimezoneModal(action) {
+  const modal = document.getElementById('timezone-modal');
+  const tz = document.getElementById('timezone-select')?.value;
+  const fmt = document.getElementById('timeformat-select')?.value === '24' ? '24' : '12';
+  const onClose = this._tzModalOnClose; this._tzModalOnClose = null;
+  if (modal) modal.style.display = 'none';
+
+  if (action === 'confirm') {
+    // Saves both prefs, then reloads so every already-rendered timestamp picks
+    // up the new zone/format. onClose (the promo queue) is intentionally not
+    // run — the reload re-evaluates it cleanly afterwards.
+    this._saveTimezonePrefs(tz, fmt);
+    return;
+  }
+  if (action === 'erase') {
+    // Clear the saved zone/format and reload so every timestamp reverts to the
+    // browser default. onClose is not run — the reload re-evaluates cleanly.
+    this._eraseTimezonePrefs();
+    return;
+  }
+  // Cancel persists nothing.
+  if (onClose) onClose();
+},
+
+/** Delete the saved timezone/format, then reload once the server confirms. */
+_eraseTimezonePrefs() {
+  this._userPrefs = this._userPrefs || {};
+  delete this._userPrefs.timezone;
+  delete this._userPrefs.time_format;
+  this._updateTimezoneSummary?.();
+
+  const reload = () => { try { location.reload(); } catch { /* non-browser */ } };
+  if (!this.socket) { reload(); return; }
+
+  // Delete both rows and reload once their deletions are acknowledged.
+  const pending = new Set(['timezone', 'time_format']);
+  let timer = null;
+  const finish = () => { this.socket.off('preference-deleted', onDeleted); clearTimeout(timer); reload(); };
+  const onDeleted = ({ key } = {}) => { pending.delete(key); if (!pending.size) finish(); };
+  this.socket.on('preference-deleted', onDeleted);
+  timer = setTimeout(finish, 1500);
+  this.socket.emit('delete-preference', { key: 'timezone' });
+  this.socket.emit('delete-preference', { key: 'time_format' });
+},
+
+/** Persist timezone + format, wait for the server to confirm, then reload. */
+_saveTimezonePrefs(tz, fmt) {
+  const zone = (typeof tz === 'string' && tz) ? tz : null;
+  const format = fmt === '24' ? '24' : '12';
+  this._userPrefs = this._userPrefs || {};
+  if (zone) this._userPrefs.timezone = zone;
+  this._userPrefs.time_format = format;
+  this._updateTimezoneSummary?.();
+
+  const reload = () => { try { location.reload(); } catch { /* non-browser */ } };
+  if (!this.socket || !zone) { reload(); return; }
+
+  // Reload only once the writes are acknowledged, so a fresh get-preferences
+  // after the reload is guaranteed to return them. A short timeout guards
+  // against a dropped ack so we never hang on this screen.
+  const pending = new Set(['timezone', 'time_format']);
+  let timer = null;
+  const finish = () => { this.socket.off('preference-saved', onSaved); clearTimeout(timer); reload(); };
+  const onSaved = ({ key } = {}) => { pending.delete(key); if (!pending.size) finish(); };
+  this.socket.on('preference-saved', onSaved);
+  timer = setTimeout(finish, 1500);
+  this.socket.emit('set-preference', { key: 'timezone', value: zone });
+  this.socket.emit('set-preference', { key: 'time_format', value: format });
+},
+
+/** Reflect the saved (or unset) state in the settings row. */
+_updateTimezoneSummary() {
+  const el = document.getElementById('timezone-current-summary');
+  if (!el) return;
+  const tz = this._userPrefs && this._userPrefs.timezone;
+  const fmt = this._userPrefs && this._userPrefs.time_format;
+  if (tz) {
+    const fmtLabel = fmt ? ` · ${t(fmt === '24' ? 'settings.timezone_section.fmt_24' : 'settings.timezone_section.fmt_12')}` : '';
+    el.textContent = tz.replace(/_/g, ' ') + fmtLabel;
+  } else {
+    el.textContent = t('settings.timezone_section.not_set');
+  }
+},
+
 async _setupDesktopShortcuts() {
   if (!window.havenDesktop?.shortcuts) return;
   // Guard against duplicate listener attachment (called each time the nav item is clicked)
@@ -358,6 +629,8 @@ async _setupDesktopShortcuts() {
     'ArrowLeft': 'Left', 'ArrowRight': 'Right',
     'Escape': 'Escape', 'Tab': 'Tab', 'Enter': 'Return',
     'Backspace': 'Backspace', 'Delete': 'Delete',
+    // Electron spells the lock keys this way; the browser reports CapsLock.
+    'CapsLock': 'Capslock', 'NumLock': 'Numlock', 'ScrollLock': 'Scrolllock',
     'Home': 'Home', 'End': 'End', 'PageUp': 'PageUp', 'PageDown': 'PageDown',
   };
 
@@ -383,14 +656,14 @@ async _setupDesktopShortcuts() {
       // Already recording — cancel
       if (recordBtn.classList.contains('recording')) {
         recordBtn.classList.remove('recording');
-        recordBtn.textContent = 'Record';
+        recordBtn.textContent = t('platform.shortcuts.record');
         keyEl.classList.remove('recording-label');
         // Re-register shortcuts after cancelling recording
         window.havenDesktop.shortcuts.setConfig({}).catch(() => {});
         return;
       }
       recordBtn.classList.add('recording');
-      recordBtn.textContent = 'Press key…';
+      recordBtn.textContent = t('platform.shortcuts.press_key');
       keyEl.classList.add('recording-label');
       keyEl.textContent = '…';
 
@@ -418,7 +691,7 @@ async _setupDesktopShortcuts() {
         document.removeEventListener('keyup', onKeyUp, true);
         document.removeEventListener('mousedown', onMouseDown, true);
         recordBtn.classList.remove('recording');
-        recordBtn.textContent = 'Record';
+        recordBtn.textContent = t('platform.shortcuts.record');
         keyEl.classList.remove('recording-label');
         // The desktop IPC handler reports per-shortcut outcome:
         //   new shape: { mute: { ok, reason, accel } }   (Desktop 1.4.20+)
@@ -438,11 +711,11 @@ async _setupDesktopShortcuts() {
             const reason = (typeof outcome === 'object' && outcome.reason) || '';
             let msg;
             if (reason === 'uiohook-unavailable') {
-              msg = `Couldn't activate "${accel}" — that bind needs the native input hook (uiohook), which isn't loaded on this machine. Launch Haven from a terminal to see install steps, or pick a regular key combo (e.g. Ctrl+Shift+P) instead.`;
+              msg = t('platform.shortcuts.native_hook_error', { shortcut: accel });
             } else if (reason === 'conflict') {
-              msg = `Couldn't register "${accel}" — that combo is already in use by Windows or another app. Try a different one.`;
+              msg = t('platform.shortcuts.conflict', { shortcut: accel });
             } else {
-              msg = 'Failed to register shortcut — it may already be in use, or the desktop app version doesn\'t support this binding type yet.';
+              msg = t('platform.shortcuts.register_failed');
             }
             this._showToast?.(msg, 'error');
             return;
@@ -452,7 +725,7 @@ async _setupDesktopShortcuts() {
         } catch (err) {
           await window.havenDesktop.shortcuts.setConfig({ [action]: config[action] || '' }).catch(() => {});
           keyEl.textContent = formatAccel(config[action] || '');
-          this._showToast?.('Failed to register shortcut — it may already be in use, or the desktop app version doesn\'t support this binding type yet.', 'error');
+          this._showToast?.(t('platform.shortcuts.register_failed'), 'error');
         }
       };
 
@@ -524,7 +797,7 @@ async _setupDesktopShortcuts() {
         await window.havenDesktop.shortcuts.setConfig({ pttMode: pttModeSel.value });
         config.pttMode = pttModeSel.value;
       } catch (err) {
-        this._showToast?.('Failed to save PTT mode — desktop app may need an update.', 'error');
+        this._showToast?.(t('platform.shortcuts.ptt_save_failed'), 'error');
       }
     });
   }
@@ -588,7 +861,7 @@ async _setupDesktopAppPrefs() {
     try {
       const res = await window.havenDesktop.prefs.setForceSDR(sdrEl.checked);
       if (res?.requiresRestart) {
-        this._showToast('Color profile updated. Restart Haven Desktop to apply.', 'info');
+        this._showToast(t('platform.desktop.color_updated'), 'info');
       }
     } catch { sdrEl.checked = !sdrEl.checked; }
   });
@@ -605,7 +878,7 @@ async _setupDesktopAppPrefs() {
     try {
       const res = await window.havenDesktop.prefs.setDisableGpuVsync(gpuVsyncEl.checked);
       if (res?.requiresRestart) {
-        this._showToast?.('GPU vsync setting updated. Restart Haven Desktop to apply.', 'info');
+        this._showToast?.(t('platform.desktop.vsync_updated'), 'info');
       }
     } catch { gpuVsyncEl.checked = !gpuVsyncEl.checked; }
   });
@@ -614,7 +887,7 @@ async _setupDesktopAppPrefs() {
     try {
       const res = await window.havenDesktop.prefs.setUnlimitFrameRate(unlimitFpsEl.checked);
       if (res?.requiresRestart) {
-        this._showToast?.('Frame-rate cap setting updated. Restart Haven Desktop to apply.', 'info');
+        this._showToast?.(t('platform.desktop.frame_cap_updated'), 'info');
       }
     } catch { unlimitFpsEl.checked = !unlimitFpsEl.checked; }
   });
@@ -649,7 +922,7 @@ async _initE2E() {
       // If keys were auto-reset during init (backup unwrap failed), notify
       if (this.e2e.keysWereReset) {
         setTimeout(() => {
-          this._appendE2ENotice(`🔄 Encryption keys were regenerated — ${new Date().toLocaleString()}. Previous encrypted messages may no longer be decryptable.`);
+          this._appendE2ENotice(t('platform.e2e.keys_regenerated', { date: this._fmtDateTime(new Date()) }));
         }, 500);
       }
     } else {
@@ -727,13 +1000,13 @@ async _e2eSetupListeners() {
         // Re-fetch partner key so any in-view DM messages can decrypt immediately.
         const _syncCh = this.channels && this.channels.find(c => c.code === this.currentChannel);
         if (_syncCh && _syncCh.is_dm) await this._fetchDMPartnerKey(_syncCh);
-        this._showToast('Encryption keys synced from another device', 'success');
+        this._showToast(t('platform.e2e.keys_synced_device'), 'success');
       } else {
         this._showToast(this._e2eSyncErrorMessage(synced.reason), 'error', null, 8000);
       }
     } else {
       // No wrapping key — need password
-      this._showToast('Encryption keys changed on another device — re-enter your password to sync', 'error');
+      this._showToast(t('platform.e2e.keys_changed'), 'error');
       this._e2ePwPendingAction = () => this._syncE2EFromServer();
       this._showE2EPasswordModal();
     }
@@ -757,7 +1030,7 @@ async _e2eSetupListeners() {
       // Store it so it survives the message re-render triggered by _retryDecryptForUser.
       const ch = this.channels.find(c => c.code === this.currentChannel);
       if (ch && ch.is_dm && ch.dm_target && ch.dm_target.id === data.userId) {
-        this._pendingE2ENotice = `🔄 ${ch.dm_target.username}'s encryption keys changed — ${new Date().toLocaleString()}. Previously encrypted messages may no longer be decryptable.`;
+        this._pendingE2ENotice = t('platform.e2e.partner_keys_changed', { name: ch.dm_target.username, date: this._fmtDateTime(new Date()) });
       }
     }
 
@@ -778,7 +1051,7 @@ async _e2eSetupListeners() {
       if (synced.ok) {
         await this.e2e.publishKey(this.socket);
         this._dmPublicKeys = {};
-        this._showToast('Encryption keys synced', 'success');
+        this._showToast(t('platform.e2e.keys_synced'), 'success');
         // Re-fetch messages if in a DM to re-decrypt
         const ch = this.channels.find(c => c.code === this.currentChannel);
         if (ch && ch.is_dm) {
@@ -799,7 +1072,7 @@ async _e2eSetupListeners() {
       }
     }
     // No wrapping key or sync failed — prompt for password
-    this._showToast('Encryption keys changed on another device — re-enter your password to sync', 'error');
+    this._showToast(t('platform.e2e.keys_changed'), 'error');
     this._e2ePwPendingAction = () => this._syncE2EFromServer();
     this._showE2EPasswordModal();
   });
@@ -831,19 +1104,19 @@ async _recoverE2EFromBackup() {
       this.e2e = new HavenE2E();
       await this.e2e._openDB();
     } else {
-      this._showToast('E2E module not available', 'error');
+      this._showToast(t('platform.e2e.module_unavailable'), 'error');
       return;
     }
   }
 
-  this._showToast('Recovering encryption keys from backup...', 'info');
+  this._showToast(t('platform.e2e.recovering'), 'info');
 
   const synced = await this.e2e.syncFromServer(this.socket, wrappingKey);
   if (synced.ok) {
     await this.e2e.publishKey(this.socket);
     this._dmPublicKeys = {};
-    this._appendE2ENotice(`\ud83d\udd04 Encryption keys recovered from backup \u2014 ${new Date().toLocaleString()}.`);
-    this._showToast('Encryption keys recovered successfully', 'success');
+    this._appendE2ENotice(t('platform.e2e.keys_recovered_notice', { date: this._fmtDateTime(new Date()) }));
+    this._showToast(t('platform.e2e.keys_recovered'), 'success');
 
     // Re-fetch messages if currently in a DM so they attempt decryption again.
     const ch = this.channels && this.channels.find(c => c.code === this.currentChannel);
@@ -874,16 +1147,16 @@ async _recoverE2EFromBackup() {
 _e2eSyncErrorMessage(reason) {
   switch (reason) {
     case 'no-backup':
-      return 'No encrypted key backup exists on the server for this account yet. If this is a brand-new account, send a DM to create one. Do NOT reset unless you are certain — reset destroys all existing encrypted DMs.';
+      return t('platform.e2e.errors.no_backup');
     case 'bad-password':
-      return 'Backup could not be decrypted. The server backup was encrypted with a different password than the one in use now. Do NOT reset — that destroys all existing DMs. Try logging out and back in with the original account password, or contact support.';
+      return t('platform.e2e.errors.bad_password');
     case 'network':
-      return 'Could not reach the server to fetch the encrypted backup. Check your connection and try again.';
+      return t('platform.e2e.errors.network');
     case 'no_wrapping_key':
     case 'bad-password-empty':
-      return 'No password available for decryption. Re-enter your password and try again.';
+      return t('platform.e2e.errors.no_password');
     default:
-      return 'Recovery failed due to an unexpected error. Check the console for details. Do NOT reset unless you have no encrypted DMs to preserve.';
+      return t('platform.e2e.errors.recovery_failed');
   }
 },
 
@@ -898,7 +1171,7 @@ async _syncE2EFromServer() {
   if (synced.ok) {
     await this.e2e.publishKey(this.socket);
     this._dmPublicKeys = {};
-    this._showToast('Encryption keys synced from another device', 'success');
+    this._showToast(t('platform.e2e.keys_synced_device'), 'success');
     // Re-fetch messages if in a DM
     const ch = this.channels.find(c => c.code === this.currentChannel);
     if (ch && ch.is_dm) {
@@ -946,7 +1219,18 @@ _showE2EPasswordModal() {
   errorEl.style.display = 'none';
   errorEl.textContent = '';
   submitBtn.disabled = false;
-  submitBtn.textContent = 'Unlock';
+  submitBtn.textContent = t('platform.e2e.unlock');
+
+  // (#12) An SSO account has no Haven password — its key is wrapped with the
+  // separate encryption passphrase set at first sign-in. Ask for that instead,
+  // or the prompt tells the user to enter a password they do not have.
+  if (this.user?.isSso) {
+    const titleEl = modal.querySelector('h3 span');
+    const descEl = modal.querySelector('.e2e-pw-desc');
+    if (titleEl) titleEl.textContent = t('platform.e2e.passphrase_required');
+    if (descEl) descEl.textContent = t('platform.e2e.passphrase_desc');
+    input.placeholder = t('platform.e2e.passphrase_placeholder');
+  }
 
   // Check rate limit
   const now = Date.now();
@@ -954,7 +1238,7 @@ _showE2EPasswordModal() {
   if (this._e2ePwAttempts.length >= 5) {
     const oldest = this._e2ePwAttempts[0];
     const waitSec = Math.ceil((60_000 - (now - oldest)) / 1000);
-    errorEl.textContent = `Too many attempts. Try again in ${waitSec}s.`;
+    errorEl.textContent = t('platform.e2e.too_many_attempts', { seconds: waitSec });
     errorEl.style.display = 'block';
     submitBtn.disabled = true;
   }
@@ -974,7 +1258,7 @@ async _submitE2EPassword() {
 
   const password = input.value;
   if (!password) {
-    errorEl.textContent = 'Please enter your password.';
+    errorEl.textContent = t(this.user?.isSso ? 'platform.e2e.enter_passphrase' : 'platform.e2e.enter_password');
     errorEl.style.display = 'block';
     return;
   }
@@ -985,7 +1269,7 @@ async _submitE2EPassword() {
   if (this._e2ePwAttempts.length >= 5) {
     const oldest = this._e2ePwAttempts[0];
     const waitSec = Math.ceil((60_000 - (now - oldest)) / 1000);
-    errorEl.textContent = `Too many attempts. Try again in ${waitSec}s.`;
+    errorEl.textContent = t('platform.e2e.too_many_attempts', { seconds: waitSec });
     errorEl.style.display = 'block';
     submitBtn.disabled = true;
     return;
@@ -995,31 +1279,38 @@ async _submitE2EPassword() {
   this._e2ePwAttempts.push(now);
 
   submitBtn.disabled = true;
-  submitBtn.textContent = 'Verifying…';
+  submitBtn.textContent = t('platform.e2e.verifying');
   errorEl.style.display = 'none';
 
   try {
-    // Verify password on server
-    const resp = await fetch('/api/auth/verify-password', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: this.user.username, password })
-    });
-    const data = await resp.json();
+    // (#12) SSO accounts have nothing on the server to check this against —
+    // the passphrase is deliberately never sent anywhere, so the server has no
+    // copy and no hash of it. Unwrapping the key IS the check: a wrong
+    // passphrase fails the AES-GCM auth tag below, and init() leaves the
+    // existing backup untouched rather than regenerating over it.
+    const data = this.user?.isSso
+      ? { valid: true }
+      : await (await fetch('/api/auth/verify-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: this.user.username, password })
+        })).json();
 
     if (!data.valid) {
       const remaining = 5 - this._e2ePwAttempts.length;
-      errorEl.textContent = `Incorrect password. ${remaining > 0 ? remaining + ' attempt' + (remaining !== 1 ? 's' : '') + ' remaining.' : 'Locked out for 60s.'}`;
+      errorEl.textContent = remaining > 0
+        ? t(remaining === 1 ? 'platform.e2e.incorrect_one' : 'platform.e2e.incorrect_other', { count: remaining })
+        : t('platform.e2e.locked_out');
       errorEl.style.display = 'block';
       submitBtn.disabled = remaining <= 0;
-      submitBtn.textContent = 'Unlock';
+      submitBtn.textContent = t('platform.e2e.unlock');
       input.value = '';
       input.focus();
       return;
     }
 
     // Password correct — derive wrapping key and init E2E
-    submitBtn.textContent = 'Unlocking…';
+    submitBtn.textContent = t('platform.e2e.unlocking');
     const wrappingKey = await HavenE2E.deriveWrappingKey(password);
     sessionStorage.setItem('haven_e2e_wrap', wrappingKey);
     this._e2eWrappingKey = wrappingKey;
@@ -1041,7 +1332,7 @@ async _submitE2EPassword() {
       // Set up E2E listeners (handles publish + conflict resolution)
       await this._e2eSetupListeners();
       this._closeE2EPasswordModal();
-      this._showToast('Encryption unlocked', 'success');
+      this._showToast(t('platform.e2e.unlocked'), 'success');
 
       // Execute the pending action
       if (this._e2ePwPendingAction) {
@@ -1050,17 +1341,17 @@ async _submitE2EPassword() {
         action();
       }
     } else {
-      errorEl.textContent = 'Failed to initialize encryption. Please try again.';
+      errorEl.textContent = t('platform.e2e.init_failed');
       errorEl.style.display = 'block';
       submitBtn.disabled = false;
-      submitBtn.textContent = 'Unlock';
+      submitBtn.textContent = t('platform.e2e.unlock');
     }
   } catch (err) {
     console.error('[E2E] Password prompt error:', err);
-    errorEl.textContent = 'An error occurred. Please try again.';
+    errorEl.textContent = t('platform.e2e.unexpected_error');
     errorEl.style.display = 'block';
     submitBtn.disabled = false;
-    submitBtn.textContent = 'Unlock';
+    submitBtn.textContent = t('platform.e2e.unlock');
   }
 },
 
@@ -1128,13 +1419,13 @@ async _fetchDMPartnerKey(channel) {
 async _showE2EVerification() {
   const partner = this._getE2EPartner();
   if (!partner || !this.e2e?.ready) {
-    this._showToast('No partner key available — the other user may not have E2E set up yet', 'error');
+    this._showToast(t('platform.e2e.no_partner_key'), 'error');
     return;
   }
   try {
     const code = await this.e2e.getVerificationCode(this.e2e.publicKeyJwk, partner.publicKeyJwk);
     const ch = this.channels.find(c => c.code === this.currentChannel);
-    const partnerName = ch?.dm_target?.username || 'Partner';
+    const partnerName = ch?.dm_target?.username || t('platform.e2e.partner');
 
     let overlay = document.getElementById('e2e-verify-overlay');
     if (!overlay) {
@@ -1149,10 +1440,10 @@ async _showE2EVerification() {
     overlay.innerHTML = `
       <div class="modal" style="max-width:420px;text-align:center">
         <h3 style="margin-bottom:8px">🔐 ${t('header.verify_encryption')}</h3>
-        <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px">
+        <p style="font-size:0.8125rem;color:var(--text-muted);margin-bottom:16px">
           ${t('modals.e2e_verify.desc', { name: this._escapeHtml(partnerName) })}
         </p>
-        <div class="e2e-safety-number" style="font-family:monospace;font-size:18px;letter-spacing:2px;line-height:2;padding:16px;background:var(--bg-secondary);border-radius:var(--radius-md);border:1px solid var(--border);user-select:all;word-break:break-all">${code}</div>
+        <div class="e2e-safety-number" style="font-family:monospace;font-size:1.125rem;letter-spacing:2px;line-height:2;padding:16px;background:var(--bg-secondary);border-radius:var(--radius-md);border:1px solid var(--border);user-select:all;word-break:break-all">${code}</div>
         <div style="margin-top:16px;display:flex;gap:8px;justify-content:center">
           <button class="btn-sm btn-accent" id="e2e-copy-code-btn">${t('modals.e2e_verify.copy_btn')}</button>
           <button class="btn-sm" id="e2e-close-verify-btn">${t('modals.common.close')}</button>
@@ -1160,7 +1451,7 @@ async _showE2EVerification() {
       </div>
     `;
     overlay.querySelector('#e2e-copy-code-btn').addEventListener('click', () => {
-      const markCopied = () => { overlay.querySelector('#e2e-copy-code-btn').textContent = 'Copied!'; };
+      const markCopied = () => { overlay.querySelector('#e2e-copy-code-btn').textContent = t('common.copied'); };
       navigator.clipboard.writeText(code).then(markCopied).catch(() => {
         try {
           const ta = document.createElement('textarea');
@@ -1179,7 +1470,7 @@ async _showE2EVerification() {
     });
     overlay.style.display = 'flex';
   } catch (err) {
-    this._showToast('Could not generate verification code', 'error');
+    this._showToast(t('platform.e2e.verification_failed'), 'error');
     console.error('[E2E] Verification error:', err);
   }
 },
@@ -1214,7 +1505,7 @@ _showE2EResetConfirmation() {
         ${t('modals.e2e_reset.warning_permanent')}
       </div>
       <div class="e2e-confirm-type">
-        <p style="font-size:13px;color:var(--text-muted);margin-bottom:8px">${t('modals.e2e_reset.type_confirm')}</p>
+        <p style="font-size:0.8125rem;color:var(--text-muted);margin-bottom:8px">${t('modals.e2e_reset.type_confirm')}</p>
         <input type="text" id="e2e-reset-confirm-input" placeholder="${t('modals.e2e_reset.confirm_placeholder')}" autocomplete="off" spellcheck="false">
       </div>
       <div class="e2e-reset-actions">
@@ -1273,7 +1564,7 @@ async _performE2EKeyReset() {
       this.e2e = new HavenE2E();
       await this.e2e._openDB();
     } else {
-      this._showToast('E2E module not available', 'error');
+      this._showToast(t('platform.e2e.module_unavailable'), 'error');
       return;
     }
   }
@@ -1281,7 +1572,7 @@ async _performE2EKeyReset() {
   try {
     const ok = await this.e2e.resetKeys(this.socket, wrappingKey);
     if (!ok) {
-      this._showToast('Key reset failed', 'error');
+      this._showToast(t('platform.e2e.reset_failed'), 'error');
       return;
     }
     // Re-publish the new public key (force overwrite)
@@ -1290,13 +1581,13 @@ async _performE2EKeyReset() {
     this._dmPublicKeys = {};
 
     // Post a timestamped notice in the current chat
-    this._appendE2ENotice(`🔄 Encryption keys were reset — ${new Date().toLocaleString()}. Previous encrypted messages in this conversation can no longer be decrypted.`);
+    this._appendE2ENotice(t('platform.e2e.keys_reset_notice', { date: this._fmtDateTime(new Date()) }));
 
-    this._showToast('Encryption keys reset successfully', 'success');
+    this._showToast(t('platform.e2e.keys_reset'), 'success');
     console.log('[E2E] Keys reset by user');
   } catch (err) {
     console.error('[E2E] Key reset error:', err);
-    this._showToast('Key reset failed: ' + err.message, 'error');
+    this._showToast(t('platform.e2e.reset_failed_detail', { error: err.message }), 'error');
   }
 },
 
@@ -1328,7 +1619,7 @@ async _decryptMessages(messages, channelCode = null) {
   for (const msg of messages) {
     if (HavenE2E.isEncrypted(msg.content)) {
       if (!partnerJwk) {
-        msg.content = '[Encrypted — waiting for key...]';
+        msg.content = t('platform.e2e.waiting_for_key');
         msg._e2e = true;
         continue;
       }
@@ -1337,17 +1628,21 @@ async _decryptMessages(messages, channelCode = null) {
         msg.content = plain;
         msg._e2e = true;
       } else {
-        msg.content = '[Encrypted — unable to decrypt]';
+        msg.content = t('platform.e2e.unable_to_decrypt');
         msg._e2e = true;
       }
     }
+    // This is the only place the attachment URLs of an encrypted DM are ever
+    // in the clear. Note them now so deleting the message can tell the server
+    // which files to remove. (#5487)
+    this._rememberDmAttachments?.(msg);
     // Also decrypt the reply preview text if the replied-to message was encrypted
     if (msg.replyContext && msg.replyContext.content && HavenE2E.isEncrypted(msg.replyContext.content)) {
       if (!partnerJwk) {
-        msg.replyContext.content = '[Encrypted — waiting for key...]';
+        msg.replyContext.content = t('platform.e2e.waiting_for_key');
       } else {
         const rplain = await this.e2e.decrypt(msg.replyContext.content, partnerId, partnerJwk);
-        msg.replyContext.content = rplain !== null ? rplain : '[Encrypted — unable to decrypt]';
+        msg.replyContext.content = rplain !== null ? rplain : t('platform.e2e.unable_to_decrypt');
       }
     }
   }
@@ -1402,7 +1697,9 @@ _decryptE2EFiles(root) {
           mediaEl.controls = true;
           mediaEl.preload = 'metadata';
           mediaEl.src = objectUrl;
-          if (isVideo) mediaEl.className = 'file-video';
+          mediaEl.className = isVideo ? 'file-video' : 'file-audio';
+          // The click that decrypted a voice message was a play click (#5665).
+          if (isAudio && /^voice-message/i.test(name)) mediaEl.autoplay = true;
 
           row.classList.remove('e2e-file-loading');
           row.innerHTML = '';
@@ -1418,7 +1715,7 @@ _decryptE2EFiles(root) {
           dlBtn.href = objectUrl;
           dlBtn.download = name;
           dlBtn.className = 'file-download-link';
-          dlBtn.title = `Download ${name}`;
+          dlBtn.title = t('platform.e2e.download_file', { name });
           dlBtn.innerHTML = '⬇';
           infoBar.appendChild(dlBtn);
           row.appendChild(infoBar);
@@ -1437,6 +1734,17 @@ _decryptE2EFiles(root) {
             if (!document.contains(mediaEl)) { URL.revokeObjectURL(objectUrl); obs.disconnect(); }
           });
           obs.observe(document.body, { childList: true, subtree: true });
+
+          // Same undecodable-container fallback the plaintext path gets: the
+          // decrypt succeeded, so the file is fine — the browser just can't play
+          // it. Disconnect the revoke observer first, since the fallback pulls
+          // mediaEl out of the DOM and would otherwise kill the blob URL the
+          // download link is about to point at.
+          mediaEl.addEventListener('error', () => {
+            obs.disconnect();
+            this._fallbackToDownload(mediaEl);
+          }, { once: true });
+
           btn.disabled = false;
           return;
         }
@@ -1449,7 +1757,7 @@ _decryptE2EFiles(root) {
         a.click();
         document.body.removeChild(a);
         setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
-        this._showToast(`Downloaded: ${name}`, 'success');
+        this._showToast(t('platform.e2e.downloaded', { name }), 'success');
       } catch (err) {
         row.classList.add('e2e-file-failed');
       } finally {
@@ -1482,30 +1790,57 @@ _decryptE2EImages(root) {
     img.classList.remove('e2e-img-pending');
     img.classList.add('e2e-img-loading');
     const url = img.dataset.e2eSrc;
-    const mime = img.dataset.e2eMime || 'image/png';
 
     // Only fetch local upload paths to prevent SSRF
     if (!url || !url.startsWith('/uploads/')) {
-      img.alt = '[Invalid encrypted image URL]';
+      img.alt = t('platform.e2e.invalid_image_url');
       img.classList.remove('e2e-img-loading');
       img.classList.add('e2e-img-failed');
       return;
     }
 
-    fetch(url)
-      .then(r => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
-      .then(buf => this.e2e.decryptBytes(new Uint8Array(buf), partner.userId, partner.publicKeyJwk))
-      .then(plain => {
-        const blob = new Blob([plain], { type: mime });
+    this._e2eImageBlob(img, partner)
+      .then(blob => {
+        // Hand the blob back once the browser has decoded it. Without this the
+        // object URL keeps the decrypted bytes alive for the life of the tab,
+        // so scrolling a media-heavy DM slowly locks up hundreds of MB. Same
+        // revoke-on-load pattern the upload previews use. (#5426)
+        img.addEventListener('load', () => {
+          try { URL.revokeObjectURL(img.src); } catch {}
+        }, { once: true });
         img.src = URL.createObjectURL(blob);
         img.classList.remove('e2e-img-loading');
       })
       .catch(() => {
-        img.alt = '[Encrypted image — unable to decrypt]';
+        img.alt = t('platform.e2e.image_decrypt_failed');
         img.classList.remove('e2e-img-loading');
         img.classList.add('e2e-img-failed');
       });
   });
+},
+
+/** The DM partner whose key decrypts media under `node`: the PiP's partner
+ *  when the node lives in the PiP, otherwise the open DM's. */
+_e2ePartnerForNode(node) {
+  const inPip = !!(node && node.closest && node.closest('#dm-pip-messages'));
+  return inPip && this._activeDMPip
+    ? this._getE2EPartnerFor(this._activeDMPip)
+    : this._getE2EPartner();
+},
+
+/** Fetch and decrypt one E2E image to a Blob. The feed uses it to paint, and
+ *  the lightbox uses it again on click, because the feed's object URL is
+ *  revoked as soon as the image has painted (#5426) and a second look needs
+ *  a second decrypt rather than the bytes kept alive on every node. (#5568) */
+_e2eImageBlob(img, partner = null) {
+  const url = img && img.dataset ? img.dataset.e2eSrc : '';
+  const mime = (img && img.dataset && img.dataset.e2eMime) || 'image/png';
+  if (!partner) partner = this._e2ePartnerForNode(img);
+  if (!partner || !url || !url.startsWith('/uploads/')) return Promise.reject(new Error('not decryptable here'));
+  return fetch(url)
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
+    .then(buf => this.e2e.decryptBytes(new Uint8Array(buf), partner.userId, partner.publicKeyJwk))
+    .then(plain => new Blob([plain], { type: mime }));
 },
 
 };
