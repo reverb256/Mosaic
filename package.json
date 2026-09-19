@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@simplewebauthn/server": "^9.0.0",
-    "adm-zip": "^0.6.0",
+    "adm-zip": "^0.6.1",
     "archiver": "^7.0.1",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^12.10.0",
